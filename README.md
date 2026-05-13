@@ -105,6 +105,12 @@ Or start it hidden:
 D:\Projects\media-pipeline\start-watcher.bat
 ```
 
+For a fully silent start with no terminal window, use:
+
+```powershell
+wscript.exe "D:\Projects\media-pipeline\start-watcher-hidden.vbs"
+```
+
 The watcher uses a polling loop:
 
 1. Scan `D:\MediaPipeline\input` every 2 seconds.
@@ -153,16 +159,25 @@ media_YYYYMMDD_HHMMSS_<random>.jpg
 
 ## Always Run Silently At Windows Startup
 
-Use Windows Task Scheduler for the silent setup. This avoids a terminal window and starts the watcher when you sign in.
+Use Windows Task Scheduler with the VBS launcher for the silent setup. This avoids a terminal window and starts the watcher when you sign in.
 
 Run this once from PowerShell:
 
 ```powershell
-$powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$action = New-ScheduledTaskAction -Execute $powershell -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "D:\Projects\media-pipeline\watch-media.ps1"'
+$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument '"D:\Projects\media-pipeline\start-watcher-hidden.vbs"'
 $trigger = New-ScheduledTaskTrigger -AtLogOn
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
 Register-ScheduledTask -TaskName "Media Pipeline Watcher" -Action $action -Trigger $trigger -Settings $settings -Description "Runs the local media pipeline watcher silently at logon."
+```
+
+If the task already exists, replace its launch command:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument '"D:\Projects\media-pipeline\start-watcher-hidden.vbs"'
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
+Set-ScheduledTask -TaskName "Media Pipeline Watcher" -Action $action -Trigger $trigger -Settings $settings
+Start-ScheduledTask -TaskName "Media Pipeline Watcher"
 ```
 
 To remove it later:
@@ -177,7 +192,7 @@ Alternative simple startup-folder method:
 2. Run `shell:startup`.
 3. Put a shortcut to `D:\Projects\media-pipeline\start-watcher.bat` in that folder.
 
-Task Scheduler is preferred because it can start PowerShell hidden without leaving a visible terminal window.
+Task Scheduler plus `start-watcher-hidden.vbs` is preferred because `wscript.exe` can launch PowerShell with no visible console window.
 
 ## Configuration
 

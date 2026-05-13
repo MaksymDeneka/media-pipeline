@@ -31,6 +31,7 @@ $script:ProcessingPaths = [System.Collections.Generic.HashSet[string]]::new([Sys
 $script:FFmpegPath = $null
 $script:FFprobePath = $null
 $script:ExifToolPath = $null
+$script:InstanceMutex = $null
 
 function Initialize-Folders {
     foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir)) {
@@ -669,6 +670,14 @@ function Start-PollingWatcher {
 }
 
 try {
+    $createdNew = $false
+    $script:InstanceMutex = New-Object System.Threading.Mutex($true, "Global\MediaPipelineWatcher", [ref]$createdNew)
+    if (-not $createdNew) {
+        Initialize-Folders
+        Write-Log "Another watcher instance is already running. Exiting this duplicate process." "WARN"
+        exit 0
+    }
+
     Initialize-Folders
     Test-ExternalTools
 
@@ -688,4 +697,14 @@ catch {
     }
 
     exit 1
+}
+finally {
+    if ($script:InstanceMutex) {
+        try {
+            $script:InstanceMutex.ReleaseMutex()
+            $script:InstanceMutex.Dispose()
+        }
+        catch {
+        }
+    }
 }
