@@ -1,8 +1,6 @@
 # media-pipeline
 
-Local Windows media-processing watcher. It watches `D:\MediaPipeline\input`, waits for browser downloads to finish, then creates exactly 3 processed variants per supported media file.
-
-No Google Drive API, Google Drive desktop sync, cloud service, upload, browser automation, account automation, proxies, or social-platform automation is used.
+Local Windows media-processing watcher. It watches `D:\MediaPipeline\input`, waits for browser downloads to finish, then creates processed variants per supported media file.
 
 ## Folder Structure
 
@@ -211,5 +209,3 @@ $StableSeconds = 3
 $TimeoutSeconds = 600
 $PollSeconds = 2
 ```
-
-Keep `$CopiesPerFile = 3` if you want exactly 3 variants for every input.
