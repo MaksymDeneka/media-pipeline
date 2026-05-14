@@ -508,9 +508,30 @@ function Convert-ImageVariant {
     )
 
     $extension = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
-    $outputPath = New-RandomOutputPath -Extension $extension
+    $outputExtension = $extension
+    if ($extension -eq ".heic") {
+        $outputExtension = ".png"
+    }
 
-    Copy-Item -LiteralPath $InputPath -Destination $outputPath -Force
+    $outputPath = New-RandomOutputPath -Extension $outputExtension
+
+    if ($extension -eq ".heic") {
+        $arguments = @(
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", $InputPath,
+            "-frames:v", "1",
+            "-map_metadata", "-1",
+            $outputPath
+        )
+
+        Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+    }
+    else {
+        Copy-Item -LiteralPath $InputPath -Destination $outputPath -Force
+    }
+
     Clear-Metadata -Path $outputPath
     Write-Log "Created image output variant ${VariantNumber}: $outputPath"
 

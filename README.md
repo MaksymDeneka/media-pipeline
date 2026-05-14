@@ -146,7 +146,7 @@ Videos are written as MP4 files using:
 
 Each video variant trims a small random amount from the end. Playback speed and audio speed are not changed. Default trim range is `50ms` to `950ms`; very short videos use a smaller safe range or skip trimming.
 
-Images are copied into 3 random filenames in their original format where possible, then metadata is removed with ExifTool.
+Images are copied into 3 random filenames in their original format where possible, then metadata is removed with ExifTool. `.heic` inputs are converted to `.png` because HEIC output is not used by this pipeline.
 
 Output names are random and not based on the source filename:
 
