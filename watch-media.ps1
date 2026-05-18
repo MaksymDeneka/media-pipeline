@@ -11,6 +11,11 @@ $OutputDir = Join-Path $PipelineRoot "output"
 $OriginalDir = Join-Path $PipelineRoot "original"
 $FailedDir = Join-Path $PipelineRoot "failed"
 $LogsDir = Join-Path $PipelineRoot "logs"
+$RemuxRootDir = Join-Path $PipelineRoot "convert"
+$RemuxInputDir = Join-Path $RemuxRootDir "input"
+$RemuxOutputDir = Join-Path $RemuxRootDir "output"
+$RemuxOriginalDir = Join-Path $RemuxRootDir "original"
+$RemuxFailedDir = Join-Path $RemuxRootDir "failed"
 
 $CopiesPerFile = 3
 $MinTrimMs = 50
@@ -34,7 +39,7 @@ $script:ExifToolPath = $null
 $script:InstanceMutex = $null
 
 function Initialize-Folders {
-    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir)) {
+    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir)) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
@@ -256,6 +261,28 @@ function New-RandomOutputPath {
         $token = New-RandomToken
         $fileName = "media_{0}_{1}{2}" -f $timestamp, $token, $Extension.ToLowerInvariant()
         $path = Join-Path $OutputDir $fileName
+    } while (Test-Path -LiteralPath $path)
+
+    return $path
+}
+
+function New-RandomFilePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Directory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Extension
+    )
+
+    do {
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $token = New-RandomToken
+        $fileName = "{0}_{1}_{2}{3}" -f $Prefix, $timestamp, $token, $Extension.ToLowerInvariant()
+        $path = Join-Path $Directory $fileName
     } while (Test-Path -LiteralPath $path)
 
     return $path
@@ -657,6 +684,72 @@ function Process-OneSafely {
     }
 }
 
+function Convert-MovToMp4Remux {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "remux" -Extension ".mp4"
+
+    Write-Log "Started MOV remux: $Path"
+    Write-Log "Remux output path: $outputPath"
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $Path,
+        "-map", "0",
+        "-c", "copy",
+        "-map_metadata", "-1",
+        "-movflags", "+faststart",
+        $outputPath
+    )
+
+    try {
+        Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+        Clear-Metadata -Path $outputPath
+        Move-InputFile -Path $Path -DestinationDirectory $RemuxOriginalDir
+        Write-Log "Successfully remuxed MOV to MP4: $outputPath"
+    }
+    catch {
+        Remove-GeneratedOutputs -Paths @($outputPath)
+        throw
+    }
+}
+
+function Process-RemuxFileSafely {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+
+    if (-not $script:ProcessingPaths.Add($fullPath)) {
+        return
+    }
+
+    try {
+        Write-Log "Detected MOV remux file: $fullPath"
+        Wait-FileReady -Path $fullPath
+        Convert-MovToMp4Remux -Path $fullPath
+    }
+    catch {
+        Write-Log "Failed remuxing '$fullPath': $($_.Exception.Message)" "ERROR"
+        try {
+            Move-InputFile -Path $fullPath -DestinationDirectory $RemuxFailedDir
+        }
+        catch {
+            Write-Log "Could not move failed remux file '$fullPath': $($_.Exception.Message)" "ERROR"
+        }
+    }
+    finally {
+        [void]$script:ProcessingPaths.Remove($fullPath)
+    }
+}
+
 function Get-CandidateInputFiles {
     if (-not (Test-Path -LiteralPath $InputDir)) {
         return @()
@@ -667,16 +760,33 @@ function Get-CandidateInputFiles {
     } | Sort-Object LastWriteTime, FullName)
 }
 
+function Get-CandidateRemuxFiles {
+    if (-not (Test-Path -LiteralPath $RemuxInputDir)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $RemuxInputDir -File | Where-Object {
+        (-not (Test-IsTemporaryDownload $_.FullName)) -and ($_.Extension.ToLowerInvariant() -eq ".mov")
+    } | Sort-Object LastWriteTime, FullName)
+}
+
 function Start-PollingWatcher {
     Write-Log "Watcher started."
     Write-Log "Input: $InputDir"
     Write-Log "Output: $OutputDir"
     Write-Log "Original archive: $OriginalDir"
     Write-Log "Failed: $FailedDir"
+    Write-Log "MOV remux input: $RemuxInputDir"
+    Write-Log "MOV remux output: $RemuxOutputDir"
     Write-Log "Polling every $PollSeconds seconds."
 
     while ($true) {
         try {
+            $remuxFiles = Get-CandidateRemuxFiles
+            foreach ($file in $remuxFiles) {
+                Process-RemuxFileSafely -Path $file.FullName
+            }
+
             $files = Get-CandidateInputFiles
             foreach ($file in $files) {
                 Process-OneSafely -Path $file.FullName

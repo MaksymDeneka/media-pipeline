@@ -13,6 +13,11 @@ D:\MediaPipeline\
   original\
   failed\
   logs\
+  convert\
+    input\
+    output\
+    original\
+    failed\
 ```
 
 - `input`: set your browser download folder here.
@@ -20,6 +25,10 @@ D:\MediaPipeline\
 - `original`: source files are moved here after all 3 variants succeed.
 - `failed`: source files are moved here if processing fails.
 - `logs`: daily logs named like `media-pipeline-YYYYMMDD.log`.
+- `convert\input`: put raw `.mov` files here when you only want MP4 remuxing.
+- `convert\output`: remuxed `.mp4` files are written here.
+- `convert\original`: source `.mov` files are moved here after remuxing succeeds.
+- `convert\failed`: source `.mov` files are moved here if remuxing fails.
 
 ## Supported Files
 
@@ -119,6 +128,8 @@ The watcher uses a polling loop:
 6. Move successful originals to `D:\MediaPipeline\original`.
 7. Move failed originals to `D:\MediaPipeline\failed`.
 
+It also scans `D:\MediaPipeline\convert\input` for `.mov` files and remuxes them to `.mp4` without re-encoding.
+
 ## Browser Download Folder
 
 Set your browser download folder to:
@@ -148,11 +159,34 @@ Each video variant trims a small random amount from the end. Playback speed and 
 
 Images are copied into 3 random filenames in their original format where possible, then metadata is removed with ExifTool. `.heic` inputs are converted to `.png` because HEIC output is not used by this pipeline.
 
+## MOV To MP4 Remux Workflow
+
+Use this lane for long raw `.mov` clips that you need to convert to `.mp4` before manually cutting them. Put the source file here:
+
+```text
+D:\MediaPipeline\convert\input
+```
+
+The watcher writes one MP4 here:
+
+```text
+D:\MediaPipeline\convert\output
+```
+
+This does not create 3 variants and does not re-encode the video. It uses FFmpeg stream copy:
+
+```text
+-map 0 -c copy -map_metadata -1 -movflags +faststart
+```
+
+Because the streams are copied, quality and timing should remain unchanged. If a `.mov` contains a track that MP4 cannot contain, remuxing can fail; in that case the original moves to `D:\MediaPipeline\convert\failed`.
+
 Output names are random and not based on the source filename:
 
 ```text
 media_YYYYMMDD_HHMMSS_<random>.mp4
 media_YYYYMMDD_HHMMSS_<random>.jpg
+remux_YYYYMMDD_HHMMSS_<random>.mp4
 ```
 
 ## Always Run Silently At Windows Startup
@@ -198,6 +232,8 @@ Edit the settings at the top of `watch-media.ps1`:
 
 ```powershell
 $PipelineRoot = "D:\MediaPipeline"
+$RemuxInputDir = Join-Path $RemuxRootDir "input"
+$RemuxOutputDir = Join-Path $RemuxRootDir "output"
 $CopiesPerFile = 3
 $MinTrimMs = 50
 $MaxTrimMs = 950
