@@ -173,13 +173,13 @@ The watcher writes one MP4 here:
 D:\MediaPipeline\convert\output
 ```
 
-This does not create 3 variants and does not re-encode the video. It uses FFmpeg stream copy:
+This does not create 3 variants and does not re-encode the video. It uses FFmpeg stream copy for video and audio:
 
 ```text
--map 0 -c copy -map_metadata -1 -movflags +faststart
+-map 0:v:0 -map 0:a? -dn -c copy -map_metadata -1 -movflags +faststart
 ```
 
-Because the streams are copied, quality and timing should remain unchanged. If a `.mov` contains a track that MP4 cannot contain, remuxing can fail; in that case the original moves to `D:\MediaPipeline\convert\failed`.
+Because the video and audio streams are copied, quality and timing should remain unchanged. Non-media data tracks from phones, such as sensor or metadata streams, are dropped because MP4 often cannot contain them.
 
 Output names are random and not based on the source filename:
 
