@@ -16,6 +16,12 @@ $RemuxInputDir = Join-Path $RemuxRootDir "input"
 $RemuxOutputDir = Join-Path $RemuxRootDir "output"
 $RemuxOriginalDir = Join-Path $RemuxRootDir "original"
 $RemuxFailedDir = Join-Path $RemuxRootDir "failed"
+$LongRootDir = Join-Path $PipelineRoot "long"
+$LongInputDir = Join-Path $LongRootDir "input"
+$LongOutputDir = Join-Path $LongRootDir "output"
+$LongOriginalDir = Join-Path $LongRootDir "original"
+$LongFailedDir = Join-Path $LongRootDir "failed"
+$LongWorkDir = Join-Path $LongRootDir "work"
 
 $CopiesPerFile = 3
 $MinTrimMs = 50
@@ -27,6 +33,8 @@ $MaxWidth = 1080
 $StableSeconds = 3
 $TimeoutSeconds = 600
 $PollSeconds = 2
+$LongSegmentTargetSeconds = 15
+$LongSegmentMinSeconds = 11
 
 $VideoExtensions = @(".mp4", ".mov", ".mkv", ".webm", ".avi")
 $ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic")
@@ -39,7 +47,7 @@ $script:ExifToolPath = $null
 $script:InstanceMutex = $null
 
 function Initialize-Folders {
-    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir)) {
+    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir)) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
@@ -511,6 +519,7 @@ function Convert-VideoVariant {
         "-crf", [string]$Crf,
         "-preset", $Preset,
         "-vf", $scaleFilter,
+        "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", $AudioBitrate,
         "-movflags", "+faststart",
@@ -684,6 +693,32 @@ function Process-OneSafely {
     }
 }
 
+function Invoke-MovToMp4Remux {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath,
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-dn",
+        "-c", "copy",
+        "-map_metadata", "-1",
+        "-movflags", "+faststart",
+        $OutputPath
+    )
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+}
+
 function Convert-MovToMp4Remux {
     param(
         [Parameter(Mandatory = $true)]
@@ -695,22 +730,8 @@ function Convert-MovToMp4Remux {
     Write-Log "Started MOV remux: $Path"
     Write-Log "Remux output path: $outputPath"
 
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $Path,
-        "-map", "0:v:0",
-        "-map", "0:a?",
-        "-dn",
-        "-c", "copy",
-        "-map_metadata", "-1",
-        "-movflags", "+faststart",
-        $outputPath
-    )
-
     try {
-        Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+        Invoke-MovToMp4Remux -InputPath $Path -OutputPath $outputPath
         Clear-Metadata -Path $outputPath
         Move-InputFile -Path $Path -DestinationDirectory $RemuxOriginalDir
         Write-Log "Successfully remuxed MOV to MP4: $outputPath"
@@ -752,6 +773,232 @@ function Process-RemuxFileSafely {
     }
 }
 
+function Get-LongSegmentPlan {
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$DurationSeconds
+    )
+
+    $durationMs = [int][Math]::Floor($DurationSeconds * 1000)
+    $targetMs = [int]($LongSegmentTargetSeconds * 1000)
+    $minMs = [int]($LongSegmentMinSeconds * 1000)
+    $durations = New-Object System.Collections.Generic.List[int]
+
+    if ($durationMs -le 0) {
+        throw "Cannot segment a video with invalid duration: $DurationSeconds"
+    }
+
+    if ($durationMs -le $targetMs) {
+        $durations.Add($durationMs)
+    }
+    else {
+        $fullCount = [int][Math]::Floor($durationMs / $targetMs)
+        $remainderMs = $durationMs - ($fullCount * $targetMs)
+
+        for ($i = 0; $i -lt $fullCount; $i++) {
+            $durations.Add($targetMs)
+        }
+
+        if ($remainderMs -gt 0) {
+            if ($remainderMs -ge $minMs) {
+                $durations.Add($remainderMs)
+            }
+            else {
+                $neededMs = $minMs - $remainderMs
+                $borrowedMs = 0
+
+                for ($i = $durations.Count - 1; $i -ge 0 -and $borrowedMs -lt $neededMs; $i--) {
+                    $availableMs = $durations[$i] - $minMs
+                    if ($availableMs -le 0) {
+                        continue
+                    }
+
+                    $takeMs = [Math]::Min($availableMs, $neededMs - $borrowedMs)
+                    $durations[$i] = $durations[$i] - $takeMs
+                    $borrowedMs += $takeMs
+                }
+
+                if ($borrowedMs -eq $neededMs) {
+                    $durations.Add($remainderMs + $borrowedMs)
+                }
+                else {
+                    $lastIndex = $durations.Count - 1
+                    $durations[$lastIndex] = $durations[$lastIndex] + $remainderMs + $borrowedMs
+                }
+            }
+        }
+    }
+
+    $segments = New-Object System.Collections.Generic.List[object]
+    $startMs = 0
+    for ($i = 0; $i -lt $durations.Count; $i++) {
+        $duration = $durations[$i] / 1000.0
+        $start = $startMs / 1000.0
+        $segments.Add([pscustomobject]@{
+            Index = $i + 1
+            StartSeconds = $start
+            DurationSeconds = $duration
+        })
+        $startMs += $durations[$i]
+    }
+
+    return $segments.ToArray()
+}
+
+function Convert-LongVideoVariant {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SegmentNumber,
+
+        [Parameter(Mandatory = $true)]
+        [int]$VariantNumber,
+
+        [Parameter(Mandatory = $true)]
+        [double]$StartSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [double]$SegmentDurationSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TrimMs
+    )
+
+    $outputPath = New-RandomFilePath -Directory $LongOutputDir -Prefix ("long_s{0:00}_v{1:00}" -f $SegmentNumber, $VariantNumber) -Extension ".mp4"
+    $trimSeconds = $TrimMs / 1000.0
+    $targetDuration = [Math]::Max(0.1, $SegmentDurationSeconds - $trimSeconds)
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    $startText = $StartSeconds.ToString("0.###", $culture)
+    $targetDurationText = $targetDuration.ToString("0.###", $culture)
+    $scaleFilter = "scale='trunc(min($MaxWidth,iw)/2)*2':-2"
+
+    Write-Log "Long segment $SegmentNumber variant $VariantNumber trim: ${TrimMs}ms, start: ${startText}s, target duration: ${targetDurationText}s"
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath,
+        "-ss", $startText,
+        "-t", $targetDurationText,
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-crf", [string]$Crf,
+        "-preset", $Preset,
+        "-vf", $scaleFilter,
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", $AudioBitrate,
+        "-movflags", "+faststart",
+        "-map_metadata", "-1",
+        $outputPath
+    )
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+    Clear-Metadata -Path $outputPath
+    Write-Log "Created long output: $outputPath"
+
+    return $outputPath
+}
+
+function Process-LongVideoFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $createdOutputs = New-Object System.Collections.Generic.List[string]
+    $workDir = Join-Path $LongWorkDir ("job_{0}_{1}" -f (Get-Date -Format "yyyyMMdd_HHmmss"), (New-RandomToken 4))
+
+    try {
+        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+
+        $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+        $sourcePath = $Path
+        if ($extension -eq ".mov") {
+            $sourcePath = Join-Path $workDir "source.mp4"
+            Write-Log "Long pipeline remuxing MOV source before segmentation: $Path"
+            Invoke-MovToMp4Remux -InputPath $Path -OutputPath $sourcePath
+        }
+
+        $duration = Get-VideoDurationSeconds -Path $sourcePath
+        $durationText = $duration.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+        $segments = Get-LongSegmentPlan -DurationSeconds $duration
+        $segmentSummary = (($segments | ForEach-Object { $_.DurationSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture) + "s" }) -join ", ")
+
+        Write-Log "Long video duration: ${durationText}s"
+        Write-Log "Long segment plan: $($segments.Count) segment(s): $segmentSummary"
+
+        foreach ($segment in $segments) {
+            $range = Get-TrimRange -DurationSeconds $segment.DurationSeconds
+            if ($range.CanTrim) {
+                Write-Log "Long segment $($segment.Index) trim range $($range.MinMs)-$($range.MaxMs) ms"
+            }
+            else {
+                Write-Log "Long segment $($segment.Index) skipping trim: $($range.Reason)" "WARN"
+            }
+
+            $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
+            for ($variant = 1; $variant -le $CopiesPerFile; $variant++) {
+                $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues
+                $outputPath = Convert-LongVideoVariant -InputPath $sourcePath -SegmentNumber $segment.Index -VariantNumber $variant -StartSeconds $segment.StartSeconds -SegmentDurationSeconds $segment.DurationSeconds -TrimMs $trimMs
+                $createdOutputs.Add($outputPath)
+            }
+        }
+
+        Move-InputFile -Path $Path -DestinationDirectory $LongOriginalDir
+        Write-Log "Successfully processed long video: $Path"
+    }
+    catch {
+        Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
+        throw
+    }
+    finally {
+        try {
+            if (Test-Path -LiteralPath $workDir) {
+                Remove-Item -LiteralPath $workDir -Recurse -Force
+            }
+        }
+        catch {
+            Write-Log "Could not remove long pipeline work directory '$workDir': $($_.Exception.Message)" "WARN"
+        }
+    }
+}
+
+function Process-LongFileSafely {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+
+    if (-not $script:ProcessingPaths.Add($fullPath)) {
+        return
+    }
+
+    try {
+        Write-Log "Detected long pipeline file: $fullPath"
+        Wait-FileReady -Path $fullPath
+        Process-LongVideoFile -Path $fullPath
+    }
+    catch {
+        Write-Log "Failed long pipeline processing '$fullPath': $($_.Exception.Message)" "ERROR"
+        try {
+            Move-InputFile -Path $fullPath -DestinationDirectory $LongFailedDir
+        }
+        catch {
+            Write-Log "Could not move failed long pipeline file '$fullPath': $($_.Exception.Message)" "ERROR"
+        }
+    }
+    finally {
+        [void]$script:ProcessingPaths.Remove($fullPath)
+    }
+}
+
 function Get-CandidateInputFiles {
     if (-not (Test-Path -LiteralPath $InputDir)) {
         return @()
@@ -772,6 +1019,16 @@ function Get-CandidateRemuxFiles {
     } | Sort-Object LastWriteTime, FullName)
 }
 
+function Get-CandidateLongFiles {
+    if (-not (Test-Path -LiteralPath $LongInputDir)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $LongInputDir -File | Where-Object {
+        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsVideo $_.FullName)
+    } | Sort-Object LastWriteTime, FullName)
+}
+
 function Start-PollingWatcher {
     Write-Log "Watcher started."
     Write-Log "Input: $InputDir"
@@ -780,10 +1037,17 @@ function Start-PollingWatcher {
     Write-Log "Failed: $FailedDir"
     Write-Log "MOV remux input: $RemuxInputDir"
     Write-Log "MOV remux output: $RemuxOutputDir"
+    Write-Log "Long pipeline input: $LongInputDir"
+    Write-Log "Long pipeline output: $LongOutputDir"
     Write-Log "Polling every $PollSeconds seconds."
 
     while ($true) {
         try {
+            $longFiles = Get-CandidateLongFiles
+            foreach ($file in $longFiles) {
+                Process-LongFileSafely -Path $file.FullName
+            }
+
             $remuxFiles = Get-CandidateRemuxFiles
             foreach ($file in $remuxFiles) {
                 Process-RemuxFileSafely -Path $file.FullName

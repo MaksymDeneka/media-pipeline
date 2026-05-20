@@ -18,6 +18,12 @@ D:\MediaPipeline\
     output\
     original\
     failed\
+  long\
+    input\
+    output\
+    original\
+    failed\
+    work\
 ```
 
 - `input`: set your browser download folder here.
@@ -29,6 +35,11 @@ D:\MediaPipeline\
 - `convert\output`: remuxed `.mp4` files are written here.
 - `convert\original`: source `.mov` files are moved here after remuxing succeeds.
 - `convert\failed`: source `.mov` files are moved here if remuxing fails.
+- `long\input`: put long raw videos here for segmenting plus 3 processed variants per segment.
+- `long\output`: processed long-pipeline segment variants are written here.
+- `long\original`: long-pipeline source files are moved here after all segment variants succeed.
+- `long\failed`: long-pipeline source files are moved here if processing fails.
+- `long\work`: temporary remux/intermediate workspace; the script cleans this automatically.
 
 ## Supported Files
 
@@ -130,6 +141,8 @@ The watcher uses a polling loop:
 
 It also scans `D:\MediaPipeline\convert\input` for `.mov` files and remuxes them to `.mp4` without re-encoding.
 
+It also scans `D:\MediaPipeline\long\input` for longer videos, segments them, and creates 3 processed variants for each segment.
+
 ## Browser Download Folder
 
 Set your browser download folder to:
@@ -150,6 +163,7 @@ Videos are written as MP4 files using:
 - CRF compression, default `24`
 - preset `medium`
 - AAC audio at `128k`
+- 8-bit `yuv420p` pixel format for broad player compatibility
 - `-movflags +faststart`
 - metadata stripped with FFmpeg using `-map_metadata -1`
 - metadata stripped again with ExifTool
@@ -181,12 +195,56 @@ This does not create 3 variants and does not re-encode the video. It uses FFmpeg
 
 Because the video and audio streams are copied, quality and timing should remain unchanged. Non-media data tracks from phones, such as sensor or metadata streams, are dropped because MP4 often cannot contain them.
 
+## Long Video Pipeline
+
+Use this lane for raw videos around a minute or longer when you want the script to split them into shorter clips before applying the normal 3-copy processing.
+
+Put source videos here:
+
+```text
+D:\MediaPipeline\long\input
+```
+
+The watcher writes processed segment variants here:
+
+```text
+D:\MediaPipeline\long\output
+```
+
+Supported inputs are the same video extensions as the main pipeline. If the input is `.mov`, the script first remuxes it to a temporary MP4 using stream copy, then segments the MP4.
+
+Segmenting defaults:
+
+- Target segment length: `15` seconds
+- Minimum segment length: `11` seconds
+- Each segment creates `3` final variants
+
+The script prefers 15-second segments, but it will not leave a tiny final tail. If the final remainder is too short, it borrows time from previous segments. For example, about 38 seconds becomes roughly:
+
+```text
+15s, 12s, 11s
+```
+
+Each segment variant then goes through the same final processing as normal videos:
+
+- H.264 MP4 encode with `libx264`
+- CRF compression
+- AAC audio
+- 8-bit `yuv420p` pixel format for broad player compatibility
+- metadata removal with FFmpeg and ExifTool
+- width capped at 1080px without upscaling
+- small randomized trim from the end
+- random neutral output filename
+
+Successful source files move to `D:\MediaPipeline\long\original`. Failed source files move to `D:\MediaPipeline\long\failed`.
+
 Output names are random and not based on the source filename:
 
 ```text
 media_YYYYMMDD_HHMMSS_<random>.mp4
 media_YYYYMMDD_HHMMSS_<random>.jpg
 remux_YYYYMMDD_HHMMSS_<random>.mp4
+long_s01_v01_YYYYMMDD_HHMMSS_<random>.mp4
 ```
 
 ## Always Run Silently At Windows Startup
@@ -234,6 +292,8 @@ Edit the settings at the top of `watch-media.ps1`:
 $PipelineRoot = "D:\MediaPipeline"
 $RemuxInputDir = Join-Path $RemuxRootDir "input"
 $RemuxOutputDir = Join-Path $RemuxRootDir "output"
+$LongInputDir = Join-Path $LongRootDir "input"
+$LongOutputDir = Join-Path $LongRootDir "output"
 $CopiesPerFile = 3
 $MinTrimMs = 50
 $MaxTrimMs = 950
@@ -244,4 +304,6 @@ $MaxWidth = 1080
 $StableSeconds = 3
 $TimeoutSeconds = 600
 $PollSeconds = 2
+$LongSegmentTargetSeconds = 15
+$LongSegmentMinSeconds = 11
 ```
