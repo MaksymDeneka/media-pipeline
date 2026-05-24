@@ -22,8 +22,17 @@ $LongOutputDir = Join-Path $LongRootDir "output"
 $LongOriginalDir = Join-Path $LongRootDir "original"
 $LongFailedDir = Join-Path $LongRootDir "failed"
 $LongWorkDir = Join-Path $LongRootDir "work"
+$ImageBulkRootDir = Join-Path $PipelineRoot "images"
+$ImageBulkInputDir = Join-Path $ImageBulkRootDir "input"
+$ImageBulkOutputDir = Join-Path $ImageBulkRootDir "output"
+$ImageBulkOriginalDir = Join-Path $ImageBulkRootDir "original"
+$ImageBulkFailedDir = Join-Path $ImageBulkRootDir "failed"
 
-$CopiesPerFile = 3
+$DefaultCopiesPerFile = 5
+$LongCopiesPerSegment = 3
+$ImageBulkCopiesPerFile = 20
+$ImageBulkCropMinPermille = 5
+$ImageBulkCropMaxPermille = 20
 $MinTrimMs = 50
 $MaxTrimMs = 950
 $Crf = 24
@@ -47,7 +56,7 @@ $script:ExifToolPath = $null
 $script:InstanceMutex = $null
 
 function Initialize-Folders {
-    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir)) {
+    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir)) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
@@ -394,6 +403,32 @@ function Get-VideoDurationSeconds {
     return $duration
 }
 
+function Get-MediaDimensions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $arguments = @(
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=s=x:p=0",
+        $Path
+    )
+
+    $output = Invoke-ExternalTool -Command $script:FFprobePath -Arguments $arguments
+    $dimensionText = (($output | Out-String).Trim() -split "\s+")[0]
+    if ($dimensionText -notmatch "^(\d+)x(\d+)$") {
+        throw "Unable to read image dimensions from ffprobe for: $Path"
+    }
+
+    return [pscustomobject]@{
+        Width = [int]$Matches[1]
+        Height = [int]$Matches[2]
+    }
+}
+
 function Get-TrimRange {
     param(
         [Parameter(Mandatory = $true)]
@@ -454,7 +489,10 @@ function New-TrimMilliseconds {
         [pscustomobject]$Range,
 
         [AllowEmptyCollection()]
-        [System.Collections.Generic.HashSet[int]]$UsedValues
+        [System.Collections.Generic.HashSet[int]]$UsedValues,
+
+        [Parameter(Mandatory = $true)]
+        [int]$CopyCount
     )
 
     if (-not $Range.CanTrim) {
@@ -462,7 +500,7 @@ function New-TrimMilliseconds {
     }
 
     $rangeSize = ($Range.MaxMs - $Range.MinMs) + 1
-    $mustBeUnique = $rangeSize -ge $CopiesPerFile
+    $mustBeUnique = $rangeSize -ge $CopyCount
     $attempts = 0
 
     do {
@@ -597,8 +635,8 @@ function Process-VideoFile {
 
         $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
 
-        for ($variant = 1; $variant -le $CopiesPerFile; $variant++) {
-            $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues
+        for ($variant = 1; $variant -le $DefaultCopiesPerFile; $variant++) {
+            $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $DefaultCopiesPerFile
             $outputPath = Convert-VideoVariant -InputPath $Path -VariantNumber $variant -DurationSeconds $duration -TrimMs $trimMs
             $createdOutputs.Add($outputPath)
         }
@@ -620,7 +658,7 @@ function Process-ImageFile {
     $createdOutputs = New-Object System.Collections.Generic.List[string]
 
     try {
-        for ($variant = 1; $variant -le $CopiesPerFile; $variant++) {
+        for ($variant = 1; $variant -le $DefaultCopiesPerFile; $variant++) {
             $outputPath = Convert-ImageVariant -InputPath $Path -VariantNumber $variant
             $createdOutputs.Add($outputPath)
         }
@@ -630,6 +668,139 @@ function Process-ImageFile {
     catch {
         Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
         throw
+    }
+}
+
+function Get-ImageBulkOutputExtension {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath
+    )
+
+    $extension = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
+    if ($extension -eq ".heic") {
+        return ".png"
+    }
+
+    return $extension
+}
+
+function Convert-ImageBulkVariant {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [int]$VariantNumber,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Dimensions
+    )
+
+    $outputExtension = Get-ImageBulkOutputExtension -InputPath $InputPath
+    $outputPath = New-RandomFilePath -Directory $ImageBulkOutputDir -Prefix ("image_v{0:00}" -f $VariantNumber) -Extension $outputExtension
+    $width = $Dimensions.Width
+    $height = $Dimensions.Height
+    $canCrop = ($width -ge 200 -and $height -ge 200)
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath,
+        "-frames:v", "1",
+        "-map_metadata", "-1"
+    )
+
+    if ($canCrop) {
+        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
+        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
+        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
+        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
+        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
+        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
+        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
+        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
+        $arguments += @("-vf", $filter)
+        Write-Log "Image bulk variant $VariantNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
+    }
+    else {
+        Write-Log "Image bulk variant $VariantNumber skipping crop because image is small: ${width}x${height}" "WARN"
+    }
+
+    if ($outputExtension -in @(".jpg", ".jpeg")) {
+        $arguments += @("-q:v", "2")
+    }
+    elseif ($outputExtension -eq ".webp") {
+        $arguments += @("-quality", "92")
+    }
+    elseif ($outputExtension -eq ".png") {
+        $arguments += @("-compression_level", "6")
+    }
+
+    $arguments += @($outputPath)
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+    Clear-Metadata -Path $outputPath
+    Write-Log "Created image bulk output variant ${VariantNumber}: $outputPath"
+
+    return $outputPath
+}
+
+function Process-ImageBulkFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $createdOutputs = New-Object System.Collections.Generic.List[string]
+
+    try {
+        $dimensions = Get-MediaDimensions -Path $Path
+        Write-Log "Image bulk dimensions: $($dimensions.Width)x$($dimensions.Height)"
+
+        for ($variant = 1; $variant -le $ImageBulkCopiesPerFile; $variant++) {
+            $outputPath = Convert-ImageBulkVariant -InputPath $Path -VariantNumber $variant -Dimensions $dimensions
+            $createdOutputs.Add($outputPath)
+        }
+
+        Move-InputFile -Path $Path -DestinationDirectory $ImageBulkOriginalDir
+        Write-Log "Successfully processed image bulk file: $Path"
+    }
+    catch {
+        Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
+        throw
+    }
+}
+
+function Process-ImageBulkFileSafely {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+
+    if (-not $script:ProcessingPaths.Add($fullPath)) {
+        return
+    }
+
+    try {
+        Write-Log "Detected image bulk file: $fullPath"
+        Wait-FileReady -Path $fullPath
+        Process-ImageBulkFile -Path $fullPath
+    }
+    catch {
+        Write-Log "Failed image bulk processing '$fullPath': $($_.Exception.Message)" "ERROR"
+        try {
+            Move-InputFile -Path $fullPath -DestinationDirectory $ImageBulkFailedDir
+        }
+        catch {
+            Write-Log "Could not move failed image bulk file '$fullPath': $($_.Exception.Message)" "ERROR"
+        }
+    }
+    finally {
+        [void]$script:ProcessingPaths.Remove($fullPath)
     }
 }
 
@@ -942,8 +1113,8 @@ function Process-LongVideoFile {
             }
 
             $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
-            for ($variant = 1; $variant -le $CopiesPerFile; $variant++) {
-                $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues
+            for ($variant = 1; $variant -le $LongCopiesPerSegment; $variant++) {
+                $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $LongCopiesPerSegment
                 $outputPath = Convert-LongVideoVariant -InputPath $sourcePath -SegmentNumber $segment.Index -VariantNumber $variant -StartSeconds $segment.StartSeconds -SegmentDurationSeconds $segment.DurationSeconds -TrimMs $trimMs
                 $createdOutputs.Add($outputPath)
             }
@@ -1029,6 +1200,16 @@ function Get-CandidateLongFiles {
     } | Sort-Object LastWriteTime, FullName)
 }
 
+function Get-CandidateImageBulkFiles {
+    if (-not (Test-Path -LiteralPath $ImageBulkInputDir)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $ImageBulkInputDir -File | Where-Object {
+        (-not (Test-IsTemporaryDownload $_.FullName)) -and ($ImageExtensions -contains $_.Extension.ToLowerInvariant())
+    } | Sort-Object LastWriteTime, FullName)
+}
+
 function Start-PollingWatcher {
     Write-Log "Watcher started."
     Write-Log "Input: $InputDir"
@@ -1039,10 +1220,17 @@ function Start-PollingWatcher {
     Write-Log "MOV remux output: $RemuxOutputDir"
     Write-Log "Long pipeline input: $LongInputDir"
     Write-Log "Long pipeline output: $LongOutputDir"
+    Write-Log "Image bulk input: $ImageBulkInputDir"
+    Write-Log "Image bulk output: $ImageBulkOutputDir"
     Write-Log "Polling every $PollSeconds seconds."
 
     while ($true) {
         try {
+            $imageBulkFiles = Get-CandidateImageBulkFiles
+            foreach ($file in $imageBulkFiles) {
+                Process-ImageBulkFileSafely -Path $file.FullName
+            }
+
             $longFiles = Get-CandidateLongFiles
             foreach ($file in $longFiles) {
                 Process-LongFileSafely -Path $file.FullName

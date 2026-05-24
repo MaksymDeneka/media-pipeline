@@ -24,6 +24,11 @@ D:\MediaPipeline\
     original\
     failed\
     work\
+  images\
+    input\
+    output\
+    original\
+    failed\
 ```
 
 - `input`: set your browser download folder here.
@@ -40,6 +45,10 @@ D:\MediaPipeline\
 - `long\original`: long-pipeline source files are moved here after all segment variants succeed.
 - `long\failed`: long-pipeline source files are moved here if processing fails.
 - `long\work`: temporary remux/intermediate workspace; the script cleans this automatically.
+- `images\input`: put images here when you want many re-encoded image variants.
+- `images\output`: bulk image variants are written here.
+- `images\original`: source images are moved here after all image variants succeed.
+- `images\failed`: source images are moved here if bulk image processing fails.
 
 ## Supported Files
 
@@ -143,6 +152,8 @@ It also scans `D:\MediaPipeline\convert\input` for `.mov` files and remuxes them
 
 It also scans `D:\MediaPipeline\long\input` for longer videos, segments them, and creates 3 processed variants for each segment.
 
+It also scans `D:\MediaPipeline\images\input` for image-only bulk processing and creates 20 re-encoded variants per source image.
+
 ## Browser Download Folder
 
 Set your browser download folder to:
@@ -155,7 +166,7 @@ Download files from Google Drive manually in the browser. The watcher will detec
 
 ## Output Behavior
 
-Every supported input creates exactly 3 output files.
+Every supported input in the default pipeline creates exactly 5 output files.
 
 Videos are written as MP4 files using:
 
@@ -171,7 +182,47 @@ Videos are written as MP4 files using:
 
 Each video variant trims a small random amount from the end. Playback speed and audio speed are not changed. Default trim range is `50ms` to `950ms`; very short videos use a smaller safe range or skip trimming.
 
-Images are copied into 3 random filenames in their original format where possible, then metadata is removed with ExifTool. `.heic` inputs are converted to `.png` because HEIC output is not used by this pipeline.
+Images in the default pipeline are copied into 5 random filenames in their original format where possible, then metadata is removed with ExifTool. `.heic` inputs are converted to `.png` because HEIC output is not used by this pipeline.
+
+## Bulk Image Pipeline
+
+Use this lane when you want many image variants from one source image.
+
+Put source images here:
+
+```text
+D:\MediaPipeline\images\input
+```
+
+The watcher writes 20 image variants here by default:
+
+```text
+D:\MediaPipeline\images\output
+```
+
+Each output gets:
+
+- random filename
+- metadata removed with ExifTool
+- FFmpeg re-encode, not a byte-for-byte copy
+- tiny randomized crop and scale back to the original dimensions when the image is large enough
+
+Supported inputs are:
+
+```text
+.jpg, .jpeg, .png, .webp, .heic
+```
+
+Output format behavior:
+
+- `.jpg`, `.jpeg` -> `.jpg` / `.jpeg`
+- `.png` -> `.png`
+- `.webp` -> `.webp`
+- `.heic` -> `.png`
+
+This makes outputs different at the file and pixel level while keeping them visually close to the original. It is not a guarantee that files are impossible to detect or compare.
+
+Successful source images move to `D:\MediaPipeline\images\original`. Failed source images move to `D:\MediaPipeline\images\failed`.
 
 ## MOV To MP4 Remux Workflow
 
@@ -245,6 +296,7 @@ media_YYYYMMDD_HHMMSS_<random>.mp4
 media_YYYYMMDD_HHMMSS_<random>.jpg
 remux_YYYYMMDD_HHMMSS_<random>.mp4
 long_s01_v01_YYYYMMDD_HHMMSS_<random>.mp4
+image_v01_YYYYMMDD_HHMMSS_<random>.jpg
 ```
 
 ## Always Run Silently At Windows Startup
@@ -294,7 +346,11 @@ $RemuxInputDir = Join-Path $RemuxRootDir "input"
 $RemuxOutputDir = Join-Path $RemuxRootDir "output"
 $LongInputDir = Join-Path $LongRootDir "input"
 $LongOutputDir = Join-Path $LongRootDir "output"
-$CopiesPerFile = 3
+$DefaultCopiesPerFile = 5
+$LongCopiesPerSegment = 3
+$ImageBulkCopiesPerFile = 20
+$ImageBulkCropMinPermille = 5
+$ImageBulkCropMaxPermille = 20
 $MinTrimMs = 50
 $MaxTrimMs = 950
 $Crf = 24
