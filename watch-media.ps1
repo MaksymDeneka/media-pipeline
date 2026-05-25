@@ -27,10 +27,16 @@ $ImageBulkInputDir = Join-Path $ImageBulkRootDir "input"
 $ImageBulkOutputDir = Join-Path $ImageBulkRootDir "output"
 $ImageBulkOriginalDir = Join-Path $ImageBulkRootDir "original"
 $ImageBulkFailedDir = Join-Path $ImageBulkRootDir "failed"
+$SetRootDir = Join-Path $PipelineRoot "sets"
+$SetInputDir = Join-Path $SetRootDir "input"
+$SetOutputDir = Join-Path $SetRootDir "output"
+$SetOriginalDir = Join-Path $SetRootDir "original"
+$SetFailedDir = Join-Path $SetRootDir "failed"
 
 $DefaultCopiesPerFile = 5
 $LongCopiesPerSegment = 3
 $ImageBulkCopiesPerFile = 20
+$SetCopiesPerFile = 10
 $ImageBulkCropMinPermille = 5
 $ImageBulkCropMaxPermille = 20
 $MinTrimMs = 15
@@ -56,7 +62,7 @@ $script:ExifToolPath = $null
 $script:InstanceMutex = $null
 
 function Initialize-Folders {
-    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir)) {
+    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir)) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
@@ -305,6 +311,26 @@ function New-RandomFilePath {
     return $path
 }
 
+function New-RandomOutputDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Directory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix
+    )
+
+    do {
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $token = New-RandomToken
+        $directoryName = "{0}_{1}_{2}" -f $Prefix, $timestamp, $token
+        $path = Join-Path $Directory $directoryName
+    } while (Test-Path -LiteralPath $path)
+
+    New-Item -ItemType Directory -Path $path -Force | Out-Null
+    return $path
+}
+
 function Get-UniqueDestinationPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -374,6 +400,26 @@ function Remove-GeneratedOutputs {
         catch {
             Write-Log "Could not remove incomplete output '$path': $($_.Exception.Message)" "WARN"
         }
+    }
+}
+
+function Remove-GeneratedOutputDirectory {
+    param(
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            Remove-Item -LiteralPath $Path -Recurse -Force
+            Write-Log "Removed incomplete output directory after failure: $Path" "WARN"
+        }
+    }
+    catch {
+        Write-Log "Could not remove incomplete output directory '$Path': $($_.Exception.Message)" "WARN"
     }
 }
 
@@ -804,6 +850,211 @@ function Process-ImageBulkFileSafely {
     }
 }
 
+function Convert-SetVideoVariant {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [int]$VariantNumber,
+
+        [Parameter(Mandatory = $true)]
+        [double]$DurationSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TrimMs
+    )
+
+    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix ("media_v{0:00}" -f $VariantNumber) -Extension ".mp4"
+    $trimSeconds = $TrimMs / 1000.0
+    $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    $targetDurationText = $targetDuration.ToString("0.###", $culture)
+    $scaleFilter = "scale='trunc(min($MaxWidth,iw)/2)*2':-2"
+
+    Write-Log "Set video variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath,
+        "-t", $targetDurationText,
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-crf", [string]$Crf,
+        "-preset", $Preset,
+        "-vf", $scaleFilter,
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", $AudioBitrate,
+        "-movflags", "+faststart",
+        "-map_metadata", "-1",
+        $outputPath
+    )
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+    Clear-Metadata -Path $outputPath
+    Write-Log "Created set video output: $outputPath"
+
+    return $outputPath
+}
+
+function Convert-SetImageVariant {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [int]$VariantNumber,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Dimensions
+    )
+
+    $outputExtension = Get-ImageBulkOutputExtension -InputPath $InputPath
+    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix ("media_v{0:00}" -f $VariantNumber) -Extension $outputExtension
+    $width = $Dimensions.Width
+    $height = $Dimensions.Height
+    $canCrop = ($width -ge 200 -and $height -ge 200)
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath,
+        "-frames:v", "1",
+        "-map_metadata", "-1"
+    )
+
+    if ($canCrop) {
+        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
+        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
+        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
+        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
+        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
+        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
+        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
+        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
+        $arguments += @("-vf", $filter)
+        Write-Log "Set image variant $VariantNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
+    }
+    else {
+        Write-Log "Set image variant $VariantNumber skipping crop because image is small: ${width}x${height}" "WARN"
+    }
+
+    if ($outputExtension -in @(".jpg", ".jpeg")) {
+        $arguments += @("-q:v", "2")
+    }
+    elseif ($outputExtension -eq ".webp") {
+        $arguments += @("-quality", "92")
+    }
+    elseif ($outputExtension -eq ".png") {
+        $arguments += @("-compression_level", "6")
+    }
+
+    $arguments += @($outputPath)
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+    Clear-Metadata -Path $outputPath
+    Write-Log "Created set image output: $outputPath"
+
+    return $outputPath
+}
+
+function Process-SetMediaFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $outputDirectory = $null
+
+    try {
+        $outputDirectory = New-RandomOutputDirectory -Directory $SetOutputDir -Prefix "set"
+        Write-Log "Set output directory: $outputDirectory"
+
+        if (Test-IsVideo $Path) {
+            $duration = Get-VideoDurationSeconds -Path $Path
+            $durationText = $duration.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+            Write-Log "Set video duration: ${durationText}s"
+
+            $range = Get-TrimRange -DurationSeconds $duration
+            if ($range.CanTrim) {
+                Write-Log "Set video trim range $($range.MinMs)-$($range.MaxMs) ms"
+            }
+            else {
+                Write-Log "Set video skipping trim: $($range.Reason)" "WARN"
+            }
+
+            $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
+            for ($variant = 1; $variant -le $SetCopiesPerFile; $variant++) {
+                $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $SetCopiesPerFile
+                [void](Convert-SetVideoVariant -InputPath $Path -OutputDirectory $outputDirectory -VariantNumber $variant -DurationSeconds $duration -TrimMs $trimMs)
+            }
+        }
+        else {
+            $dimensions = Get-MediaDimensions -Path $Path
+            Write-Log "Set image dimensions: $($dimensions.Width)x$($dimensions.Height)"
+
+            for ($variant = 1; $variant -le $SetCopiesPerFile; $variant++) {
+                [void](Convert-SetImageVariant -InputPath $Path -OutputDirectory $outputDirectory -VariantNumber $variant -Dimensions $dimensions)
+            }
+        }
+
+        Move-InputFile -Path $Path -DestinationDirectory $SetOriginalDir
+        Write-Log "Successfully processed set media file: $Path"
+    }
+    catch {
+        Remove-GeneratedOutputDirectory -Path $outputDirectory
+        throw
+    }
+}
+
+function Process-SetMediaFileSafely {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+
+    if (-not $script:ProcessingPaths.Add($fullPath)) {
+        return
+    }
+
+    try {
+        Write-Log "Detected set media file: $fullPath"
+        Wait-FileReady -Path $fullPath
+
+        if (-not (Test-IsSupportedMedia $fullPath)) {
+            Write-Log "Skipping unsupported set media file: $fullPath" "WARN"
+            return
+        }
+
+        Process-SetMediaFile -Path $fullPath
+    }
+    catch {
+        Write-Log "Failed set media processing '$fullPath': $($_.Exception.Message)" "ERROR"
+        try {
+            Move-InputFile -Path $fullPath -DestinationDirectory $SetFailedDir
+        }
+        catch {
+            Write-Log "Could not move failed set media file '$fullPath': $($_.Exception.Message)" "ERROR"
+        }
+    }
+    finally {
+        [void]$script:ProcessingPaths.Remove($fullPath)
+    }
+}
+
 function Process-MediaFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -1210,6 +1461,16 @@ function Get-CandidateImageBulkFiles {
     } | Sort-Object LastWriteTime, FullName)
 }
 
+function Get-CandidateSetMediaFiles {
+    if (-not (Test-Path -LiteralPath $SetInputDir)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $SetInputDir -File | Where-Object {
+        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsSupportedMedia $_.FullName)
+    } | Sort-Object LastWriteTime, FullName)
+}
+
 function Start-PollingWatcher {
     Write-Log "Watcher started."
     Write-Log "Input: $InputDir"
@@ -1222,10 +1483,17 @@ function Start-PollingWatcher {
     Write-Log "Long pipeline output: $LongOutputDir"
     Write-Log "Image bulk input: $ImageBulkInputDir"
     Write-Log "Image bulk output: $ImageBulkOutputDir"
+    Write-Log "Set pipeline input: $SetInputDir"
+    Write-Log "Set pipeline output: $SetOutputDir"
     Write-Log "Polling every $PollSeconds seconds."
 
     while ($true) {
         try {
+            $setMediaFiles = Get-CandidateSetMediaFiles
+            foreach ($file in $setMediaFiles) {
+                Process-SetMediaFileSafely -Path $file.FullName
+            }
+
             $imageBulkFiles = Get-CandidateImageBulkFiles
             foreach ($file in $imageBulkFiles) {
                 Process-ImageBulkFileSafely -Path $file.FullName

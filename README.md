@@ -29,6 +29,11 @@ D:\MediaPipeline\
     output\
     original\
     failed\
+  sets\
+    input\
+    output\
+    original\
+    failed\
 ```
 
 - `input`: set your browser download folder here.
@@ -49,6 +54,10 @@ D:\MediaPipeline\
 - `images\output`: bulk image variants are written here.
 - `images\original`: source images are moved here after all image variants succeed.
 - `images\failed`: source images are moved here if bulk image processing fails.
+- `sets\input`: put media files here when you want one output folder per source file.
+- `sets\output`: each source file gets a random subfolder containing 10 processed copies.
+- `sets\original`: source files are moved here after all 10 copies succeed.
+- `sets\failed`: source files are moved here if set processing fails.
 
 ## Supported Files
 
@@ -154,6 +163,8 @@ It also scans `D:\MediaPipeline\long\input` for longer videos, segments them, an
 
 It also scans `D:\MediaPipeline\images\input` for image-only bulk processing and creates 20 re-encoded variants per source image.
 
+It also scans `D:\MediaPipeline\sets\input` for media files and creates one output folder with 10 processed copies per source file.
+
 ## Browser Download Folder
 
 Set your browser download folder to:
@@ -223,6 +234,45 @@ Output format behavior:
 This makes outputs different at the file and pixel level while keeping them visually close to the original. It is not a guarantee that files are impossible to detect or compare.
 
 Successful source images move to `D:\MediaPipeline\images\original`. Failed source images move to `D:\MediaPipeline\images\failed`.
+
+## Media Set Pipeline
+
+Use this lane when you want every source media file to get its own output folder.
+
+Put source media files here:
+
+```text
+D:\MediaPipeline\sets\input
+```
+
+For each input file, the watcher creates a random folder here:
+
+```text
+D:\MediaPipeline\sets\output
+```
+
+Each folder contains 10 processed copies by default.
+
+For videos, each copy gets:
+
+- random filename
+- H.264 MP4 encode with `libx264`
+- CRF compression
+- AAC audio
+- 8-bit `yuv420p` pixel format
+- metadata removal with FFmpeg and ExifTool
+- width capped at 1080px without upscaling
+- tiny randomized trim from the end
+
+For images, each copy gets:
+
+- random filename
+- FFmpeg re-encode
+- metadata removal with ExifTool
+- tiny randomized crop and scale back to original dimensions when the image is large enough
+- `.heic` output converted to `.png`
+
+Successful source files move to `D:\MediaPipeline\sets\original`. Failed source files move to `D:\MediaPipeline\sets\failed`.
 
 ## MOV To MP4 Remux Workflow
 
@@ -297,6 +347,7 @@ media_YYYYMMDD_HHMMSS_<random>.jpg
 remux_YYYYMMDD_HHMMSS_<random>.mp4
 long_s01_v01_YYYYMMDD_HHMMSS_<random>.mp4
 image_v01_YYYYMMDD_HHMMSS_<random>.jpg
+media_v01_YYYYMMDD_HHMMSS_<random>.mp4
 ```
 
 ## Always Run Silently At Windows Startup
@@ -349,6 +400,7 @@ $LongOutputDir = Join-Path $LongRootDir "output"
 $DefaultCopiesPerFile = 5
 $LongCopiesPerSegment = 3
 $ImageBulkCopiesPerFile = 20
+$SetCopiesPerFile = 10
 $ImageBulkCropMinPermille = 5
 $ImageBulkCropMaxPermille = 20
 $MinTrimMs = 15
