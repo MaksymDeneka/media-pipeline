@@ -180,7 +180,7 @@ Videos are written as MP4 files using:
 - metadata stripped again with ExifTool
 - max width `1080px`, preserving aspect ratio and avoiding upscaling
 
-Each video variant trims a small random amount from the end. Playback speed and audio speed are not changed. Default trim range is `50ms` to `950ms`; very short videos use a smaller safe range or skip trimming.
+Each video variant trims a tiny random amount from the end. Playback speed and audio speed are not changed. Default trim range is `15ms` to `95ms`; very short videos use a smaller safe range or skip trimming.
 
 Images in the default pipeline are copied into 5 random filenames in their original format where possible, then metadata is removed with ExifTool. `.heic` inputs are converted to `.png` because HEIC output is not used by this pipeline.
 
@@ -351,8 +351,8 @@ $LongCopiesPerSegment = 3
 $ImageBulkCopiesPerFile = 20
 $ImageBulkCropMinPermille = 5
 $ImageBulkCropMaxPermille = 20
-$MinTrimMs = 50
-$MaxTrimMs = 950
+$MinTrimMs = 15
+$MaxTrimMs = 95
 $Crf = 24
 $Preset = "medium"
 $AudioBitrate = "128k"
