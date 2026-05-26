@@ -465,13 +465,68 @@ function Get-MediaDimensions {
 
     $output = Invoke-ExternalTool -Command $script:FFprobePath -Arguments $arguments
     $dimensionText = (($output | Out-String).Trim() -split "\s+")[0]
-    if ($dimensionText -notmatch "^(\d+)x(\d+)$") {
+    if ($dimensionText -notmatch "^(\d+)x(\d+)") {
         throw "Unable to read image dimensions from ffprobe for: $Path"
     }
 
     return [pscustomobject]@{
         Width = [int]$Matches[1]
         Height = [int]$Matches[2]
+    }
+}
+
+function Resolve-ImageProcessingSource {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $source = [pscustomobject]@{
+        SourcePath = $Path
+        ProcessingPath = $Path
+        TempPath = $null
+    }
+
+    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    if ($extension -ne ".heic") {
+        return $source
+    }
+
+    $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ("media-pipeline-heic-{0}.png" -f [Guid]::NewGuid().ToString("n"))
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $Path,
+        "-frames:v", "1",
+        "-map_metadata", "-1",
+        $tempPath
+    )
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+    Write-Log "Decoded HEIC working copy for processing: $tempPath"
+
+    $source.ProcessingPath = $tempPath
+    $source.TempPath = $tempPath
+    return $source
+}
+
+function Remove-HeicWorkingCopy {
+    param(
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            Remove-Item -LiteralPath $Path -Force
+        }
+    }
+    catch {
+        Write-Log "Could not remove HEIC working copy '$Path': $($_.Exception.Message)" "WARN"
     }
 }
 
@@ -740,10 +795,12 @@ function Convert-ImageBulkVariant {
         [int]$VariantNumber,
 
         [Parameter(Mandatory = $true)]
-        [pscustomobject]$Dimensions
+        [pscustomobject]$Dimensions,
+
+        [string]$SourcePath = $InputPath
     )
 
-    $outputExtension = Get-ImageBulkOutputExtension -InputPath $InputPath
+    $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
     $outputPath = New-RandomFilePath -Directory $ImageBulkOutputDir -Prefix ("image_v{0:00}" -f $VariantNumber) -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
@@ -800,13 +857,14 @@ function Process-ImageBulkFile {
     )
 
     $createdOutputs = New-Object System.Collections.Generic.List[string]
+    $processingSource = Resolve-ImageProcessingSource -Path $Path
 
     try {
-        $dimensions = Get-MediaDimensions -Path $Path
+        $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
         Write-Log "Image bulk dimensions: $($dimensions.Width)x$($dimensions.Height)"
 
         for ($variant = 1; $variant -le $ImageBulkCopiesPerFile; $variant++) {
-            $outputPath = Convert-ImageBulkVariant -InputPath $Path -VariantNumber $variant -Dimensions $dimensions
+            $outputPath = Convert-ImageBulkVariant -InputPath $processingSource.ProcessingPath -SourcePath $Path -VariantNumber $variant -Dimensions $dimensions
             $createdOutputs.Add($outputPath)
         }
 
@@ -816,6 +874,9 @@ function Process-ImageBulkFile {
     catch {
         Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
         throw
+    }
+    finally {
+        Remove-HeicWorkingCopy -Path $processingSource.TempPath
     }
 }
 
@@ -916,10 +977,12 @@ function Convert-SetImageVariant {
         [int]$VariantNumber,
 
         [Parameter(Mandatory = $true)]
-        [pscustomobject]$Dimensions
+        [pscustomobject]$Dimensions,
+
+        [string]$SourcePath = $InputPath
     )
 
-    $outputExtension = Get-ImageBulkOutputExtension -InputPath $InputPath
+    $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
     $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix ("media_v{0:00}" -f $VariantNumber) -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
@@ -1001,11 +1064,18 @@ function Process-SetMediaFile {
             }
         }
         else {
-            $dimensions = Get-MediaDimensions -Path $Path
-            Write-Log "Set image dimensions: $($dimensions.Width)x$($dimensions.Height)"
+            $processingSource = Resolve-ImageProcessingSource -Path $Path
 
-            for ($variant = 1; $variant -le $SetCopiesPerFile; $variant++) {
-                [void](Convert-SetImageVariant -InputPath $Path -OutputDirectory $outputDirectory -VariantNumber $variant -Dimensions $dimensions)
+            try {
+                $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
+                Write-Log "Set image dimensions: $($dimensions.Width)x$($dimensions.Height)"
+
+                for ($variant = 1; $variant -le $SetCopiesPerFile; $variant++) {
+                    [void](Convert-SetImageVariant -InputPath $processingSource.ProcessingPath -SourcePath $Path -OutputDirectory $outputDirectory -VariantNumber $variant -Dimensions $dimensions)
+                }
+            }
+            finally {
+                Remove-HeicWorkingCopy -Path $processingSource.TempPath
             }
         }
 
