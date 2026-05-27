@@ -1,5 +1,6 @@
 param(
-    [switch]$CheckOnly
+    [switch]$CheckOnly,
+    [switch]$RecompressLongOutputs
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,7 +34,8 @@ $SetOutputDir = Join-Path $SetRootDir "output"
 $SetOriginalDir = Join-Path $SetRootDir "original"
 $SetFailedDir = Join-Path $SetRootDir "failed"
 
-$DefaultCopiesPerFile = 5
+$DefaultPipelineMinCopiesPerFile = 7
+$DefaultPipelineAlternatingCopiesPerFile = 8
 $LongCopiesPerSegment = 3
 $ImageBulkCopiesPerFile = 20
 $SetCopiesPerFile = 10
@@ -50,6 +52,17 @@ $TimeoutSeconds = 600
 $PollSeconds = 2
 $LongSegmentTargetSeconds = 15
 $LongSegmentMinSeconds = 11
+$LongMaxOutputSizeMB = 8
+$LongSizeCapFallbackMaxWidth = 720
+$ArchiveEnabled = $true
+$ArchiveAgeHours = 15
+$ArchiveCheckIntervalMinutes = 30
+$ArchiveRootDir = Join-Path $PipelineRoot "archive"
+$ArchiveDefaultOutputDir = Join-Path $ArchiveRootDir "output"
+$ArchiveImageBulkOutputDir = Join-Path $ArchiveRootDir "images"
+$ArchiveRemuxOutputDir = Join-Path $ArchiveRootDir "convert"
+$ArchiveLongOutputDir = Join-Path $ArchiveRootDir "long"
+$ArchiveSetOutputDir = Join-Path $ArchiveRootDir "sets"
 
 $VideoExtensions = @(".mp4", ".mov", ".mkv", ".webm", ".avi")
 $ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic")
@@ -60,9 +73,20 @@ $script:FFmpegPath = $null
 $script:FFprobePath = $null
 $script:ExifToolPath = $null
 $script:InstanceMutex = $null
+$script:LastArchiveCheck = $null
+$script:DefaultPipelineEntryCount = 0
+
+function Get-DefaultPipelineCopyCount {
+    $script:DefaultPipelineEntryCount++
+    if (($script:DefaultPipelineEntryCount % 2) -eq 1) {
+        return $DefaultPipelineAlternatingCopiesPerFile
+    }
+
+    return $DefaultPipelineMinCopiesPerFile
+}
 
 function Initialize-Folders {
-    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir)) {
+    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir, $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir, $ArchiveSetOutputDir)) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
@@ -142,8 +166,18 @@ function Invoke-ExternalTool {
         [string[]]$Arguments
     )
 
-    $output = & $Command @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    # Native tools such as exiftool write warnings to stderr. With
+    # $ErrorActionPreference = "Stop", PowerShell treats those as terminating errors
+    # even when the tool exits successfully.
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & $Command @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
 
     if ($exitCode -ne 0) {
         $outputText = ($output | Out-String).Trim()
@@ -311,6 +345,31 @@ function New-RandomFilePath {
     return $path
 }
 
+function New-ImageBulkBatchId {
+    return "{0}_{1}" -f (Get-Date -Format "yyyyMMdd_HHmmss"), (New-RandomToken)
+}
+
+function New-ImageBulkOutputPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BatchId,
+
+        [Parameter(Mandatory = $true)]
+        [int]$VariantNumber,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Extension
+    )
+
+    do {
+        $token = New-RandomToken
+        $fileName = "image_{0}_v{1:00}_{2}{3}" -f $BatchId, $VariantNumber, $token, $Extension.ToLowerInvariant()
+        $path = Join-Path $ImageBulkOutputDir $fileName
+    } while (Test-Path -LiteralPath $path)
+
+    return $path
+}
+
 function New-RandomOutputDirectory {
     param(
         [Parameter(Mandatory = $true)]
@@ -355,6 +414,168 @@ function Get-UniqueDestinationPath {
     } while (Test-Path -LiteralPath $destination)
 
     return $destination
+}
+
+function Get-OutputArchiveCutoffTime {
+    return (Get-Date).AddHours(-1 * $ArchiveAgeHours)
+}
+
+function Move-OldOutputFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo]$File,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ArchiveDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $ArchiveDirectory)) {
+        New-Item -ItemType Directory -Path $ArchiveDirectory -Force | Out-Null
+    }
+
+    $destination = Get-UniqueDestinationPath -Directory $ArchiveDirectory -OriginalFileName $File.Name
+    Move-Item -LiteralPath $File.FullName -Destination $destination -Force
+    return $destination
+}
+
+function Move-OldOutputDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.DirectoryInfo]$Directory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ArchiveDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $ArchiveDirectory)) {
+        New-Item -ItemType Directory -Path $ArchiveDirectory -Force | Out-Null
+    }
+
+    $destination = Get-UniqueDestinationPath -Directory $ArchiveDirectory -OriginalFileName $Directory.Name
+    Move-Item -LiteralPath $Directory.FullName -Destination $destination -Force
+    return $destination
+}
+
+function Invoke-FlatOutputArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ArchiveDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$CutoffTime
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceDirectory)) {
+        return 0
+    }
+
+    $count = 0
+    $files = @(Get-ChildItem -LiteralPath $SourceDirectory -File -ErrorAction SilentlyContinue)
+    foreach ($file in $files) {
+        if ($file.LastWriteTime -gt $CutoffTime) {
+            continue
+        }
+
+        try {
+            [void](Move-OldOutputFile -File $file -ArchiveDirectory $ArchiveDirectory)
+            $count++
+        }
+        catch {
+            Write-Log "Could not archive output file '$($file.FullName)': $($_.Exception.Message)" "WARN"
+        }
+    }
+
+    if ($count -gt 0) {
+        Write-Log "Archived $count file(s) from $Label output."
+    }
+
+    return $count
+}
+
+function Invoke-SetOutputArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [datetime]$CutoffTime
+    )
+
+    if (-not (Test-Path -LiteralPath $SetOutputDir)) {
+        return 0
+    }
+
+    $count = 0
+    $directories = @(Get-ChildItem -LiteralPath $SetOutputDir -Directory -ErrorAction SilentlyContinue)
+    foreach ($directory in $directories) {
+        if ($directory.LastWriteTime -gt $CutoffTime) {
+            continue
+        }
+
+        try {
+            [void](Move-OldOutputDirectory -Directory $directory -ArchiveDirectory $ArchiveSetOutputDir)
+            $count++
+        }
+        catch {
+            Write-Log "Could not archive set output directory '$($directory.FullName)': $($_.Exception.Message)" "WARN"
+        }
+    }
+
+    if ($count -gt 0) {
+        Write-Log "Archived $count set folder(s) from sets output."
+    }
+
+    return $count
+}
+
+function Get-OutputArchiveTargets {
+    return @(
+        [pscustomobject]@{
+            SourceDirectory = $OutputDir
+            ArchiveDirectory = $ArchiveDefaultOutputDir
+            Label = "default"
+        },
+        [pscustomobject]@{
+            SourceDirectory = $ImageBulkOutputDir
+            ArchiveDirectory = $ArchiveImageBulkOutputDir
+            Label = "images"
+        },
+        [pscustomobject]@{
+            SourceDirectory = $LongOutputDir
+            ArchiveDirectory = $ArchiveLongOutputDir
+            Label = "long"
+        },
+        [pscustomobject]@{
+            SourceDirectory = $RemuxOutputDir
+            ArchiveDirectory = $ArchiveRemuxOutputDir
+            Label = "convert"
+        }
+    )
+}
+
+function Invoke-OutputArchiveIfDue {
+    if (-not $ArchiveEnabled) {
+        return
+    }
+
+    $now = Get-Date
+    if ($script:LastArchiveCheck -and (($now - $script:LastArchiveCheck).TotalMinutes -lt $ArchiveCheckIntervalMinutes)) {
+        return
+    }
+
+    $script:LastArchiveCheck = $now
+    $cutoffTime = Get-OutputArchiveCutoffTime
+
+    Write-Log "Running scheduled output archive check (older than $ArchiveAgeHours hours)."
+
+    foreach ($target in Get-OutputArchiveTargets) {
+        [void](Invoke-FlatOutputArchive -SourceDirectory $target.SourceDirectory -ArchiveDirectory $target.ArchiveDirectory -Label $target.Label -CutoffTime $cutoffTime)
+    }
+
+    [void](Invoke-SetOutputArchive -CutoffTime $cutoffTime)
 }
 
 function Move-InputFile {
@@ -716,7 +937,10 @@ function Convert-ImageVariant {
 function Process-VideoFile {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [int]$CopyCount
     )
 
     $createdOutputs = New-Object System.Collections.Generic.List[string]
@@ -736,8 +960,8 @@ function Process-VideoFile {
 
         $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
 
-        for ($variant = 1; $variant -le $DefaultCopiesPerFile; $variant++) {
-            $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $DefaultCopiesPerFile
+        for ($variant = 1; $variant -le $CopyCount; $variant++) {
+            $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $CopyCount
             $outputPath = Convert-VideoVariant -InputPath $Path -VariantNumber $variant -DurationSeconds $duration -TrimMs $trimMs
             $createdOutputs.Add($outputPath)
         }
@@ -753,13 +977,16 @@ function Process-VideoFile {
 function Process-ImageFile {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [int]$CopyCount
     )
 
     $createdOutputs = New-Object System.Collections.Generic.List[string]
 
     try {
-        for ($variant = 1; $variant -le $DefaultCopiesPerFile; $variant++) {
+        for ($variant = 1; $variant -le $CopyCount; $variant++) {
             $outputPath = Convert-ImageVariant -InputPath $Path -VariantNumber $variant
             $createdOutputs.Add($outputPath)
         }
@@ -797,11 +1024,14 @@ function Convert-ImageBulkVariant {
         [Parameter(Mandatory = $true)]
         [pscustomobject]$Dimensions,
 
+        [Parameter(Mandatory = $true)]
+        [string]$BatchId,
+
         [string]$SourcePath = $InputPath
     )
 
     $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-RandomFilePath -Directory $ImageBulkOutputDir -Prefix ("image_v{0:00}" -f $VariantNumber) -Extension $outputExtension
+    $outputPath = New-ImageBulkOutputPath -BatchId $BatchId -VariantNumber $VariantNumber -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -863,8 +1093,11 @@ function Process-ImageBulkFile {
         $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
         Write-Log "Image bulk dimensions: $($dimensions.Width)x$($dimensions.Height)"
 
+        $batchId = New-ImageBulkBatchId
+        Write-Log "Image bulk batch id: $batchId"
+
         for ($variant = 1; $variant -le $ImageBulkCopiesPerFile; $variant++) {
-            $outputPath = Convert-ImageBulkVariant -InputPath $processingSource.ProcessingPath -SourcePath $Path -VariantNumber $variant -Dimensions $dimensions
+            $outputPath = Convert-ImageBulkVariant -InputPath $processingSource.ProcessingPath -SourcePath $Path -VariantNumber $variant -Dimensions $dimensions -BatchId $batchId
             $createdOutputs.Add($outputPath)
         }
 
@@ -1145,11 +1378,14 @@ function Process-MediaFile {
 
     Write-Log "Started processing: $Path"
 
+    $copyCount = Get-DefaultPipelineCopyCount
+    Write-Log "Default pipeline copy count for entry $($script:DefaultPipelineEntryCount): $copyCount"
+
     if (Test-IsVideo $Path) {
-        [void](Process-VideoFile -Path $Path)
+        [void](Process-VideoFile -Path $Path -CopyCount $copyCount)
     }
     else {
-        [void](Process-ImageFile -Path $Path)
+        [void](Process-ImageFile -Path $Path -CopyCount $copyCount)
     }
 
     Move-InputFile -Path $Path -DestinationDirectory $OriginalDir
@@ -1337,6 +1573,252 @@ function Get-LongSegmentPlan {
     return $segments.ToArray()
 }
 
+function Get-LongVideoScaleFilter {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$MaxWidthValue
+    )
+
+    return "scale='trunc(min($MaxWidthValue,iw)/2)*2':-2"
+}
+
+function Get-LongTargetVideoBitrateKbps {
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$DurationSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [double]$MaxSizeMegabytes
+    )
+
+    if ($DurationSeconds -le 0) {
+        return 0
+    }
+
+    $audioBitrateText = ($AudioBitrate -replace "[^0-9.]", "")
+    $audioBitrateKbps = 128.0
+    $parsedAudioBitrate = 0.0
+    if (-not [string]::IsNullOrWhiteSpace($audioBitrateText)) {
+        if ([double]::TryParse($audioBitrateText, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsedAudioBitrate)) {
+            $audioBitrateKbps = $parsedAudioBitrate
+        }
+    }
+
+    $totalBitrateKbps = ($MaxSizeMegabytes * 8192.0) / $DurationSeconds
+    $videoBitrateKbps = [Math]::Max(200, $totalBitrateKbps - $audioBitrateKbps)
+
+    return [int][Math]::Floor($videoBitrateKbps * 0.90)
+}
+
+function Invoke-LongVideoEncode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [int]$CrfValue,
+
+        [int]$MaxWidthValue,
+
+        [double]$StartSeconds = -1,
+
+        [double]$DurationSeconds = -1,
+
+        [int]$MaxVideoBitrateKbps = 0
+    )
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath
+    )
+
+    if ($StartSeconds -ge 0 -and $DurationSeconds -gt 0) {
+        $culture = [System.Globalization.CultureInfo]::InvariantCulture
+        $startText = $StartSeconds.ToString("0.###", $culture)
+        $durationText = $DurationSeconds.ToString("0.###", $culture)
+        $arguments += @("-ss", $startText, "-t", $durationText)
+    }
+
+    $arguments += @(
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-crf", [string]$CrfValue,
+        "-preset", $Preset,
+        "-vf", (Get-LongVideoScaleFilter -MaxWidthValue $MaxWidthValue),
+        "-pix_fmt", "yuv420p"
+    )
+
+    if ($MaxVideoBitrateKbps -gt 0) {
+        $arguments += @(
+            "-maxrate", ("{0}k" -f $MaxVideoBitrateKbps),
+            "-bufsize", ("{0}k" -f ($MaxVideoBitrateKbps * 2))
+        )
+    }
+
+    $arguments += @(
+        "-c:a", "aac",
+        "-b:a", $AudioBitrate,
+        "-movflags", "+faststart",
+        "-map_metadata", "-1",
+        $OutputPath
+    )
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+}
+
+function Invoke-LongOutputSizeCap {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [string]$SourceInputPath = "",
+
+        [double]$StartSeconds = -1,
+
+        [double]$SegmentDurationSeconds = -1,
+
+        [int]$TrimMs = 0
+    )
+
+    if ($LongMaxOutputSizeMB -le 0) {
+        return
+    }
+
+    $maxBytes = [long]($LongMaxOutputSizeMB * 1024 * 1024)
+    $initialSize = (Get-Item -LiteralPath $OutputPath).Length
+
+    if ($initialSize -le $maxBytes) {
+        return
+    }
+
+    Write-Log "Long output exceeds size cap ($([math]::Round($initialSize / 1MB, 2)) MB > $LongMaxOutputSizeMB MB): $OutputPath" "WARN"
+
+    $reencodeFromSource = -not [string]::IsNullOrWhiteSpace($SourceInputPath)
+    $encodeInputPath = if ($reencodeFromSource) { $SourceInputPath } else { $OutputPath }
+    $encodeStartSeconds = -1
+    $encodeDurationSeconds = -1
+    $durationForBitrate = Get-VideoDurationSeconds -Path $OutputPath
+
+    if ($reencodeFromSource) {
+        $trimSeconds = $TrimMs / 1000.0
+        $encodeDurationSeconds = [Math]::Max(0.1, $SegmentDurationSeconds - $trimSeconds)
+        $encodeStartSeconds = $StartSeconds
+        $durationForBitrate = $encodeDurationSeconds
+    }
+
+    $bitrateKbps = Get-LongTargetVideoBitrateKbps -DurationSeconds $durationForBitrate -MaxSizeMegabytes $LongMaxOutputSizeMB
+    $profiles = @(
+        @{ Crf = 28; MaxWidth = $MaxWidth; Bitrate = 0 },
+        @{ Crf = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
+        @{ Crf = 32; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 },
+        @{ Crf = 32; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = $bitrateKbps }
+    )
+
+    $outputDirectory = [System.IO.Path]::GetDirectoryName($OutputPath)
+    $chosenTempPath = $null
+    $chosenSize = [long]::MaxValue
+
+    foreach ($profile in $profiles) {
+        $tempPath = Join-Path $outputDirectory ("sizecap_{0}.mp4" -f (New-RandomToken 8))
+
+        try {
+            Invoke-LongVideoEncode -InputPath $encodeInputPath -OutputPath $tempPath -StartSeconds $encodeStartSeconds -DurationSeconds $encodeDurationSeconds -CrfValue $profile.Crf -MaxWidthValue $profile.MaxWidth -MaxVideoBitrateKbps $profile.Bitrate
+            $newSize = (Get-Item -LiteralPath $tempPath).Length
+            $bitrateLabel = if ($profile.Bitrate -gt 0) { "$($profile.Bitrate)k maxrate" } else { "no maxrate" }
+            Write-Log "Long size-cap attempt CRF $($profile.Crf), max width $($profile.MaxWidth), $bitrateLabel -> $([math]::Round($newSize / 1MB, 2)) MB"
+
+            if ($newSize -lt $chosenSize) {
+                if ($chosenTempPath -and (Test-Path -LiteralPath $chosenTempPath)) {
+                    Remove-Item -LiteralPath $chosenTempPath -Force
+                }
+
+                $chosenTempPath = $tempPath
+                $chosenSize = $newSize
+                $tempPath = $null
+            }
+
+            if ($newSize -le $maxBytes) {
+                break
+            }
+        }
+        finally {
+            if ($tempPath -and (Test-Path -LiteralPath $tempPath)) {
+                Remove-Item -LiteralPath $tempPath -Force
+            }
+        }
+    }
+
+    if (-not $chosenTempPath -or -not (Test-Path -LiteralPath $chosenTempPath)) {
+        Write-Log "Long output size-cap re-encode did not produce a candidate: $OutputPath" "WARN"
+        return
+    }
+
+    Move-Item -LiteralPath $chosenTempPath -Destination $OutputPath -Force
+    Clear-Metadata -Path $OutputPath
+
+    if ($chosenSize -gt $maxBytes) {
+        Write-Log "Long output still above size cap after all attempts ($([math]::Round($chosenSize / 1MB, 2)) MB): $OutputPath" "WARN"
+    }
+    else {
+        Write-Log "Long output compressed to size cap ($([math]::Round($chosenSize / 1MB, 2)) MB): $OutputPath"
+    }
+}
+
+function Get-LongOutputRecompressTargets {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Directories
+    )
+
+    $maxBytes = [long]($LongMaxOutputSizeMB * 1024 * 1024)
+    $targets = New-Object System.Collections.Generic.List[string]
+
+    foreach ($directory in $Directories) {
+        if (-not (Test-Path -LiteralPath $directory)) {
+            continue
+        }
+
+        Get-ChildItem -LiteralPath $directory -File -Filter "*.mp4" | ForEach-Object {
+            if ($_.Length -gt $maxBytes) {
+                $targets.Add($_.FullName)
+            }
+        }
+    }
+
+    return $targets.ToArray()
+}
+
+function Start-LongOutputRecompressBatch {
+    $directories = @($LongOutputDir)
+    $targets = Get-LongOutputRecompressTargets -Directories $directories
+
+    Write-Log "Long output recompress: found $($targets.Count) file(s) over $LongMaxOutputSizeMB MB in $($directories -join ', ')"
+
+    $processed = 0
+    $failed = 0
+
+    foreach ($path in $targets) {
+        try {
+            $before = (Get-Item -LiteralPath $path).Length
+            Invoke-LongOutputSizeCap -OutputPath $path
+            $after = (Get-Item -LiteralPath $path).Length
+            Write-Log "Recompressed long output: $path ($([math]::Round($before / 1MB, 2)) MB -> $([math]::Round($after / 1MB, 2)) MB)"
+            $processed++
+        }
+        catch {
+            Write-Log "Failed to recompress long output '$path': $($_.Exception.Message)" "ERROR"
+            $failed++
+        }
+    }
+
+    Write-Log "Long output recompress finished: $processed succeeded, $failed failed"
+}
+
 function Convert-LongVideoVariant {
     param(
         [Parameter(Mandatory = $true)]
@@ -1364,33 +1846,12 @@ function Convert-LongVideoVariant {
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
     $startText = $StartSeconds.ToString("0.###", $culture)
     $targetDurationText = $targetDuration.ToString("0.###", $culture)
-    $scaleFilter = "scale='trunc(min($MaxWidth,iw)/2)*2':-2"
 
     Write-Log "Long segment $SegmentNumber variant $VariantNumber trim: ${TrimMs}ms, start: ${startText}s, target duration: ${targetDurationText}s"
 
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-ss", $startText,
-        "-t", $targetDurationText,
-        "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-crf", [string]$Crf,
-        "-preset", $Preset,
-        "-vf", $scaleFilter,
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", $AudioBitrate,
-        "-movflags", "+faststart",
-        "-map_metadata", "-1",
-        $outputPath
-    )
-
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+    Invoke-LongVideoEncode -InputPath $InputPath -OutputPath $outputPath -StartSeconds $StartSeconds -DurationSeconds $targetDuration -CrfValue $Crf -MaxWidthValue $MaxWidth
     Clear-Metadata -Path $outputPath
+    Invoke-LongOutputSizeCap -OutputPath $outputPath -SourceInputPath $InputPath -StartSeconds $StartSeconds -SegmentDurationSeconds $SegmentDurationSeconds -TrimMs $TrimMs
     Write-Log "Created long output: $outputPath"
 
     return $outputPath
@@ -1551,14 +2012,29 @@ function Start-PollingWatcher {
     Write-Log "MOV remux output: $RemuxOutputDir"
     Write-Log "Long pipeline input: $LongInputDir"
     Write-Log "Long pipeline output: $LongOutputDir"
+    if ($LongMaxOutputSizeMB -gt 0) {
+        Write-Log "Long pipeline size cap: $LongMaxOutputSizeMB MB (fallback max width: $LongSizeCapFallbackMaxWidth px)"
+    }
+    else {
+        Write-Log "Long pipeline size cap: disabled"
+    }
     Write-Log "Image bulk input: $ImageBulkInputDir"
     Write-Log "Image bulk output: $ImageBulkOutputDir"
     Write-Log "Set pipeline input: $SetInputDir"
     Write-Log "Set pipeline output: $SetOutputDir"
+    if ($ArchiveEnabled) {
+        Write-Log "Output archive enabled: files older than $ArchiveAgeHours hours move under $ArchiveRootDir (checked every $ArchiveCheckIntervalMinutes minutes)."
+        foreach ($target in Get-OutputArchiveTargets) {
+            Write-Log "Output archive target: $($target.Label) -> $($target.ArchiveDirectory)"
+        }
+        Write-Log "Output archive target: sets -> $ArchiveSetOutputDir"
+    }
     Write-Log "Polling every $PollSeconds seconds."
 
     while ($true) {
         try {
+            Invoke-OutputArchiveIfDue
+
             $setMediaFiles = Get-CandidateSetMediaFiles
             foreach ($file in $setMediaFiles) {
                 Process-SetMediaFileSafely -Path $file.FullName
@@ -1606,6 +2082,11 @@ try {
 
     if ($CheckOnly) {
         Write-Log "Startup check completed successfully."
+        exit 0
+    }
+
+    if ($RecompressLongOutputs) {
+        Start-LongOutputRecompressBatch
         exit 0
     }
 
