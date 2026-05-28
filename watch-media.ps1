@@ -16,6 +16,8 @@ $RemuxRootDir = Join-Path $PipelineRoot "convert"
 $RemuxInputDir = Join-Path $RemuxRootDir "input"
 $RemuxOutputDir = Join-Path $RemuxRootDir "output"
 $RemuxOriginalDir = Join-Path $RemuxRootDir "original"
+$RemuxOriginalVideosDir = Join-Path $RemuxOriginalDir "videos"
+$RemuxOriginalImagesDir = Join-Path $RemuxOriginalDir "images"
 $RemuxFailedDir = Join-Path $RemuxRootDir "failed"
 $LongRootDir = Join-Path $PipelineRoot "long"
 $LongInputDir = Join-Path $LongRootDir "input"
@@ -43,8 +45,13 @@ $ImageBulkCropMinPermille = 5
 $ImageBulkCropMaxPermille = 20
 $MinTrimMs = 15
 $MaxTrimMs = 95
+$PreferNvenc = $true
 $Crf = 24
 $Preset = "medium"
+$NvencPreset = "p4"
+$NvencCq = 26
+$LongNvencCq = 28
+$LongNvencPrimaryMaxrateScale = 0.92
 $AudioBitrate = "128k"
 $MaxWidth = 1080
 $StableSeconds = 3
@@ -68,10 +75,16 @@ $VideoExtensions = @(".mp4", ".mov", ".mkv", ".webm", ".avi")
 $ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic")
 $TempExtensions = @(".crdownload", ".tmp", ".part", ".download")
 
+# Convert pipeline: source formats that get rewritten into widely supported ones.
+$RemuxVideoSourceExtensions = @(".mov")
+$RemuxImageSourceExtensions = @(".heic")
+$RemuxImageOutputExtension = ".jpg"
+
 $script:ProcessingPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $script:FFmpegPath = $null
 $script:FFprobePath = $null
 $script:ExifToolPath = $null
+$script:UseNvenc = $false
 $script:InstanceMutex = $null
 $script:LastArchiveCheck = $null
 $script:DefaultPipelineEntryCount = 0
@@ -86,7 +99,7 @@ function Get-DefaultPipelineCopyCount {
 }
 
 function Initialize-Folders {
-    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir, $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir, $ArchiveSetOutputDir)) {
+    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxOriginalVideosDir, $RemuxOriginalImagesDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir, $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir, $ArchiveSetOutputDir)) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
@@ -147,6 +160,126 @@ function Resolve-RequiredTool {
     throw "Required tool '$Name' was not found in PATH or the default C:\Tools location. Install it and make sure '$Name' can be run from a new PowerShell window."
 }
 
+function Test-NvencEncoderAvailable {
+    try {
+        $output = & $script:FFmpegPath -hide_banner -encoders 2>&1 | Out-String
+        return $output -match '\bh264_nvenc\b'
+    }
+    catch {
+        return $false
+    }
+}
+
+function Initialize-VideoEncoder {
+    $script:UseNvenc = $false
+
+    if ($PreferNvenc -and (Test-NvencEncoderAvailable)) {
+        $script:UseNvenc = $true
+        Write-Log "Video encoder: h264_nvenc (GPU, preset $NvencPreset, CQ $NvencCq, long CQ $LongNvencCq)"
+        return
+    }
+
+    if ($PreferNvenc) {
+        Write-Log "NVENC encoder not available in FFmpeg; falling back to libx264." "WARN"
+    }
+
+    Write-Log "Video encoder: libx264 (CPU, preset $Preset, CRF $Crf)"
+}
+
+function Get-VideoEncoderName {
+    if ($script:UseNvenc) {
+        return "h264_nvenc"
+    }
+
+    return "libx264"
+}
+
+function Get-VideoScaleFilter {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$MaxWidthValue
+    )
+
+    return "scale='trunc(min($MaxWidthValue,iw)/2)*2':-2"
+}
+
+function New-VideoEncoderArguments {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$QualityValue,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxWidthValue,
+
+        [int]$MaxVideoBitrateKbps = 0
+    )
+
+    if ($script:UseNvenc) {
+        $arguments = @(
+            "-c:v", "h264_nvenc",
+            "-preset", $NvencPreset,
+            "-tune", "hq",
+            "-rc", "vbr",
+            "-cq", [string]$QualityValue,
+            "-b:v", "0",
+            "-spatial_aq", "1",
+            "-temporal_aq", "1",
+            "-vf", (Get-VideoScaleFilter -MaxWidthValue $MaxWidthValue),
+            "-pix_fmt", "yuv420p"
+        )
+    }
+    else {
+        $arguments = @(
+            "-c:v", "libx264",
+            "-crf", [string]$QualityValue,
+            "-preset", $Preset,
+            "-vf", (Get-VideoScaleFilter -MaxWidthValue $MaxWidthValue),
+            "-pix_fmt", "yuv420p"
+        )
+    }
+
+    if ($MaxVideoBitrateKbps -gt 0) {
+        $arguments += @(
+            "-maxrate", ("{0}k" -f $MaxVideoBitrateKbps),
+            "-bufsize", ("{0}k" -f ($MaxVideoBitrateKbps * 2))
+        )
+    }
+
+    return $arguments
+}
+
+function Get-LongPrimaryMaxVideoBitrateKbps {
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$DurationSeconds
+    )
+
+    if (-not $script:UseNvenc -or $LongMaxOutputSizeMB -le 0 -or $DurationSeconds -le 0) {
+        return 0
+    }
+
+    $targetKbps = Get-LongTargetVideoBitrateKbps -DurationSeconds $DurationSeconds -MaxSizeMegabytes $LongMaxOutputSizeMB
+    return [int][Math]::Max(200, [Math]::Floor($targetKbps * $LongNvencPrimaryMaxrateScale))
+}
+
+function Get-LongSizeCapQualityProfiles {
+    if ($script:UseNvenc) {
+        return @(
+            @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
+            @{ Quality = 32; MaxWidth = $MaxWidth; Bitrate = 0 },
+            @{ Quality = 34; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 },
+            @{ Quality = 36; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 }
+        )
+    }
+
+    return @(
+        @{ Quality = 28; MaxWidth = $MaxWidth; Bitrate = 0 },
+        @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
+        @{ Quality = 32; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 },
+        @{ Quality = 32; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 }
+    )
+}
+
 function Test-ExternalTools {
     $script:FFmpegPath = Resolve-RequiredTool "ffmpeg"
     $script:FFprobePath = Resolve-RequiredTool "ffprobe"
@@ -155,6 +288,8 @@ function Test-ExternalTools {
     Write-Log "Found ffmpeg: $script:FFmpegPath"
     Write-Log "Found ffprobe: $script:FFprobePath"
     Write-Log "Found exiftool: $script:ExifToolPath"
+
+    Initialize-VideoEncoder
 }
 
 function Invoke-ExternalTool {
@@ -863,10 +998,10 @@ function Convert-VideoVariant {
     $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
     $targetDurationText = $targetDuration.ToString("0.###", $culture)
-    $scaleFilter = "scale='trunc(min($MaxWidth,iw)/2)*2':-2"
 
     Write-Log "Video variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
 
+    $qualityValue = if ($script:UseNvenc) { $NvencCq } else { $Crf }
     $arguments = @(
         "-y",
         "-hide_banner",
@@ -874,12 +1009,10 @@ function Convert-VideoVariant {
         "-i", $InputPath,
         "-t", $targetDurationText,
         "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-crf", [string]$Crf,
-        "-preset", $Preset,
-        "-vf", $scaleFilter,
-        "-pix_fmt", "yuv420p",
+        "-map", "0:a?"
+    )
+    $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth
+    $arguments += @(
         "-c:a", "aac",
         "-b:a", $AudioBitrate,
         "-movflags", "+faststart",
@@ -1167,10 +1300,10 @@ function Convert-SetVideoVariant {
     $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
     $targetDurationText = $targetDuration.ToString("0.###", $culture)
-    $scaleFilter = "scale='trunc(min($MaxWidth,iw)/2)*2':-2"
 
     Write-Log "Set video variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
 
+    $qualityValue = if ($script:UseNvenc) { $NvencCq } else { $Crf }
     $arguments = @(
         "-y",
         "-hide_banner",
@@ -1178,12 +1311,10 @@ function Convert-SetVideoVariant {
         "-i", $InputPath,
         "-t", $targetDurationText,
         "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-crf", [string]$Crf,
-        "-preset", $Preset,
-        "-vf", $scaleFilter,
-        "-pix_fmt", "yuv420p",
+        "-map", "0:a?"
+    )
+    $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth
+    $arguments += @(
         "-c:a", "aac",
         "-b:a", $AudioBitrate,
         "-movflags", "+faststart",
@@ -1447,27 +1578,96 @@ function Invoke-MovToMp4Remux {
     Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
 }
 
-function Convert-MovToMp4Remux {
+function Invoke-RemuxImageConvert {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath,
+        "-frames:v", "1",
+        "-map_metadata", "-1"
+    )
+
+    $outputExtension = [System.IO.Path]::GetExtension($OutputPath).ToLowerInvariant()
+    if ($outputExtension -in @(".jpg", ".jpeg")) {
+        $arguments += @("-q:v", "2")
+    }
+    elseif ($outputExtension -eq ".webp") {
+        $arguments += @("-quality", "92")
+    }
+    elseif ($outputExtension -eq ".png") {
+        $arguments += @("-compression_level", "6")
+    }
+
+    $arguments += @($OutputPath)
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+}
+
+function Convert-RemuxMediaFile {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
     )
 
-    $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "remux" -Extension ".mp4"
+    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
 
-    Write-Log "Started MOV remux: $Path"
-    Write-Log "Remux output path: $outputPath"
+    if ($RemuxVideoSourceExtensions -contains $extension) {
+        $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "remux" -Extension ".mp4"
 
-    try {
-        Invoke-MovToMp4Remux -InputPath $Path -OutputPath $outputPath
-        Clear-Metadata -Path $outputPath
-        Move-InputFile -Path $Path -DestinationDirectory $RemuxOriginalDir
-        Write-Log "Successfully remuxed MOV to MP4: $outputPath"
+        Write-Log "Started convert (video) for: $Path"
+        Write-Log "Convert output path: $outputPath"
+
+        try {
+            Invoke-MovToMp4Remux -InputPath $Path -OutputPath $outputPath
+            Clear-Metadata -Path $outputPath
+            Move-InputFile -Path $Path -DestinationDirectory $RemuxOriginalVideosDir
+            Write-Log "Successfully converted video to MP4: $outputPath"
+        }
+        catch {
+            Remove-GeneratedOutputs -Paths @($outputPath)
+            throw
+        }
+
+        return
     }
-    catch {
-        Remove-GeneratedOutputs -Paths @($outputPath)
-        throw
+
+    if ($RemuxImageSourceExtensions -contains $extension) {
+        $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "convert" -Extension $RemuxImageOutputExtension
+
+        Write-Log "Started convert (image) for: $Path"
+        Write-Log "Convert output path: $outputPath"
+
+        try {
+            Invoke-RemuxImageConvert -InputPath $Path -OutputPath $outputPath
+            Clear-Metadata -Path $outputPath
+            Move-InputFile -Path $Path -DestinationDirectory $RemuxOriginalImagesDir
+            Write-Log "Successfully converted image to $($RemuxImageOutputExtension): $outputPath"
+        }
+        catch {
+            Remove-GeneratedOutputs -Paths @($outputPath)
+            throw
+        }
+
+        return
     }
+
+    if (Test-IsSupportedMedia $Path) {
+        Write-Log "Convert pass-through (already a supported format): $Path"
+        Move-InputFile -Path $Path -DestinationDirectory $RemuxOutputDir
+        Write-Log "Passed through to convert output unchanged: $Path"
+        return
+    }
+
+    throw "Unsupported convert source format '$extension' for: $Path"
 }
 
 function Process-RemuxFileSafely {
@@ -1483,12 +1683,12 @@ function Process-RemuxFileSafely {
     }
 
     try {
-        Write-Log "Detected MOV remux file: $fullPath"
+        Write-Log "Detected convert file: $fullPath"
         Wait-FileReady -Path $fullPath
-        Convert-MovToMp4Remux -Path $fullPath
+        Convert-RemuxMediaFile -Path $fullPath
     }
     catch {
-        Write-Log "Failed remuxing '$fullPath': $($_.Exception.Message)" "ERROR"
+        Write-Log "Failed converting '$fullPath': $($_.Exception.Message)" "ERROR"
         try {
             Move-InputFile -Path $fullPath -DestinationDirectory $RemuxFailedDir
         }
@@ -1579,7 +1779,7 @@ function Get-LongVideoScaleFilter {
         [int]$MaxWidthValue
     )
 
-    return "scale='trunc(min($MaxWidthValue,iw)/2)*2':-2"
+    return Get-VideoScaleFilter -MaxWidthValue $MaxWidthValue
 }
 
 function Get-LongTargetVideoBitrateKbps {
@@ -1610,6 +1810,44 @@ function Get-LongTargetVideoBitrateKbps {
     return [int][Math]::Floor($videoBitrateKbps * 0.90)
 }
 
+function Invoke-LongSegmentExtract {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [double]$StartSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [double]$DurationSeconds
+    )
+
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    $startText = $StartSeconds.ToString("0.###", $culture)
+    $durationText = $DurationSeconds.ToString("0.###", $culture)
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-ss", $startText,
+        "-i", $InputPath,
+        "-t", $durationText,
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-dn",
+        "-c", "copy",
+        "-map_metadata", "-1",
+        "-movflags", "+faststart",
+        $OutputPath
+    )
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+}
+
 function Invoke-LongVideoEncode {
     param(
         [Parameter(Mandatory = $true)]
@@ -1618,7 +1856,7 @@ function Invoke-LongVideoEncode {
         [Parameter(Mandatory = $true)]
         [string]$OutputPath,
 
-        [int]$CrfValue,
+        [int]$QualityValue,
 
         [int]$MaxWidthValue,
 
@@ -1629,37 +1867,32 @@ function Invoke-LongVideoEncode {
         [int]$MaxVideoBitrateKbps = 0
     )
 
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
     $arguments = @(
         "-y",
         "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath
+        "-loglevel", "error"
     )
 
     if ($StartSeconds -ge 0 -and $DurationSeconds -gt 0) {
-        $culture = [System.Globalization.CultureInfo]::InvariantCulture
         $startText = $StartSeconds.ToString("0.###", $culture)
         $durationText = $DurationSeconds.ToString("0.###", $culture)
-        $arguments += @("-ss", $startText, "-t", $durationText)
+        $arguments += @("-ss", $startText, "-i", $InputPath, "-t", $durationText)
+    }
+    else {
+        $arguments += @("-i", $InputPath)
+
+        if ($DurationSeconds -gt 0) {
+            $durationText = $DurationSeconds.ToString("0.###", $culture)
+            $arguments += @("-t", $durationText)
+        }
     }
 
     $arguments += @(
         "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-crf", [string]$CrfValue,
-        "-preset", $Preset,
-        "-vf", (Get-LongVideoScaleFilter -MaxWidthValue $MaxWidthValue),
-        "-pix_fmt", "yuv420p"
+        "-map", "0:a?"
     )
-
-    if ($MaxVideoBitrateKbps -gt 0) {
-        $arguments += @(
-            "-maxrate", ("{0}k" -f $MaxVideoBitrateKbps),
-            "-bufsize", ("{0}k" -f ($MaxVideoBitrateKbps * 2))
-        )
-    }
-
+    $arguments += New-VideoEncoderArguments -QualityValue $QualityValue -MaxWidthValue $MaxWidthValue -MaxVideoBitrateKbps $MaxVideoBitrateKbps
     $arguments += @(
         "-c:a", "aac",
         "-b:a", $AudioBitrate,
@@ -1712,12 +1945,9 @@ function Invoke-LongOutputSizeCap {
     }
 
     $bitrateKbps = Get-LongTargetVideoBitrateKbps -DurationSeconds $durationForBitrate -MaxSizeMegabytes $LongMaxOutputSizeMB
-    $profiles = @(
-        @{ Crf = 28; MaxWidth = $MaxWidth; Bitrate = 0 },
-        @{ Crf = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
-        @{ Crf = 32; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 },
-        @{ Crf = 32; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = $bitrateKbps }
-    )
+    $profiles = Get-LongSizeCapQualityProfiles
+    $profiles[$profiles.Count - 1].Bitrate = $bitrateKbps
+    $qualityLabel = if ($script:UseNvenc) { "CQ" } else { "CRF" }
 
     $outputDirectory = [System.IO.Path]::GetDirectoryName($OutputPath)
     $chosenTempPath = $null
@@ -1727,10 +1957,10 @@ function Invoke-LongOutputSizeCap {
         $tempPath = Join-Path $outputDirectory ("sizecap_{0}.mp4" -f (New-RandomToken 8))
 
         try {
-            Invoke-LongVideoEncode -InputPath $encodeInputPath -OutputPath $tempPath -StartSeconds $encodeStartSeconds -DurationSeconds $encodeDurationSeconds -CrfValue $profile.Crf -MaxWidthValue $profile.MaxWidth -MaxVideoBitrateKbps $profile.Bitrate
+            Invoke-LongVideoEncode -InputPath $encodeInputPath -OutputPath $tempPath -StartSeconds $encodeStartSeconds -DurationSeconds $encodeDurationSeconds -QualityValue $profile.Quality -MaxWidthValue $profile.MaxWidth -MaxVideoBitrateKbps $profile.Bitrate
             $newSize = (Get-Item -LiteralPath $tempPath).Length
             $bitrateLabel = if ($profile.Bitrate -gt 0) { "$($profile.Bitrate)k maxrate" } else { "no maxrate" }
-            Write-Log "Long size-cap attempt CRF $($profile.Crf), max width $($profile.MaxWidth), $bitrateLabel -> $([math]::Round($newSize / 1MB, 2)) MB"
+            Write-Log "Long size-cap attempt $qualityLabel $($profile.Quality), max width $($profile.MaxWidth), $bitrateLabel -> $([math]::Round($newSize / 1MB, 2)) MB"
 
             if ($newSize -lt $chosenSize) {
                 if ($chosenTempPath -and (Test-Path -LiteralPath $chosenTempPath)) {
@@ -1831,9 +2061,6 @@ function Convert-LongVideoVariant {
         [int]$VariantNumber,
 
         [Parameter(Mandatory = $true)]
-        [double]$StartSeconds,
-
-        [Parameter(Mandatory = $true)]
         [double]$SegmentDurationSeconds,
 
         [Parameter(Mandatory = $true)]
@@ -1844,14 +2071,15 @@ function Convert-LongVideoVariant {
     $trimSeconds = $TrimMs / 1000.0
     $targetDuration = [Math]::Max(0.1, $SegmentDurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
-    $startText = $StartSeconds.ToString("0.###", $culture)
     $targetDurationText = $targetDuration.ToString("0.###", $culture)
 
-    Write-Log "Long segment $SegmentNumber variant $VariantNumber trim: ${TrimMs}ms, start: ${startText}s, target duration: ${targetDurationText}s"
+    Write-Log "Long segment $SegmentNumber variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
 
-    Invoke-LongVideoEncode -InputPath $InputPath -OutputPath $outputPath -StartSeconds $StartSeconds -DurationSeconds $targetDuration -CrfValue $Crf -MaxWidthValue $MaxWidth
+    $qualityValue = if ($script:UseNvenc) { $LongNvencCq } else { $Crf }
+    $maxVideoBitrateKbps = Get-LongPrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration
+    Invoke-LongVideoEncode -InputPath $InputPath -OutputPath $outputPath -DurationSeconds $targetDuration -QualityValue $qualityValue -MaxWidthValue $MaxWidth -MaxVideoBitrateKbps $maxVideoBitrateKbps
     Clear-Metadata -Path $outputPath
-    Invoke-LongOutputSizeCap -OutputPath $outputPath -SourceInputPath $InputPath -StartSeconds $StartSeconds -SegmentDurationSeconds $SegmentDurationSeconds -TrimMs $TrimMs
+    Invoke-LongOutputSizeCap -OutputPath $outputPath -SourceInputPath $InputPath -SegmentDurationSeconds $SegmentDurationSeconds -TrimMs $TrimMs
     Write-Log "Created long output: $outputPath"
 
     return $outputPath
@@ -1885,7 +2113,18 @@ function Process-LongVideoFile {
         Write-Log "Long video duration: ${durationText}s"
         Write-Log "Long segment plan: $($segments.Count) segment(s): $segmentSummary"
 
+        $segmentPaths = @{}
         foreach ($segment in $segments) {
+            $segmentPath = Join-Path $workDir ("segment_{0:00}.mp4" -f $segment.Index)
+            $startText = $segment.StartSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+            $segmentDurationText = $segment.DurationSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+            Write-Log "Long pipeline extracting segment $($segment.Index) (${startText}s, ${segmentDurationText}s)"
+            Invoke-LongSegmentExtract -InputPath $sourcePath -OutputPath $segmentPath -StartSeconds $segment.StartSeconds -DurationSeconds $segment.DurationSeconds
+            $segmentPaths[$segment.Index] = $segmentPath
+        }
+
+        foreach ($segment in $segments) {
+            $segmentInputPath = $segmentPaths[$segment.Index]
             $range = Get-TrimRange -DurationSeconds $segment.DurationSeconds
             if ($range.CanTrim) {
                 Write-Log "Long segment $($segment.Index) trim range $($range.MinMs)-$($range.MaxMs) ms"
@@ -1897,7 +2136,7 @@ function Process-LongVideoFile {
             $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
             for ($variant = 1; $variant -le $LongCopiesPerSegment; $variant++) {
                 $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $LongCopiesPerSegment
-                $outputPath = Convert-LongVideoVariant -InputPath $sourcePath -SegmentNumber $segment.Index -VariantNumber $variant -StartSeconds $segment.StartSeconds -SegmentDurationSeconds $segment.DurationSeconds -TrimMs $trimMs
+                $outputPath = Convert-LongVideoVariant -InputPath $segmentInputPath -SegmentNumber $segment.Index -VariantNumber $variant -SegmentDurationSeconds $segment.DurationSeconds -TrimMs $trimMs
                 $createdOutputs.Add($outputPath)
             }
         }
@@ -1968,7 +2207,7 @@ function Get-CandidateRemuxFiles {
     }
 
     return @(Get-ChildItem -LiteralPath $RemuxInputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and ($_.Extension.ToLowerInvariant() -eq ".mov")
+        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsSupportedMedia $_.FullName)
     } | Sort-Object LastWriteTime, FullName)
 }
 
@@ -2008,8 +2247,8 @@ function Start-PollingWatcher {
     Write-Log "Output: $OutputDir"
     Write-Log "Original archive: $OriginalDir"
     Write-Log "Failed: $FailedDir"
-    Write-Log "MOV remux input: $RemuxInputDir"
-    Write-Log "MOV remux output: $RemuxOutputDir"
+    Write-Log "Convert input: $RemuxInputDir"
+    Write-Log "Convert output: $RemuxOutputDir"
     Write-Log "Long pipeline input: $LongInputDir"
     Write-Log "Long pipeline output: $LongOutputDir"
     if ($LongMaxOutputSizeMB -gt 0) {

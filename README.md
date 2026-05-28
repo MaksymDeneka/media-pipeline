@@ -17,6 +17,8 @@ D:\MediaPipeline\
     input\
     output\
     original\
+      videos\
+      images\
     failed\
   long\
     input\
@@ -41,10 +43,11 @@ D:\MediaPipeline\
 - `original`: source files are moved here after all 3 variants succeed.
 - `failed`: source files are moved here if processing fails.
 - `logs`: daily logs named like `media-pipeline-YYYYMMDD.log`.
-- `convert\input`: put raw `.mov` files here when you only want MP4 remuxing.
-- `convert\output`: remuxed `.mp4` files are written here.
-- `convert\original`: source `.mov` files are moved here after remuxing succeeds.
-- `convert\failed`: source `.mov` files are moved here if remuxing fails.
+- `convert\input`: put `.mov` or `.heic` files here to convert them into widely supported formats; other supported files are passed through to the output unchanged.
+- `convert\output`: converted files are written here (`.mov` -> `.mp4`, `.heic` -> `.jpg`).
+- `convert\original\videos`: source videos are moved here after conversion succeeds.
+- `convert\original\images`: source images are moved here after conversion succeeds.
+- `convert\failed`: source files are moved here if conversion fails.
 - `long\input`: put long raw videos here for segmenting plus 3 processed variants per segment.
 - `long\output`: processed long-pipeline segment variants are written here.
 - `long\original`: long-pipeline source files are moved here after all segment variants succeed.
@@ -157,7 +160,7 @@ The watcher uses a polling loop:
 6. Move successful originals to `D:\MediaPipeline\original`.
 7. Move failed originals to `D:\MediaPipeline\failed`.
 
-It also scans `D:\MediaPipeline\convert\input` for `.mov` files and remuxes them to `.mp4` without re-encoding.
+It also scans `D:\MediaPipeline\convert\input`, converting `.mov` -> `.mp4` (stream copy) and `.heic` -> `.jpg`; any other supported media file is passed through to the output unchanged.
 
 It also scans `D:\MediaPipeline\long\input` for longer videos, segments them, and creates 3 processed variants for each segment.
 
@@ -274,27 +277,38 @@ For images, each copy gets:
 
 Successful source files move to `D:\MediaPipeline\sets\original`. Failed source files move to `D:\MediaPipeline\sets\failed`.
 
-## MOV To MP4 Remux Workflow
+## Convert Workflow
 
-Use this lane for long raw `.mov` clips that you need to convert to `.mp4` before manually cutting them. Put the source file here:
+Use this lane to convert media from formats you cannot use into widely supported ones. It handles both videos and images. Put the source file here:
 
 ```text
 D:\MediaPipeline\convert\input
 ```
 
-The watcher writes one MP4 here:
+The watcher writes one converted file here:
 
 ```text
 D:\MediaPipeline\convert\output
 ```
 
-This does not create 3 variants and does not re-encode the video. It uses FFmpeg stream copy for video and audio:
+Source formats and their targets:
+
+- `.mov` -> `.mp4`
+- `.heic` -> `.jpg`
+
+Any other supported media file dropped here (for example `.jpg`, `.png`, `.webp`, or `.mp4`) is passed through to the output folder unchanged. This makes it safe to drop a mixed batch: files that need conversion are converted, and files that are already in a good format are simply moved to the output.
+
+This does not create multiple variants. Videos are not re-encoded: `.mov` uses FFmpeg stream copy for video and audio:
 
 ```text
 -map 0:v:0 -map 0:a? -dn -c copy -map_metadata -1 -movflags +faststart
 ```
 
 Because the video and audio streams are copied, quality and timing should remain unchanged. Non-media data tracks from phones, such as sensor or metadata streams, are dropped because MP4 often cannot contain them.
+
+Images are decoded and re-encoded to high-quality JPEG with `-q:v 2`, and metadata is stripped. `.heic` is the common iPhone photo format; JPEG is chosen for broad compatibility at high quality.
+
+Converted source files are moved into `convert\original\videos` or `convert\original\images`. Passed-through files go straight to `convert\output` (they are unchanged, so no separate original copy is kept). Failed source files are moved to `convert\failed`.
 
 ## Long Video Pipeline
 
