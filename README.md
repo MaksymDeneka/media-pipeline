@@ -92,6 +92,8 @@ ffprobe
 exiftool
 ```
 
+The watcher is launched with **PowerShell 7** (`pwsh`), which enables parallel image processing. A portable build extracted to `C:\Tools\pwsh` is enough — the launcher calls `C:\Tools\pwsh\pwsh.exe` by full path, so it does not need to be on `PATH`. Under Windows PowerShell 5.1 the script still runs, but image conversions fall back to sequential.
+
 Verify from a new PowerShell window:
 
 ```powershell
@@ -130,12 +132,22 @@ Open a new PowerShell window and run:
 exiftool -ver
 ```
 
+### Install PowerShell 7
+
+1. Download the latest stable `PowerShell-<version>-win-x64.zip` from the official PowerShell releases.
+2. Extract it to `C:\Tools\pwsh`.
+3. Verify:
+
+```powershell
+C:\Tools\pwsh\pwsh.exe -version
+```
+
 ## Usage
 
 Run manually:
 
 ```powershell
-& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "D:\Projects\media-pipeline\watch-media.ps1"
+& "C:\Tools\pwsh\pwsh.exe" -NoProfile -ExecutionPolicy Bypass -File "D:\Projects\media-pipeline\watch-media.ps1"
 ```
 
 Or start it hidden:
@@ -159,6 +171,8 @@ The watcher uses a polling loop:
 5. Process one file at a time.
 6. Move successful originals to `D:\MediaPipeline\original`.
 7. Move failed originals to `D:\MediaPipeline\failed`.
+
+The default input pipeline and the video-heavy pipelines process one file at a time. The image pipelines run conversions in parallel: the convert pipeline processes multiple files at once, and the bulk image pipeline renders its per-file variants concurrently. The number of simultaneous image conversions is controlled by `$ImageProcessingConcurrency` in `watch-media.ps1` (default: up to 6, capped by CPU count). Parallel processing requires PowerShell 7.
 
 It also scans `D:\MediaPipeline\convert\input`, converting `.mov` -> `.mp4` (stream copy) and `.heic` -> `.jpg`; any other supported media file is passed through to the output unchanged.
 

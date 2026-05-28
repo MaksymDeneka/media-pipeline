@@ -1,6 +1,7 @@
 param(
     [switch]$CheckOnly,
-    [switch]$RecompressLongOutputs
+    [switch]$RecompressLongOutputs,
+    [switch]$AsLibrary
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +42,8 @@ $DefaultPipelineAlternatingCopiesPerFile = 8
 $LongCopiesPerSegment = 3
 $ImageBulkCopiesPerFile = 20
 $SetCopiesPerFile = 10
+# How many image conversions run at once (convert pipeline files; bulk pipeline variants). Requires PowerShell 7.
+$ImageProcessingConcurrency = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
 $ImageBulkCropMinPermille = 5
 $ImageBulkCropMaxPermille = 20
 $MinTrimMs = 15
@@ -87,6 +90,9 @@ $script:ExifToolPath = $null
 $script:UseNvenc = $false
 $script:InstanceMutex = $null
 $script:LastArchiveCheck = $null
+$script:LogMutex = $null
+$script:ScriptPath = $PSCommandPath
+$script:SupportsParallel = ($PSVersionTable.PSVersion.Major -ge 7)
 $script:DefaultPipelineEntryCount = 0
 
 function Get-DefaultPipelineCopyCount {
@@ -121,7 +127,19 @@ function Write-Log {
 
     try {
         $logFile = Join-Path $LogsDir ("media-pipeline-{0}.log" -f (Get-Date -Format "yyyyMMdd"))
-        Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
+        # Parallel workers (PS7 ForEach-Object -Parallel) run in separate runspaces, so serialize
+        # appends through a named system mutex shared by name across all runspaces/processes.
+        if (-not $script:LogMutex) {
+            $script:LogMutex = [System.Threading.Mutex]::new($false, "Local\MediaPipelineLogMutex")
+        }
+        $acquired = $false
+        try {
+            try { $acquired = $script:LogMutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+            Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
+        }
+        finally {
+            if ($acquired) { $script:LogMutex.ReleaseMutex() }
+        }
     }
     catch {
         Write-Host "[$timestamp] [ERROR] Failed to write log file: $($_.Exception.Message)"
@@ -1229,9 +1247,41 @@ function Process-ImageBulkFile {
         $batchId = New-ImageBulkBatchId
         Write-Log "Image bulk batch id: $batchId"
 
-        for ($variant = 1; $variant -le $ImageBulkCopiesPerFile; $variant++) {
-            $outputPath = Convert-ImageBulkVariant -InputPath $processingSource.ProcessingPath -SourcePath $Path -VariantNumber $variant -Dimensions $dimensions -BatchId $batchId
-            $createdOutputs.Add($outputPath)
+        if ($script:SupportsParallel -and $ImageBulkCopiesPerFile -gt 1) {
+            $libPath = $script:ScriptPath
+            $ffPath = $script:FFmpegPath
+            $fpPath = $script:FFprobePath
+            $exPath = $script:ExifToolPath
+            $procPath = $processingSource.ProcessingPath
+            $srcPath = $Path
+            $dims = $dimensions
+            $bId = $batchId
+            $variantResults = 1..$ImageBulkCopiesPerFile | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
+                . $using:libPath -AsLibrary
+                $script:FFmpegPath = $using:ffPath
+                $script:FFprobePath = $using:fpPath
+                $script:ExifToolPath = $using:exPath
+                try {
+                    $out = Convert-ImageBulkVariant -InputPath $using:procPath -SourcePath $using:srcPath -VariantNumber $_ -Dimensions $using:dims -BatchId $using:bId
+                    [pscustomobject]@{ Output = $out; Error = $null }
+                }
+                catch {
+                    [pscustomobject]@{ Output = $null; Error = $_.Exception.Message }
+                }
+            }
+            foreach ($vr in $variantResults) {
+                if ($vr.Output) { $createdOutputs.Add($vr.Output) }
+            }
+            $variantErrors = @($variantResults | Where-Object { $_.Error })
+            if ($variantErrors.Count -gt 0) {
+                throw "Failed $($variantErrors.Count)/$ImageBulkCopiesPerFile image bulk variants. First error: $($variantErrors[0].Error)"
+            }
+        }
+        else {
+            for ($variant = 1; $variant -le $ImageBulkCopiesPerFile; $variant++) {
+                $outputPath = Convert-ImageBulkVariant -InputPath $processingSource.ProcessingPath -SourcePath $Path -VariantNumber $variant -Dimensions $dimensions -BatchId $batchId
+                $createdOutputs.Add($outputPath)
+            }
         }
 
         Move-InputFile -Path $Path -DestinationDirectory $ImageBulkOriginalDir
@@ -2268,6 +2318,12 @@ function Start-PollingWatcher {
         }
         Write-Log "Output archive target: sets -> $ArchiveSetOutputDir"
     }
+    if ($script:SupportsParallel) {
+        Write-Log "Image processing concurrency: $ImageProcessingConcurrency (parallel enabled on PowerShell $($PSVersionTable.PSVersion))."
+    }
+    else {
+        Write-Log "Image processing runs sequentially (PowerShell $($PSVersionTable.PSVersion) has no -Parallel; needs 7+)." "WARN"
+    }
     Write-Log "Polling every $PollSeconds seconds."
 
     while ($true) {
@@ -2290,8 +2346,23 @@ function Start-PollingWatcher {
             }
 
             $remuxFiles = Get-CandidateRemuxFiles
-            foreach ($file in $remuxFiles) {
-                Process-RemuxFileSafely -Path $file.FullName
+            if ($script:SupportsParallel -and $remuxFiles.Count -gt 1) {
+                $libPath = $script:ScriptPath
+                $ffPath = $script:FFmpegPath
+                $fpPath = $script:FFprobePath
+                $exPath = $script:ExifToolPath
+                $remuxFiles | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
+                    . $using:libPath -AsLibrary
+                    $script:FFmpegPath = $using:ffPath
+                    $script:FFprobePath = $using:fpPath
+                    $script:ExifToolPath = $using:exPath
+                    Process-RemuxFileSafely -Path $_.FullName
+                }
+            }
+            else {
+                foreach ($file in $remuxFiles) {
+                    Process-RemuxFileSafely -Path $file.FullName
+                }
             }
 
             $files = Get-CandidateInputFiles
@@ -2306,6 +2377,10 @@ function Start-PollingWatcher {
         Start-Sleep -Seconds $PollSeconds
     }
 }
+
+# When dot-sourced by a parallel worker runspace, only load functions/config and return —
+# do not take the single-instance mutex or start the polling loop.
+if ($AsLibrary) { return }
 
 try {
     $createdNew = $false
