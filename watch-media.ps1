@@ -36,12 +36,18 @@ $SetInputDir = Join-Path $SetRootDir "input"
 $SetOutputDir = Join-Path $SetRootDir "output"
 $SetOriginalDir = Join-Path $SetRootDir "original"
 $SetFailedDir = Join-Path $SetRootDir "failed"
+$SetBatchRootDir = Join-Path $PipelineRoot "setbatch"
+$SetBatchInputDir = Join-Path $SetBatchRootDir "input"
+$SetBatchOutputDir = Join-Path $SetBatchRootDir "output"
+$SetBatchOriginalDir = Join-Path $SetBatchRootDir "original"
+$SetBatchFailedDir = Join-Path $SetBatchRootDir "failed"
 
 $DefaultPipelineMinCopiesPerFile = 7
 $DefaultPipelineAlternatingCopiesPerFile = 8
 $LongCopiesPerSegment = 3
 $ImageBulkCopiesPerFile = 20
 $SetCopiesPerFile = 10
+$SetBatchCount = 11
 # How many image conversions run at once (convert pipeline files; bulk pipeline variants). Requires PowerShell 7.
 $ImageProcessingConcurrency = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
 $ImageBulkCropMinPermille = 5
@@ -73,6 +79,7 @@ $ArchiveImageBulkOutputDir = Join-Path $ArchiveRootDir "images"
 $ArchiveRemuxOutputDir = Join-Path $ArchiveRootDir "convert"
 $ArchiveLongOutputDir = Join-Path $ArchiveRootDir "long"
 $ArchiveSetOutputDir = Join-Path $ArchiveRootDir "sets"
+$ArchiveSetBatchOutputDir = Join-Path $ArchiveRootDir "setbatch"
 
 $VideoExtensions = @(".mp4", ".mov", ".mkv", ".webm", ".avi")
 $ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic")
@@ -94,6 +101,7 @@ $script:LogMutex = $null
 $script:ScriptPath = $PSCommandPath
 $script:SupportsParallel = ($PSVersionTable.PSVersion.Major -ge 7)
 $script:DefaultPipelineEntryCount = 0
+$script:LastSetBatchSignature = $null
 
 function Get-DefaultPipelineCopyCount {
     $script:DefaultPipelineEntryCount++
@@ -105,7 +113,7 @@ function Get-DefaultPipelineCopyCount {
 }
 
 function Initialize-Folders {
-    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxOriginalVideosDir, $RemuxOriginalImagesDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir, $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir, $ArchiveSetOutputDir)) {
+    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxOriginalVideosDir, $RemuxOriginalImagesDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir, $SetBatchInputDir, $SetBatchOutputDir, $SetBatchOriginalDir, $SetBatchFailedDir, $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir, $ArchiveSetOutputDir, $ArchiveSetBatchOutputDir)) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
@@ -651,34 +659,43 @@ function Invoke-FlatOutputArchive {
     return $count
 }
 
-function Invoke-SetOutputArchive {
+function Invoke-DirectoryOutputArchive {
     param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ArchiveDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
         [Parameter(Mandatory = $true)]
         [datetime]$CutoffTime
     )
 
-    if (-not (Test-Path -LiteralPath $SetOutputDir)) {
+    if (-not (Test-Path -LiteralPath $SourceDirectory)) {
         return 0
     }
 
     $count = 0
-    $directories = @(Get-ChildItem -LiteralPath $SetOutputDir -Directory -ErrorAction SilentlyContinue)
+    $directories = @(Get-ChildItem -LiteralPath $SourceDirectory -Directory -ErrorAction SilentlyContinue)
     foreach ($directory in $directories) {
         if ($directory.LastWriteTime -gt $CutoffTime) {
             continue
         }
 
         try {
-            [void](Move-OldOutputDirectory -Directory $directory -ArchiveDirectory $ArchiveSetOutputDir)
+            [void](Move-OldOutputDirectory -Directory $directory -ArchiveDirectory $ArchiveDirectory)
             $count++
         }
         catch {
-            Write-Log "Could not archive set output directory '$($directory.FullName)': $($_.Exception.Message)" "WARN"
+            Write-Log "Could not archive $Label output directory '$($directory.FullName)': $($_.Exception.Message)" "WARN"
         }
     }
 
     if ($count -gt 0) {
-        Write-Log "Archived $count set folder(s) from sets output."
+        Write-Log "Archived $count folder(s) from $Label output."
     }
 
     return $count
@@ -728,7 +745,8 @@ function Invoke-OutputArchiveIfDue {
         [void](Invoke-FlatOutputArchive -SourceDirectory $target.SourceDirectory -ArchiveDirectory $target.ArchiveDirectory -Label $target.Label -CutoffTime $cutoffTime)
     }
 
-    [void](Invoke-SetOutputArchive -CutoffTime $cutoffTime)
+    [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetOutputDir -ArchiveDirectory $ArchiveSetOutputDir -Label "sets" -CutoffTime $cutoffTime)
+    [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetBatchOutputDir -ArchiveDirectory $ArchiveSetBatchOutputDir -Label "setbatch" -CutoffTime $cutoffTime)
 }
 
 function Move-InputFile {
@@ -1539,6 +1557,229 @@ function Process-SetMediaFileSafely {
     }
 }
 
+function Get-SetBatchOutputExtension {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath
+    )
+
+    $extension = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
+    if ($extension -eq ".heic") {
+        return ".jpg"
+    }
+
+    return $extension
+}
+
+function Convert-SetBatchImageVariant {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SetNumber,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Dimensions,
+
+        [string]$SourcePath = $InputPath
+    )
+
+    $outputExtension = Get-SetBatchOutputExtension -InputPath $SourcePath
+    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix "media" -Extension $outputExtension
+    $width = $Dimensions.Width
+    $height = $Dimensions.Height
+    $canCrop = ($width -ge 200 -and $height -ge 200)
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath,
+        "-frames:v", "1",
+        "-map_metadata", "-1"
+    )
+
+    if ($canCrop) {
+        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
+        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
+        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
+        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
+        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
+        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
+        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
+        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
+        $arguments += @("-vf", $filter)
+        Write-Log "Set batch image set $SetNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
+    }
+    else {
+        Write-Log "Set batch image set $SetNumber skipping crop because image is small: ${width}x${height}" "WARN"
+    }
+
+    if ($outputExtension -in @(".jpg", ".jpeg")) {
+        $arguments += @("-q:v", "2")
+    }
+    elseif ($outputExtension -eq ".webp") {
+        $arguments += @("-quality", "92")
+    }
+    elseif ($outputExtension -eq ".png") {
+        $arguments += @("-compression_level", "6")
+    }
+
+    $arguments += @($outputPath)
+
+    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+    Clear-Metadata -Path $outputPath
+    Write-Log "Created set batch output (set $SetNumber): $outputPath"
+
+    return $outputPath
+}
+
+function Process-SetBatchSourceFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo]$File,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$SetDirectories
+    )
+
+    $path = $File.FullName
+
+    if (Test-IsVideo $path) {
+        $duration = Get-VideoDurationSeconds -Path $path
+        $durationText = $duration.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+        Write-Log "Set batch video duration: ${durationText}s ($($File.Name))"
+
+        $range = Get-TrimRange -DurationSeconds $duration
+        if ($range.CanTrim) {
+            Write-Log "Set batch video trim range $($range.MinMs)-$($range.MaxMs) ms ($($File.Name))"
+        }
+        else {
+            Write-Log "Set batch video skipping trim: $($range.Reason) ($($File.Name))" "WARN"
+        }
+
+        $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
+        for ($setNumber = 1; $setNumber -le $SetBatchCount; $setNumber++) {
+            $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $SetBatchCount
+            [void](Convert-SetVideoVariant -InputPath $path -OutputDirectory $SetDirectories[$setNumber - 1] -VariantNumber $setNumber -DurationSeconds $duration -TrimMs $trimMs)
+        }
+
+        return
+    }
+
+    $processingSource = Resolve-ImageProcessingSource -Path $path
+
+    try {
+        $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
+        Write-Log "Set batch image dimensions: $($dimensions.Width)x$($dimensions.Height) ($($File.Name))"
+
+        if ($script:SupportsParallel -and $SetBatchCount -gt 1) {
+            $libPath = $script:ScriptPath
+            $ffPath = $script:FFmpegPath
+            $fpPath = $script:FFprobePath
+            $exPath = $script:ExifToolPath
+            $procPath = $processingSource.ProcessingPath
+            $srcPath = $path
+            $dims = $dimensions
+            $dirs = $SetDirectories
+            $variantResults = 1..$SetBatchCount | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
+                . $using:libPath -AsLibrary
+                $script:FFmpegPath = $using:ffPath
+                $script:FFprobePath = $using:fpPath
+                $script:ExifToolPath = $using:exPath
+                $targetDirs = $using:dirs
+                try {
+                    $out = Convert-SetBatchImageVariant -InputPath $using:procPath -SourcePath $using:srcPath -OutputDirectory $targetDirs[$_ - 1] -SetNumber $_ -Dimensions $using:dims
+                    [pscustomobject]@{ Output = $out; Error = $null }
+                }
+                catch {
+                    [pscustomobject]@{ Output = $null; Error = $_.Exception.Message }
+                }
+            }
+            $variantErrors = @($variantResults | Where-Object { $_.Error })
+            if ($variantErrors.Count -gt 0) {
+                throw "Failed $($variantErrors.Count)/$SetBatchCount set-batch copies for '$($File.Name)'. First error: $($variantErrors[0].Error)"
+            }
+        }
+        else {
+            for ($setNumber = 1; $setNumber -le $SetBatchCount; $setNumber++) {
+                [void](Convert-SetBatchImageVariant -InputPath $processingSource.ProcessingPath -SourcePath $path -OutputDirectory $SetDirectories[$setNumber - 1] -SetNumber $setNumber -Dimensions $dimensions)
+            }
+        }
+    }
+    finally {
+        Remove-HeicWorkingCopy -Path $processingSource.TempPath
+    }
+}
+
+function Process-SetBatch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$Files
+    )
+
+    $batchDirectory = New-RandomOutputDirectory -Directory $SetBatchOutputDir -Prefix "batch"
+    Write-Log "Set batch output directory: $batchDirectory ($SetBatchCount sets, $($Files.Count) source file(s))"
+
+    try {
+        $setDirectories = @()
+        for ($setNumber = 1; $setNumber -le $SetBatchCount; $setNumber++) {
+            $setDirectory = Join-Path $batchDirectory ("set_{0:00}" -f $setNumber)
+            New-Item -ItemType Directory -Path $setDirectory -Force | Out-Null
+            $setDirectories += $setDirectory
+        }
+
+        foreach ($file in $Files) {
+            Write-Log "Set batch processing source file: $($file.Name)"
+            Process-SetBatchSourceFile -File $file -SetDirectories $setDirectories
+        }
+    }
+    catch {
+        Remove-GeneratedOutputDirectory -Path $batchDirectory
+        throw
+    }
+
+    # Outputs are complete. Archiving the source files is best-effort and must not
+    # discard the finished sets, so it runs after the transactional block above.
+    foreach ($file in $Files) {
+        try {
+            Move-InputFile -Path $file.FullName -DestinationDirectory $SetBatchOriginalDir
+        }
+        catch {
+            Write-Log "Set batch sets are complete but could not archive source '$($file.FullName)': $($_.Exception.Message)" "WARN"
+        }
+    }
+
+    Write-Log "Successfully processed set batch of $($Files.Count) file(s) into $SetBatchCount sets: $batchDirectory"
+}
+
+function Process-SetBatchSafely {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$Files
+    )
+
+    try {
+        Write-Log "Detected set batch: $($Files.Count) file(s)."
+        Process-SetBatch -Files $Files
+    }
+    catch {
+        Write-Log "Failed set batch processing: $($_.Exception.Message)" "ERROR"
+        foreach ($file in $Files) {
+            try {
+                Move-InputFile -Path $file.FullName -DestinationDirectory $SetBatchFailedDir
+            }
+            catch {
+                Write-Log "Could not move failed set batch file '$($file.FullName)': $($_.Exception.Message)" "ERROR"
+            }
+        }
+    }
+}
+
 function Process-MediaFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -2291,6 +2532,16 @@ function Get-CandidateSetMediaFiles {
     } | Sort-Object LastWriteTime, FullName)
 }
 
+function Get-CandidateSetBatchFiles {
+    if (-not (Test-Path -LiteralPath $SetBatchInputDir)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $SetBatchInputDir -File | Where-Object {
+        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsSupportedMedia $_.FullName)
+    } | Sort-Object LastWriteTime, FullName)
+}
+
 function Start-PollingWatcher {
     Write-Log "Watcher started."
     Write-Log "Input: $InputDir"
@@ -2311,12 +2562,15 @@ function Start-PollingWatcher {
     Write-Log "Image bulk output: $ImageBulkOutputDir"
     Write-Log "Set pipeline input: $SetInputDir"
     Write-Log "Set pipeline output: $SetOutputDir"
+    Write-Log "Set batch input: $SetBatchInputDir"
+    Write-Log "Set batch output: $SetBatchOutputDir ($SetBatchCount sets per batch)"
     if ($ArchiveEnabled) {
         Write-Log "Output archive enabled: files older than $ArchiveAgeHours hours move under $ArchiveRootDir (checked every $ArchiveCheckIntervalMinutes minutes)."
         foreach ($target in Get-OutputArchiveTargets) {
             Write-Log "Output archive target: $($target.Label) -> $($target.ArchiveDirectory)"
         }
         Write-Log "Output archive target: sets -> $ArchiveSetOutputDir"
+        Write-Log "Output archive target: setbatch -> $ArchiveSetBatchOutputDir"
     }
     if ($script:SupportsParallel) {
         Write-Log "Image processing concurrency: $ImageProcessingConcurrency (parallel enabled on PowerShell $($PSVersionTable.PSVersion))."
@@ -2333,6 +2587,35 @@ function Start-PollingWatcher {
             $setMediaFiles = Get-CandidateSetMediaFiles
             foreach ($file in $setMediaFiles) {
                 Process-SetMediaFileSafely -Path $file.FullName
+            }
+
+            $setBatchFiles = Get-CandidateSetBatchFiles
+            if ($setBatchFiles.Count -gt 0) {
+                $batchReady = $true
+                foreach ($batchFile in $setBatchFiles) {
+                    if (-not (Test-FileUnlocked $batchFile.FullName)) {
+                        $batchReady = $false
+                        break
+                    }
+                }
+
+                $batchSignature = (($setBatchFiles | ForEach-Object { '{0}|{1}' -f $_.FullName, $_.Length }) -join ';')
+                $newestWrite = ($setBatchFiles | Measure-Object -Property LastWriteTime -Maximum).Maximum
+                $batchSettled = ((Get-Date) - $newestWrite).TotalSeconds -ge $StableSeconds
+
+                if ($batchReady -and $batchSettled -and $batchSignature -eq $script:LastSetBatchSignature) {
+                    Process-SetBatchSafely -Files $setBatchFiles
+                    $script:LastSetBatchSignature = $null
+                }
+                else {
+                    if ($batchSignature -ne $script:LastSetBatchSignature) {
+                        Write-Log "Set batch: $($setBatchFiles.Count) file(s) detected; waiting for the batch to settle before processing."
+                    }
+                    $script:LastSetBatchSignature = $batchSignature
+                }
+            }
+            else {
+                $script:LastSetBatchSignature = $null
             }
 
             $imageBulkFiles = Get-CandidateImageBulkFiles

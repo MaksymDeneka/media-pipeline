@@ -36,6 +36,11 @@ D:\MediaPipeline\
     output\
     original\
     failed\
+  setbatch\
+    input\
+    output\
+    original\
+    failed\
 ```
 
 - `input`: set your browser download folder here.
@@ -61,6 +66,10 @@ D:\MediaPipeline\
 - `sets\output`: each source file gets a random subfolder containing 10 processed copies.
 - `sets\original`: source files are moved here after all 10 copies succeed.
 - `sets\failed`: source files are moved here if set processing fails.
+- `setbatch\input`: drop a whole group of files here to get several complete, differentiated copies of the entire group.
+- `setbatch\output`: each processed batch becomes one `batch_<timestamp>_<token>` folder containing `set_01` .. `set_NN` subfolders, each holding one processed copy of every source file.
+- `setbatch\original`: source files are moved here after the whole batch succeeds.
+- `setbatch\failed`: every source file in the batch is moved here if batch processing fails.
 
 ## Supported Files
 
@@ -182,6 +191,8 @@ It also scans `D:\MediaPipeline\images\input` for image-only bulk processing and
 
 It also scans `D:\MediaPipeline\sets\input` for media files and creates one output folder with 10 processed copies per source file.
 
+It also scans `D:\MediaPipeline\setbatch\input` and, once the batch settles, turns the whole group of files into several complete sets — one folder per set, each containing a processed copy of every source file (11 sets by default).
+
 ## Browser Download Folder
 
 Set your browser download folder to:
@@ -290,6 +301,44 @@ For images, each copy gets:
 - `.heic` output converted to `.png`
 
 Successful source files move to `D:\MediaPipeline\sets\original`. Failed source files move to `D:\MediaPipeline\sets\failed`.
+
+## Batch Sets Pipeline
+
+Use this lane when you want several complete, differentiated copies of a whole group of files at once. For example, 25 source images become 11 sets that each contain all 25 images, where every set looks the same as the originals but is byte- and pixel-different from the other sets.
+
+This is different from the Media Set Pipeline above: that lane groups output **per source file** (one folder per image, each with N copies of that one image), while this lane groups output **per set** (N folders, each with one copy of every image).
+
+Drop the whole group of files here:
+
+```text
+D:\MediaPipeline\setbatch\input
+```
+
+The watcher treats everything in this folder as one batch. It waits until the batch settles — no file is still being written, the file list is unchanged for a poll cycle, and nothing is locked — then writes one folder per processed batch:
+
+```text
+D:\MediaPipeline\setbatch\output\batch_YYYYMMDD_HHMMSS_<random>\
+  set_01\
+  set_02\
+  ...
+  set_11\
+```
+
+Each `set_NN` folder contains one processed copy of every source file. The default is 11 sets, controlled by `$SetBatchCount` in `watch-media.ps1`.
+
+For images, each copy gets:
+
+- random filename
+- FFmpeg re-encode
+- metadata removal with ExifTool
+- tiny randomized crop and scale back to the original dimensions when the image is large enough, applied independently per set so no two sets are identical
+- `.heic` converted to high-quality `.jpg` (`-q:v 2`)
+
+For videos, each copy gets the same treatment as the other video lanes: H.264 MP4, AAC audio, metadata stripped, width capped at 1080px without upscaling, and a small randomized trim from the end — one copy per set.
+
+Batch processing is all-or-nothing. If any file fails, the partial output folder is removed and every source file in the batch is moved to `setbatch\failed`. On success, the source files move to `setbatch\original`.
+
+Because the whole batch is processed in one pass, the watcher is busy until it finishes; large batches (many files times many sets) can take a while.
 
 ## Convert Workflow
 
@@ -429,6 +478,7 @@ $DefaultCopiesPerFile = 5
 $LongCopiesPerSegment = 3
 $ImageBulkCopiesPerFile = 20
 $SetCopiesPerFile = 10
+$SetBatchCount = 11
 $ImageBulkCropMinPermille = 5
 $ImageBulkCropMaxPermille = 20
 $MinTrimMs = 15
