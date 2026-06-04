@@ -6,12 +6,170 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Editable settings
-$PipelineRoot = "D:\MediaPipeline"
-$InputDir = Join-Path $PipelineRoot "input"
-$OutputDir = Join-Path $PipelineRoot "output"
-$OriginalDir = Join-Path $PipelineRoot "original"
-$FailedDir = Join-Path $PipelineRoot "failed"
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+# All user-tunable settings live in config.ini next to this script. Every value
+# below has a built-in default, so the watcher still runs if config.ini is
+# missing or a key is absent/garbled. To change settings, run "Edit Config.bat"
+# (opens config.ini in Notepad), then run "Restart Watcher.bat".
+
+# Reads a simple key=value INI file (lines starting with # or ; are comments,
+# [section] headers are ignored). Returns a case-insensitive hashtable of raw
+# string values. Returns an empty table if the file is missing or unreadable.
+function Read-IniSettings {
+    param([string]$Path)
+
+    $settings = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        return $settings
+    }
+
+    try {
+        foreach ($rawLine in (Get-Content -LiteralPath $Path -ErrorAction Stop)) {
+            $line = $rawLine.Trim()
+            if ($line.Length -eq 0) { continue }
+            if ($line.StartsWith('#') -or $line.StartsWith(';') -or $line.StartsWith('[')) { continue }
+
+            $eq = $line.IndexOf('=')
+            if ($eq -lt 1) { continue }
+
+            $key = $line.Substring(0, $eq).Trim()
+            $value = $line.Substring($eq + 1).Trim()
+            if ($value -match '^"(.*)"$' -or $value -match "^'(.*)'$") {
+                # Quoted value: take it verbatim (quotes can protect ; # and spaces).
+                $value = $matches[1]
+            }
+            else {
+                # Unquoted value: an inline comment starts at the first whitespace
+                # followed by ; or #, e.g.  Crf = 20   ; default: 24
+                $value = ($value -replace '\s+[;#].*$', '').Trim()
+            }
+            if ($key.Length -gt 0) { $settings[$key] = $value }
+        }
+    }
+    catch {
+        # A malformed config file must never stop the watcher; fall back to defaults.
+    }
+
+    return $settings
+}
+
+# Returns the config.ini value for $Key coerced to the type of $Default, or
+# $Default when the key is missing, blank, or cannot be parsed.
+function Get-Setting {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)]$Default
+    )
+
+    if (-not $script:ConfigSettings.ContainsKey($Key)) { return $Default }
+    $raw = [string]$script:ConfigSettings[$Key]
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $Default }
+    $raw = $raw.Trim()
+
+    try {
+        if ($Default -is [bool]) {
+            if ($raw -match '^(true|1|yes|on)$') { return $true }
+            if ($raw -match '^(false|0|no|off)$') { return $false }
+            return $Default
+        }
+        elseif ($Default -is [int]) {
+            return [int]::Parse($raw, [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        elseif ($Default -is [double]) {
+            return [double]::Parse($raw, [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        else {
+            return $raw
+        }
+    }
+    catch {
+        return $Default
+    }
+}
+
+# Locate config.ini next to this script (works both when run with -File and when
+# dot-sourced by parallel worker runspaces with -AsLibrary).
+$script:ConfigPath = $null
+if ($PSScriptRoot) {
+    $script:ConfigPath = Join-Path $PSScriptRoot "config.ini"
+}
+elseif ($PSCommandPath) {
+    $script:ConfigPath = Join-Path (Split-Path -Parent $PSCommandPath) "config.ini"
+}
+$script:ConfigSettings = Read-IniSettings -Path $script:ConfigPath
+
+# --- Tunable scalar settings (loaded from config.ini, with built-in defaults) ---
+$PipelineRoot = Get-Setting 'PipelineRoot' 'D:\MediaPipeline'
+
+$DefaultPipelineMinCopiesPerFile = Get-Setting 'DefaultPipelineMinCopiesPerFile' 7
+$DefaultPipelineAlternatingCopiesPerFile = Get-Setting 'DefaultPipelineAlternatingCopiesPerFile' 8
+$LongCopiesPerSegment = Get-Setting 'LongCopiesPerSegment' 3
+$ImageBulkCopiesPerFile = Get-Setting 'ImageBulkCopiesPerFile' 20
+$SetCopiesPerFile = Get-Setting 'SetCopiesPerFile' 10
+$SetBatchCount = Get-Setting 'SetBatchCount' 10
+
+# How many image conversions run at once (convert pipeline files; bulk pipeline
+# variants). Requires PowerShell 7. "auto" (or blank) = min(6, CPU count).
+$ImageProcessingConcurrencyRaw = Get-Setting 'ImageProcessingConcurrency' 'auto'
+$ImageProcessingConcurrencyParsed = 0
+if ([int]::TryParse([string]$ImageProcessingConcurrencyRaw, [ref]$ImageProcessingConcurrencyParsed) -and $ImageProcessingConcurrencyParsed -ge 1) {
+    $ImageProcessingConcurrency = $ImageProcessingConcurrencyParsed
+}
+else {
+    $ImageProcessingConcurrency = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
+}
+
+$ImageBulkCropMinPermille = Get-Setting 'ImageBulkCropMinPermille' 5
+$ImageBulkCropMaxPermille = Get-Setting 'ImageBulkCropMaxPermille' 20
+$MinTrimMs = Get-Setting 'MinTrimMs' 15
+$MaxTrimMs = Get-Setting 'MaxTrimMs' 95
+$PreferNvenc = Get-Setting 'PreferNvenc' $true
+$PreferAmf = Get-Setting 'PreferAmf' $true
+$Crf = Get-Setting 'Crf' 24
+$Preset = Get-Setting 'Preset' 'medium'
+$NvencPreset = Get-Setting 'NvencPreset' 'p4'
+$NvencCq = Get-Setting 'NvencCq' 26
+$LongNvencCq = Get-Setting 'LongNvencCq' 28
+$AmfQuality = Get-Setting 'AmfQuality' 'balanced'
+$AmfQp = Get-Setting 'AmfQp' 24
+$LongAmfQp = Get-Setting 'LongAmfQp' 26
+$LongNvencPrimaryMaxrateScale = Get-Setting 'LongNvencPrimaryMaxrateScale' 0.92
+$AudioBitrate = Get-Setting 'AudioBitrate' '128k'
+$MaxWidth = Get-Setting 'MaxWidth' 1080
+$DefaultMaxOutputSizeMB = Get-Setting 'DefaultMaxOutputSizeMB' 8
+$DefaultSizeCapFallbackMaxWidth = Get-Setting 'DefaultSizeCapFallbackMaxWidth' 720
+$DefaultNvencPrimaryMaxrateScale = Get-Setting 'DefaultNvencPrimaryMaxrateScale' 0.92
+$StableSeconds = Get-Setting 'StableSeconds' 3
+$TimeoutSeconds = Get-Setting 'TimeoutSeconds' 600
+$PollSeconds = Get-Setting 'PollSeconds' 2
+$LongSegmentTargetSeconds = Get-Setting 'LongSegmentTargetSeconds' 15
+$LongSegmentMinSeconds = Get-Setting 'LongSegmentMinSeconds' 11
+$LongMaxOutputSizeMB = Get-Setting 'LongMaxOutputSizeMB' 8
+$LongSizeCapFallbackMaxWidth = Get-Setting 'LongSizeCapFallbackMaxWidth' 720
+$ArchiveEnabled = Get-Setting 'ArchiveEnabled' $true
+$ArchiveAgeHours = Get-Setting 'ArchiveAgeHours' 15
+$ArchiveCheckIntervalMinutes = Get-Setting 'ArchiveCheckIntervalMinutes' 30
+
+# Asset store pipeline: like set-batch (one processed copy of every source file
+# per set), but it also writes a heatup.assetStoreMediaManifest.v1 JSON next to
+# the generated sets and uses a deliberately tiny end-trim (tens of ms at most)
+# so each rendition differs without noticeably changing its length.
+$AssetStoreSetCount = Get-Setting 'AssetStoreSetCount' 15
+$AssetStoreMinTrimMs = Get-Setting 'AssetStoreMinTrimMs' 10
+$AssetStoreMaxTrimMs = Get-Setting 'AssetStoreMaxTrimMs' 40
+$AssetStoreManifestSchema = Get-Setting 'AssetStoreManifestSchema' 'heatup.assetStoreMediaManifest.v1'
+$AssetStoreImportRoot = Get-Setting 'AssetStoreImportRoot' ''
+
+# --- Derived directory paths (computed from $PipelineRoot above) ---
+# Default pipeline folders live under "default" so they no longer sit loose in
+# the pipeline root next to the other pipeline folders.
+$DefaultRootDir = Join-Path $PipelineRoot "default"
+$InputDir = Join-Path $DefaultRootDir "input"
+$OutputDir = Join-Path $DefaultRootDir "output"
+$OriginalDir = Join-Path $DefaultRootDir "original"
+$FailedDir = Join-Path $DefaultRootDir "failed"
 $LogsDir = Join-Path $PipelineRoot "logs"
 $RemuxRootDir = Join-Path $PipelineRoot "convert"
 $RemuxInputDir = Join-Path $RemuxRootDir "input"
@@ -41,38 +199,11 @@ $SetBatchInputDir = Join-Path $SetBatchRootDir "input"
 $SetBatchOutputDir = Join-Path $SetBatchRootDir "output"
 $SetBatchOriginalDir = Join-Path $SetBatchRootDir "original"
 $SetBatchFailedDir = Join-Path $SetBatchRootDir "failed"
-
-$DefaultPipelineMinCopiesPerFile = 7
-$DefaultPipelineAlternatingCopiesPerFile = 8
-$LongCopiesPerSegment = 3
-$ImageBulkCopiesPerFile = 20
-$SetCopiesPerFile = 10
-$SetBatchCount = 11
-# How many image conversions run at once (convert pipeline files; bulk pipeline variants). Requires PowerShell 7.
-$ImageProcessingConcurrency = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
-$ImageBulkCropMinPermille = 5
-$ImageBulkCropMaxPermille = 20
-$MinTrimMs = 15
-$MaxTrimMs = 95
-$PreferNvenc = $true
-$Crf = 24
-$Preset = "medium"
-$NvencPreset = "p4"
-$NvencCq = 26
-$LongNvencCq = 28
-$LongNvencPrimaryMaxrateScale = 0.92
-$AudioBitrate = "128k"
-$MaxWidth = 1080
-$StableSeconds = 3
-$TimeoutSeconds = 600
-$PollSeconds = 2
-$LongSegmentTargetSeconds = 15
-$LongSegmentMinSeconds = 11
-$LongMaxOutputSizeMB = 8
-$LongSizeCapFallbackMaxWidth = 720
-$ArchiveEnabled = $true
-$ArchiveAgeHours = 15
-$ArchiveCheckIntervalMinutes = 30
+$AssetStoreRootDir = Join-Path $PipelineRoot "assetstore"
+$AssetStoreInputDir = Join-Path $AssetStoreRootDir "input"
+$AssetStoreOutputDir = Join-Path $AssetStoreRootDir "output"
+$AssetStoreOriginalDir = Join-Path $AssetStoreRootDir "original"
+$AssetStoreFailedDir = Join-Path $AssetStoreRootDir "failed"
 $ArchiveRootDir = Join-Path $PipelineRoot "archive"
 $ArchiveDefaultOutputDir = Join-Path $ArchiveRootDir "output"
 $ArchiveImageBulkOutputDir = Join-Path $ArchiveRootDir "images"
@@ -80,6 +211,7 @@ $ArchiveRemuxOutputDir = Join-Path $ArchiveRootDir "convert"
 $ArchiveLongOutputDir = Join-Path $ArchiveRootDir "long"
 $ArchiveSetOutputDir = Join-Path $ArchiveRootDir "sets"
 $ArchiveSetBatchOutputDir = Join-Path $ArchiveRootDir "setbatch"
+$ArchiveAssetStoreOutputDir = Join-Path $ArchiveRootDir "assetstore"
 
 $VideoExtensions = @(".mp4", ".mov", ".mkv", ".webm", ".avi")
 $ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic")
@@ -95,6 +227,7 @@ $script:FFmpegPath = $null
 $script:FFprobePath = $null
 $script:ExifToolPath = $null
 $script:UseNvenc = $false
+$script:UseAmf = $false
 $script:InstanceMutex = $null
 $script:LastArchiveCheck = $null
 $script:LogMutex = $null
@@ -102,6 +235,7 @@ $script:ScriptPath = $PSCommandPath
 $script:SupportsParallel = ($PSVersionTable.PSVersion.Major -ge 7)
 $script:DefaultPipelineEntryCount = 0
 $script:LastSetBatchSignature = $null
+$script:LastAssetStoreSignature = $null
 
 function Get-DefaultPipelineCopyCount {
     $script:DefaultPipelineEntryCount++
@@ -113,7 +247,7 @@ function Get-DefaultPipelineCopyCount {
 }
 
 function Initialize-Folders {
-    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxOriginalVideosDir, $RemuxOriginalImagesDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir, $SetBatchInputDir, $SetBatchOutputDir, $SetBatchOriginalDir, $SetBatchFailedDir, $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir, $ArchiveSetOutputDir, $ArchiveSetBatchOutputDir)) {
+    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxOriginalVideosDir, $RemuxOriginalImagesDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir, $SetBatchInputDir, $SetBatchOutputDir, $SetBatchOriginalDir, $SetBatchFailedDir, $AssetStoreInputDir, $AssetStoreOutputDir, $AssetStoreOriginalDir, $AssetStoreFailedDir, $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir, $ArchiveSetOutputDir, $ArchiveSetBatchOutputDir, $ArchiveAssetStoreOutputDir)) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
@@ -165,14 +299,21 @@ function Resolve-RequiredTool {
         return $command.Source
     }
 
+    # winget installs these and adds them to PATH, but a freshly-installed PATH may
+    # not be visible yet to an already-running process. The WinGet\Links shims and
+    # the C:\Tools portable layout are checked as fallbacks.
+    $wingetLinks = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links"
     $fallbackPaths = @{
         ffmpeg = @(
+            (Join-Path $wingetLinks "ffmpeg.exe"),
             "C:\Tools\ffmpeg\bin\ffmpeg.exe"
         )
         ffprobe = @(
+            (Join-Path $wingetLinks "ffprobe.exe"),
             "C:\Tools\ffmpeg\bin\ffprobe.exe"
         )
         exiftool = @(
+            (Join-Path $wingetLinks "exiftool.exe"),
             "C:\Tools\exiftool\exiftool.exe"
         )
     }
@@ -186,27 +327,88 @@ function Resolve-RequiredTool {
     throw "Required tool '$Name' was not found in PATH or the default C:\Tools location. Install it and make sure '$Name' can be run from a new PowerShell window."
 }
 
-function Test-NvencEncoderAvailable {
+function Test-FfmpegEncoderUsable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$EncoderName
+    )
+
     try {
-        $output = & $script:FFmpegPath -hide_banner -encoders 2>&1 | Out-String
-        return $output -match '\bh264_nvenc\b'
+        # FFmpeg's -encoders list shows a hardware encoder (h264_nvenc, h264_amf)
+        # whenever FFmpeg was *compiled* with it, even on machines without the
+        # matching GPU. Trusting the list makes the watcher pick a GPU encoder that
+        # then fails at runtime ("Cannot load nvcuda.dll" / "No NVIDIA capable
+        # devices found" / AMF "DLL not found"), sending every output to the failed
+        # folder. So confirm with a tiny throwaway encode and only trust a clean
+        # exit code.
+        $listed = & $script:FFmpegPath -hide_banner -encoders 2>&1 | Out-String
+        if ($listed -notmatch ("\b{0}\b" -f [regex]::Escape($EncoderName))) {
+            return $false
+        }
+
+        # 256x256 stays above the hardware encoders' minimum frame size (a smaller
+        # probe fails with "Frame Dimension less than the minimum supported value"
+        # even on a working GPU), and yuv420p is the format the real encodes use.
+        $probeArguments = @(
+            "-hide_banner",
+            "-loglevel", "error",
+            "-f", "lavfi",
+            "-i", "color=c=black:s=256x256:r=1:d=1",
+            "-frames:v", "1",
+            "-c:v", $EncoderName,
+            "-pix_fmt", "yuv420p",
+            "-f", "null",
+            "-"
+        )
+
+        $previousErrorAction = $ErrorActionPreference
+        try {
+            # A failing probe writes to stderr; keep that from becoming a terminating
+            # error so we can fall back to another encoder on the exit code instead.
+            $ErrorActionPreference = "Continue"
+            & $script:FFmpegPath @probeArguments 2>&1 | Out-Null
+            $probeExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
+
+        return ($probeExitCode -eq 0)
     }
     catch {
         return $false
     }
 }
 
+function Test-NvencEncoderAvailable {
+    return Test-FfmpegEncoderUsable -EncoderName "h264_nvenc"
+}
+
+function Test-AmfEncoderAvailable {
+    return Test-FfmpegEncoderUsable -EncoderName "h264_amf"
+}
+
 function Initialize-VideoEncoder {
     $script:UseNvenc = $false
+    $script:UseAmf = $false
 
+    # Preference order: NVIDIA GPU (NVENC) -> AMD GPU (AMF) -> CPU (libx264). Each
+    # GPU option is confirmed with a real probe encode, so a machine that lists the
+    # encoder but cannot run it cleanly falls through to the next option.
     if ($PreferNvenc -and (Test-NvencEncoderAvailable)) {
         $script:UseNvenc = $true
-        Write-Log "Video encoder: h264_nvenc (GPU, preset $NvencPreset, CQ $NvencCq, long CQ $LongNvencCq)"
+        Write-Log "Video encoder: h264_nvenc (NVIDIA GPU, preset $NvencPreset, CQ $NvencCq, long CQ $LongNvencCq)"
         return
     }
 
-    if ($PreferNvenc) {
-        Write-Log "NVENC encoder not available in FFmpeg; falling back to libx264." "WARN"
+    if ($PreferAmf -and (Test-AmfEncoderAvailable)) {
+        $script:UseAmf = $true
+        Write-Log "Video encoder: h264_amf (AMD GPU, quality $AmfQuality, QP $AmfQp, long QP $LongAmfQp)"
+        return
+    }
+
+    if ($PreferNvenc -or $PreferAmf) {
+        Write-Log "No usable GPU encoder (NVENC/AMF) found in FFmpeg; falling back to libx264 (CPU)." "WARN"
     }
 
     Write-Log "Video encoder: libx264 (CPU, preset $Preset, CRF $Crf)"
@@ -215,6 +417,10 @@ function Initialize-VideoEncoder {
 function Get-VideoEncoderName {
     if ($script:UseNvenc) {
         return "h264_nvenc"
+    }
+
+    if ($script:UseAmf) {
+        return "h264_amf"
     }
 
     return "libx264"
@@ -254,6 +460,36 @@ function New-VideoEncoderArguments {
             "-pix_fmt", "yuv420p"
         )
     }
+    elseif ($script:UseAmf) {
+        if ($MaxVideoBitrateKbps -gt 0) {
+            # Size-targeted: AMF constant-QP ignores a bitrate ceiling, so use
+            # peak-constrained VBR aimed at the ceiling (the shared block below
+            # adds -maxrate/-bufsize). This lands under the size cap in one pass.
+            $arguments = @(
+                "-c:v", "h264_amf",
+                "-usage", "transcoding",
+                "-quality", $AmfQuality,
+                "-rc", "vbr_peak",
+                "-b:v", ("{0}k" -f $MaxVideoBitrateKbps),
+                "-vf", (Get-VideoScaleFilter -MaxWidthValue $MaxWidthValue),
+                "-pix_fmt", "yuv420p"
+            )
+        }
+        else {
+            # Quality-targeted: constant QP, analogous to NVENC's CQ / libx264's CRF.
+            $arguments = @(
+                "-c:v", "h264_amf",
+                "-usage", "transcoding",
+                "-quality", $AmfQuality,
+                "-rc", "cqp",
+                "-qp_i", [string]$QualityValue,
+                "-qp_p", [string]$QualityValue,
+                "-qp_b", [string]$QualityValue,
+                "-vf", (Get-VideoScaleFilter -MaxWidthValue $MaxWidthValue),
+                "-pix_fmt", "yuv420p"
+            )
+        }
+    }
     else {
         $arguments = @(
             "-c:v", "libx264",
@@ -274,35 +510,55 @@ function New-VideoEncoderArguments {
     return $arguments
 }
 
-function Get-LongPrimaryMaxVideoBitrateKbps {
+function Get-PrimaryMaxVideoBitrateKbps {
     param(
         [Parameter(Mandatory = $true)]
-        [double]$DurationSeconds
+        [double]$DurationSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [double]$MaxSizeMegabytes,
+
+        [Parameter(Mandatory = $true)]
+        [double]$MaxrateScale
     )
 
-    if (-not $script:UseNvenc -or $LongMaxOutputSizeMB -le 0 -or $DurationSeconds -le 0) {
+    if ((-not $script:UseNvenc -and -not $script:UseAmf) -or $MaxSizeMegabytes -le 0 -or $DurationSeconds -le 0) {
         return 0
     }
 
-    $targetKbps = Get-LongTargetVideoBitrateKbps -DurationSeconds $DurationSeconds -MaxSizeMegabytes $LongMaxOutputSizeMB
-    return [int][Math]::Max(200, [Math]::Floor($targetKbps * $LongNvencPrimaryMaxrateScale))
+    $targetKbps = Get-TargetVideoBitrateKbps -DurationSeconds $DurationSeconds -MaxSizeMegabytes $MaxSizeMegabytes
+    return [int][Math]::Max(200, [Math]::Floor($targetKbps * $MaxrateScale))
 }
 
-function Get-LongSizeCapQualityProfiles {
+function Get-OutputSizeCapQualityProfiles {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$FallbackMaxWidth
+    )
+
     if ($script:UseNvenc) {
         return @(
             @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
             @{ Quality = 32; MaxWidth = $MaxWidth; Bitrate = 0 },
-            @{ Quality = 34; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 },
-            @{ Quality = 36; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 }
+            @{ Quality = 34; MaxWidth = $FallbackMaxWidth; Bitrate = 0 },
+            @{ Quality = 36; MaxWidth = $FallbackMaxWidth; Bitrate = 0 }
+        )
+    }
+
+    if ($script:UseAmf) {
+        return @(
+            @{ Quality = 28; MaxWidth = $MaxWidth; Bitrate = 0 },
+            @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
+            @{ Quality = 32; MaxWidth = $FallbackMaxWidth; Bitrate = 0 },
+            @{ Quality = 34; MaxWidth = $FallbackMaxWidth; Bitrate = 0 }
         )
     }
 
     return @(
         @{ Quality = 28; MaxWidth = $MaxWidth; Bitrate = 0 },
         @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
-        @{ Quality = 32; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 },
-        @{ Quality = 32; MaxWidth = $LongSizeCapFallbackMaxWidth; Bitrate = 0 }
+        @{ Quality = 32; MaxWidth = $FallbackMaxWidth; Bitrate = 0 },
+        @{ Quality = 32; MaxWidth = $FallbackMaxWidth; Bitrate = 0 }
     )
 }
 
@@ -468,6 +724,10 @@ function New-RandomToken {
     return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
 }
 
+function Get-OutputDateStamp {
+    return (Get-Date).ToString("dd-MM-yyyy")
+}
+
 function New-RandomOutputPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -475,9 +735,8 @@ function New-RandomOutputPath {
     )
 
     do {
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
         $token = New-RandomToken
-        $fileName = "media_{0}_{1}{2}" -f $timestamp, $token, $Extension.ToLowerInvariant()
+        $fileName = "dt_{0}_{1}{2}" -f (Get-OutputDateStamp), $token, $Extension.ToLowerInvariant()
         $path = Join-Path $OutputDir $fileName
     } while (Test-Path -LiteralPath $path)
 
@@ -493,13 +752,19 @@ function New-RandomFilePath {
         [string]$Prefix,
 
         [Parameter(Mandatory = $true)]
-        [string]$Extension
+        [string]$Extension,
+
+        [string]$NameSuffix
     )
 
     do {
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
         $token = New-RandomToken
-        $fileName = "{0}_{1}_{2}{3}" -f $Prefix, $timestamp, $token, $Extension.ToLowerInvariant()
+        if ($NameSuffix) {
+            $fileName = "{0}_{1}_{2}_{3}{4}" -f $Prefix, (Get-OutputDateStamp), $NameSuffix, $token, $Extension.ToLowerInvariant()
+        }
+        else {
+            $fileName = "{0}_{1}_{2}{3}" -f $Prefix, (Get-OutputDateStamp), $token, $Extension.ToLowerInvariant()
+        }
         $path = Join-Path $Directory $fileName
     } while (Test-Path -LiteralPath $path)
 
@@ -507,14 +772,11 @@ function New-RandomFilePath {
 }
 
 function New-ImageBulkBatchId {
-    return "{0}_{1}" -f (Get-Date -Format "yyyyMMdd_HHmmss"), (New-RandomToken)
+    return "{0}_{1}" -f (Get-OutputDateStamp), (New-RandomToken)
 }
 
 function New-ImageBulkOutputPath {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$BatchId,
-
         [Parameter(Mandatory = $true)]
         [int]$VariantNumber,
 
@@ -524,7 +786,7 @@ function New-ImageBulkOutputPath {
 
     do {
         $token = New-RandomToken
-        $fileName = "image_{0}_v{1:00}_{2}{3}" -f $BatchId, $VariantNumber, $token, $Extension.ToLowerInvariant()
+        $fileName = "img_v{0:00}_{1}_{2}{3}" -f $VariantNumber, (Get-OutputDateStamp), $token, $Extension.ToLowerInvariant()
         $path = Join-Path $ImageBulkOutputDir $fileName
     } while (Test-Path -LiteralPath $path)
 
@@ -541,9 +803,8 @@ function New-RandomOutputDirectory {
     )
 
     do {
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
         $token = New-RandomToken
-        $directoryName = "{0}_{1}_{2}" -f $Prefix, $timestamp, $token
+        $directoryName = "{0}_{1}_{2}" -f $Prefix, (Get-OutputDateStamp), $token
         $path = Join-Path $Directory $directoryName
     } while (Test-Path -LiteralPath $path)
 
@@ -569,7 +830,7 @@ function Get-UniqueDestinationPath {
     $extension = [System.IO.Path]::GetExtension($OriginalFileName)
 
     do {
-        $suffix = "{0}_{1}" -f (Get-Date -Format "yyyyMMdd_HHmmss"), (New-RandomToken 4)
+        $suffix = "{0}_{1}" -f (Get-OutputDateStamp), (New-RandomToken 4)
         $fileName = "{0}_{1}{2}" -f $baseName, $suffix, $extension
         $destination = Join-Path $Directory $fileName
     } while (Test-Path -LiteralPath $destination)
@@ -747,6 +1008,7 @@ function Invoke-OutputArchiveIfDue {
 
     [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetOutputDir -ArchiveDirectory $ArchiveSetOutputDir -Label "sets" -CutoffTime $cutoffTime)
     [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetBatchOutputDir -ArchiveDirectory $ArchiveSetBatchOutputDir -Label "setbatch" -CutoffTime $cutoffTime)
+    [void](Invoke-DirectoryOutputArchive -SourceDirectory $AssetStoreOutputDir -ArchiveDirectory $ArchiveAssetStoreOutputDir -Label "assetstore" -CutoffTime $cutoffTime)
 }
 
 function Move-InputFile {
@@ -1037,7 +1299,8 @@ function Convert-VideoVariant {
 
     Write-Log "Video variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
 
-    $qualityValue = if ($script:UseNvenc) { $NvencCq } else { $Crf }
+    $qualityValue = if ($script:UseNvenc) { $NvencCq } elseif ($script:UseAmf) { $AmfQp } else { $Crf }
+    $maxVideoBitrateKbps = Get-PrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration -MaxSizeMegabytes $DefaultMaxOutputSizeMB -MaxrateScale $DefaultNvencPrimaryMaxrateScale
     $arguments = @(
         "-y",
         "-hide_banner",
@@ -1047,7 +1310,7 @@ function Convert-VideoVariant {
         "-map", "0:v:0",
         "-map", "0:a?"
     )
-    $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth
+    $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth -MaxVideoBitrateKbps $maxVideoBitrateKbps
     $arguments += @(
         "-c:a", "aac",
         "-b:a", $AudioBitrate,
@@ -1058,6 +1321,7 @@ function Convert-VideoVariant {
 
     Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
     Clear-Metadata -Path $outputPath
+    Invoke-OutputSizeCap -OutputPath $outputPath -MaxSizeMegabytes $DefaultMaxOutputSizeMB -FallbackMaxWidth $DefaultSizeCapFallbackMaxWidth -SourceInputPath $InputPath -SegmentDurationSeconds $DurationSeconds -TrimMs $TrimMs
     Write-Log "Created video output: $outputPath"
 
     return $outputPath
@@ -1200,7 +1464,7 @@ function Convert-ImageBulkVariant {
     )
 
     $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-ImageBulkOutputPath -BatchId $BatchId -VariantNumber $VariantNumber -Extension $outputExtension
+    $outputPath = New-ImageBulkOutputPath -VariantNumber $VariantNumber -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -1363,7 +1627,7 @@ function Convert-SetVideoVariant {
         [int]$TrimMs
     )
 
-    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix ("media_v{0:00}" -f $VariantNumber) -Extension ".mp4"
+    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix ("dt_v{0:00}" -f $VariantNumber) -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
     $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
@@ -1371,7 +1635,7 @@ function Convert-SetVideoVariant {
 
     Write-Log "Set video variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
 
-    $qualityValue = if ($script:UseNvenc) { $NvencCq } else { $Crf }
+    $qualityValue = if ($script:UseNvenc) { $NvencCq } elseif ($script:UseAmf) { $AmfQp } else { $Crf }
     $arguments = @(
         "-y",
         "-hide_banner",
@@ -1415,7 +1679,7 @@ function Convert-SetImageVariant {
     )
 
     $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix ("media_v{0:00}" -f $VariantNumber) -Extension $outputExtension
+    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix ("dt_v{0:00}" -f $VariantNumber) -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -1473,7 +1737,7 @@ function Process-SetMediaFile {
     $outputDirectory = $null
 
     try {
-        $outputDirectory = New-RandomOutputDirectory -Directory $SetOutputDir -Prefix "set"
+        $outputDirectory = New-RandomOutputDirectory -Directory $SetOutputDir -Prefix "st"
         Write-Log "Set output directory: $outputDirectory"
 
         if (Test-IsVideo $Path) {
@@ -1589,7 +1853,7 @@ function Convert-SetBatchImageVariant {
     )
 
     $outputExtension = Get-SetBatchOutputExtension -InputPath $SourcePath
-    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix "media" -Extension $outputExtension
+    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix "dt" -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -1722,7 +1986,7 @@ function Process-SetBatch {
         [System.IO.FileInfo[]]$Files
     )
 
-    $batchDirectory = New-RandomOutputDirectory -Directory $SetBatchOutputDir -Prefix "batch"
+    $batchDirectory = New-RandomOutputDirectory -Directory $SetBatchOutputDir -Prefix "bt"
     Write-Log "Set batch output directory: $batchDirectory ($SetBatchCount sets, $($Files.Count) source file(s))"
 
     try {
@@ -1775,6 +2039,364 @@ function Process-SetBatchSafely {
             }
             catch {
                 Write-Log "Could not move failed set batch file '$($file.FullName)': $($_.Exception.Message)" "ERROR"
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Asset store manifest pipeline
+# ---------------------------------------------------------------------------
+# Treats everything dropped in assetstore\input as one batch. Produces
+# $AssetStoreSetCount sets (set_01 .. set_NN), each holding one processed,
+# metadata-stripped copy of every source file, then writes a
+# heatup.assetStoreMediaManifest.v1 manifest describing every generated variant.
+# Each video copy gets a tiny end-trim (tens of ms at most, see
+# $AssetStoreMinTrimMs/$AssetStoreMaxTrimMs) so the renditions differ.
+
+function Get-UtcIsoTimestamp {
+    # e.g. 2026-06-04T12:00:00.000Z — matches the manifest example format.
+    return (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-AssetStoreFamilyKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FileName
+    )
+
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($FileName)
+    $sanitized = ($base -replace '[^A-Za-z0-9._-]', '_').Trim('_')
+    if ([string]::IsNullOrWhiteSpace($sanitized)) {
+        $sanitized = "media"
+    }
+
+    return $sanitized
+}
+
+function Get-AssetStoreTrimRange {
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$DurationSeconds
+    )
+
+    $durationMs = [int][Math]::Floor($DurationSeconds * 1000)
+
+    # The whole point of this lane is a near-invisible trim, so only trim when
+    # the clip has comfortable headroom over the largest possible micro-trim.
+    if ($durationMs -lt ($AssetStoreMaxTrimMs + 300)) {
+        return [pscustomobject]@{
+            CanTrim = $false
+            MinMs = 0
+            MaxMs = 0
+            Reason = "video is too short for an asset-store micro-trim"
+        }
+    }
+
+    $minMs = [Math]::Max(1, $AssetStoreMinTrimMs)
+    $maxMs = [Math]::Max($minMs, $AssetStoreMaxTrimMs)
+
+    return [pscustomobject]@{
+        CanTrim = $true
+        MinMs = $minMs
+        MaxMs = $maxMs
+        Reason = "asset-store micro-trim range"
+    }
+}
+
+function New-AssetStoreVideoVariant {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SetName,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SetNumber,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FamilyKey,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourceOriginalName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BatchKey,
+
+        [Parameter(Mandatory = $true)]
+        [double]$DurationSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TrimMs
+    )
+
+    # Reuse the set lane's encoder (H.264 MP4, AAC, width cap, FFmpeg + ExifTool
+    # metadata stripping) so asset-store videos match the other lanes exactly.
+    $outputPath = Convert-SetVideoVariant -InputPath $InputPath -OutputDirectory $OutputDirectory -VariantNumber $SetNumber -DurationSeconds $DurationSeconds -TrimMs $TrimMs
+    $fileName = [System.IO.Path]::GetFileName($outputPath)
+    $sizeBytes = (Get-Item -LiteralPath $outputPath).Length
+    $variantDuration = [Math]::Round([Math]::Max(0.1, $DurationSeconds - ($TrimMs / 1000.0)), 3)
+
+    return [ordered]@{
+        familyKey          = $FamilyKey
+        variantKey         = "{0}__{1}" -f $FamilyKey, $SetName
+        path               = "{0}/{1}" -f $SetName, $fileName
+        renditionSetKey    = $SetName
+        generationBatchKey = $BatchKey
+        sourceOriginalName = $SourceOriginalName
+        sourceFamilyName   = $FamilyKey
+        durationSeconds    = [double]$variantDuration
+        sizeBytes          = [long]$sizeBytes
+        transformProfile   = "asset_store_video_micro_trim"
+        generatedAt        = (Get-UtcIsoTimestamp)
+        metadata           = [ordered]@{
+            encoder  = (Get-VideoEncoderName)
+            trimMs   = $TrimMs
+            maxWidth = $MaxWidth
+        }
+    }
+}
+
+function New-AssetStoreImageVariant {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SetName,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SetNumber,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FamilyKey,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourceOriginalName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BatchKey,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Dimensions
+    )
+
+    # Reuse the set-batch image variant (FFmpeg re-encode, tiny randomized crop
+    # back to original dimensions, metadata stripped) for per-set differentiation.
+    $outputPath = Convert-SetBatchImageVariant -InputPath $InputPath -SourcePath $SourcePath -OutputDirectory $OutputDirectory -SetNumber $SetNumber -Dimensions $Dimensions
+    $fileName = [System.IO.Path]::GetFileName($outputPath)
+    $sizeBytes = (Get-Item -LiteralPath $outputPath).Length
+
+    return [ordered]@{
+        familyKey          = $FamilyKey
+        variantKey         = "{0}__{1}" -f $FamilyKey, $SetName
+        path               = "{0}/{1}" -f $SetName, $fileName
+        renditionSetKey    = $SetName
+        generationBatchKey = $BatchKey
+        sourceOriginalName = $SourceOriginalName
+        sourceFamilyName   = $FamilyKey
+        sizeBytes          = [long]$sizeBytes
+        transformProfile   = "asset_store_image_recrop"
+        generatedAt        = (Get-UtcIsoTimestamp)
+        metadata           = [ordered]@{
+            sourceWidth  = $Dimensions.Width
+            sourceHeight = $Dimensions.Height
+        }
+    }
+}
+
+function Process-AssetStoreSourceFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo]$File,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$SetDirectories,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$SetNames,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BatchKey,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FamilyKey
+    )
+
+    $path = $File.FullName
+    $records = New-Object System.Collections.Generic.List[object]
+
+    if (Test-IsVideo $path) {
+        $duration = Get-VideoDurationSeconds -Path $path
+        $durationText = $duration.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+        Write-Log "Asset store video duration: ${durationText}s ($($File.Name))"
+
+        $range = Get-AssetStoreTrimRange -DurationSeconds $duration
+        if ($range.CanTrim) {
+            Write-Log "Asset store micro-trim range $($range.MinMs)-$($range.MaxMs) ms ($($File.Name))"
+        }
+        else {
+            Write-Log "Asset store skipping micro-trim: $($range.Reason) ($($File.Name))" "WARN"
+        }
+
+        $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
+        for ($setNumber = 1; $setNumber -le $AssetStoreSetCount; $setNumber++) {
+            $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $AssetStoreSetCount
+            $record = New-AssetStoreVideoVariant -InputPath $path -OutputDirectory $SetDirectories[$setNumber - 1] -SetName $SetNames[$setNumber - 1] -SetNumber $setNumber -FamilyKey $FamilyKey -SourceOriginalName $File.Name -BatchKey $BatchKey -DurationSeconds $duration -TrimMs $trimMs
+            $records.Add($record)
+        }
+
+        return $records.ToArray()
+    }
+
+    $processingSource = Resolve-ImageProcessingSource -Path $path
+
+    try {
+        $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
+        Write-Log "Asset store image dimensions: $($dimensions.Width)x$($dimensions.Height) ($($File.Name))"
+
+        for ($setNumber = 1; $setNumber -le $AssetStoreSetCount; $setNumber++) {
+            $record = New-AssetStoreImageVariant -InputPath $processingSource.ProcessingPath -SourcePath $path -OutputDirectory $SetDirectories[$setNumber - 1] -SetName $SetNames[$setNumber - 1] -SetNumber $setNumber -FamilyKey $FamilyKey -SourceOriginalName $File.Name -BatchKey $BatchKey -Dimensions $dimensions
+            $records.Add($record)
+        }
+    }
+    finally {
+        Remove-HeicWorkingCopy -Path $processingSource.TempPath
+    }
+
+    return $records.ToArray()
+}
+
+function Write-AssetStoreManifest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BatchDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$GeneratedAt,
+
+        [AllowEmptyCollection()]
+        [object[]]$Variants
+    )
+
+    # When no import root is configured, point it at the batch folder itself so
+    # the relative "set_NN/<file>" paths resolve next to the manifest.
+    $importRoot = $AssetStoreImportRoot
+    if ([string]::IsNullOrWhiteSpace($importRoot)) {
+        $importRoot = $BatchDirectory
+    }
+    $importRoot = ($importRoot -replace '\\', '/')
+
+    $manifest = [ordered]@{
+        schema      = $AssetStoreManifestSchema
+        generatedAt = $GeneratedAt
+        importRoot  = $importRoot
+        variants    = [object[]]$Variants
+    }
+
+    $json = $manifest | ConvertTo-Json -Depth 12
+    $manifestPath = Join-Path $BatchDirectory "manifest.json"
+    # Write UTF-8 without a BOM so strict JSON parsers accept the file.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($manifestPath, $json, $utf8NoBom)
+    Write-Log "Wrote asset store manifest: $manifestPath ($($Variants.Count) variant(s))"
+
+    return $manifestPath
+}
+
+function Process-AssetStoreBatch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$Files
+    )
+
+    $batchDirectory = New-RandomOutputDirectory -Directory $AssetStoreOutputDir -Prefix "as"
+    $batchKey = [System.IO.Path]::GetFileName($batchDirectory)
+    $generatedAt = Get-UtcIsoTimestamp
+    Write-Log "Asset store batch output directory: $batchDirectory ($AssetStoreSetCount set(s), $($Files.Count) source file(s))"
+
+    $variants = New-Object System.Collections.Generic.List[object]
+
+    try {
+        $setDirectories = @()
+        $setNames = @()
+        for ($setNumber = 1; $setNumber -le $AssetStoreSetCount; $setNumber++) {
+            $setName = "set_{0:00}" -f $setNumber
+            $setDirectory = Join-Path $batchDirectory $setName
+            New-Item -ItemType Directory -Path $setDirectory -Force | Out-Null
+            $setDirectories += $setDirectory
+            $setNames += $setName
+        }
+
+        # Each source file is one family; keep family keys unique within a batch
+        # even when two sources share a base name (e.g. clip.mov and clip.mp4).
+        $usedFamilyKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($file in $Files) {
+            $familyKey = Get-AssetStoreFamilyKey -FileName $file.Name
+            $candidate = $familyKey
+            $suffix = 2
+            while (-not $usedFamilyKeys.Add($candidate)) {
+                $candidate = "{0}_{1}" -f $familyKey, $suffix
+                $suffix++
+            }
+            $familyKey = $candidate
+
+            Write-Log "Asset store processing source file: $($file.Name) (family $familyKey)"
+            $records = Process-AssetStoreSourceFile -File $file -SetDirectories $setDirectories -SetNames $setNames -BatchKey $batchKey -FamilyKey $familyKey
+            foreach ($record in $records) {
+                $variants.Add($record)
+            }
+        }
+
+        [void](Write-AssetStoreManifest -BatchDirectory $batchDirectory -GeneratedAt $generatedAt -Variants $variants.ToArray())
+    }
+    catch {
+        Remove-GeneratedOutputDirectory -Path $batchDirectory
+        throw
+    }
+
+    # Outputs and manifest are complete; archiving the sources is best-effort and
+    # must not discard the finished sets, so it runs after the transactional block.
+    foreach ($file in $Files) {
+        try {
+            Move-InputFile -Path $file.FullName -DestinationDirectory $AssetStoreOriginalDir
+        }
+        catch {
+            Write-Log "Asset store sets are complete but could not archive source '$($file.FullName)': $($_.Exception.Message)" "WARN"
+        }
+    }
+
+    Write-Log "Successfully processed asset store batch of $($Files.Count) file(s) into $AssetStoreSetCount set(s): $batchDirectory"
+}
+
+function Process-AssetStoreBatchSafely {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$Files
+    )
+
+    try {
+        Write-Log "Detected asset store batch: $($Files.Count) file(s)."
+        Process-AssetStoreBatch -Files $Files
+    }
+    catch {
+        Write-Log "Failed asset store batch processing: $($_.Exception.Message)" "ERROR"
+        foreach ($file in $Files) {
+            try {
+                Move-InputFile -Path $file.FullName -DestinationDirectory $AssetStoreFailedDir
+            }
+            catch {
+                Write-Log "Could not move failed asset store file '$($file.FullName)': $($_.Exception.Message)" "ERROR"
             }
         }
     }
@@ -1912,7 +2534,7 @@ function Convert-RemuxMediaFile {
     $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
 
     if ($RemuxVideoSourceExtensions -contains $extension) {
-        $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "remux" -Extension ".mp4"
+        $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "rx" -Extension ".mp4"
 
         Write-Log "Started convert (video) for: $Path"
         Write-Log "Convert output path: $outputPath"
@@ -1932,7 +2554,7 @@ function Convert-RemuxMediaFile {
     }
 
     if ($RemuxImageSourceExtensions -contains $extension) {
-        $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "convert" -Extension $RemuxImageOutputExtension
+        $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "cv" -Extension $RemuxImageOutputExtension
 
         Write-Log "Started convert (image) for: $Path"
         Write-Log "Convert output path: $outputPath"
@@ -2073,7 +2695,7 @@ function Get-LongVideoScaleFilter {
     return Get-VideoScaleFilter -MaxWidthValue $MaxWidthValue
 }
 
-function Get-LongTargetVideoBitrateKbps {
+function Get-TargetVideoBitrateKbps {
     param(
         [Parameter(Mandatory = $true)]
         [double]$DurationSeconds,
@@ -2195,10 +2817,16 @@ function Invoke-LongVideoEncode {
     Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
 }
 
-function Invoke-LongOutputSizeCap {
+function Invoke-OutputSizeCap {
     param(
         [Parameter(Mandatory = $true)]
         [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [double]$MaxSizeMegabytes,
+
+        [Parameter(Mandatory = $true)]
+        [int]$FallbackMaxWidth,
 
         [string]$SourceInputPath = "",
 
@@ -2209,18 +2837,18 @@ function Invoke-LongOutputSizeCap {
         [int]$TrimMs = 0
     )
 
-    if ($LongMaxOutputSizeMB -le 0) {
+    if ($MaxSizeMegabytes -le 0) {
         return
     }
 
-    $maxBytes = [long]($LongMaxOutputSizeMB * 1024 * 1024)
+    $maxBytes = [long]($MaxSizeMegabytes * 1024 * 1024)
     $initialSize = (Get-Item -LiteralPath $OutputPath).Length
 
     if ($initialSize -le $maxBytes) {
         return
     }
 
-    Write-Log "Long output exceeds size cap ($([math]::Round($initialSize / 1MB, 2)) MB > $LongMaxOutputSizeMB MB): $OutputPath" "WARN"
+    Write-Log "Output exceeds size cap ($([math]::Round($initialSize / 1MB, 2)) MB > $MaxSizeMegabytes MB): $OutputPath" "WARN"
 
     $reencodeFromSource = -not [string]::IsNullOrWhiteSpace($SourceInputPath)
     $encodeInputPath = if ($reencodeFromSource) { $SourceInputPath } else { $OutputPath }
@@ -2235,10 +2863,10 @@ function Invoke-LongOutputSizeCap {
         $durationForBitrate = $encodeDurationSeconds
     }
 
-    $bitrateKbps = Get-LongTargetVideoBitrateKbps -DurationSeconds $durationForBitrate -MaxSizeMegabytes $LongMaxOutputSizeMB
-    $profiles = Get-LongSizeCapQualityProfiles
+    $bitrateKbps = Get-TargetVideoBitrateKbps -DurationSeconds $durationForBitrate -MaxSizeMegabytes $MaxSizeMegabytes
+    $profiles = Get-OutputSizeCapQualityProfiles -FallbackMaxWidth $FallbackMaxWidth
     $profiles[$profiles.Count - 1].Bitrate = $bitrateKbps
-    $qualityLabel = if ($script:UseNvenc) { "CQ" } else { "CRF" }
+    $qualityLabel = if ($script:UseNvenc) { "CQ" } elseif ($script:UseAmf) { "QP" } else { "CRF" }
 
     $outputDirectory = [System.IO.Path]::GetDirectoryName($OutputPath)
     $chosenTempPath = $null
@@ -2251,7 +2879,7 @@ function Invoke-LongOutputSizeCap {
             Invoke-LongVideoEncode -InputPath $encodeInputPath -OutputPath $tempPath -StartSeconds $encodeStartSeconds -DurationSeconds $encodeDurationSeconds -QualityValue $profile.Quality -MaxWidthValue $profile.MaxWidth -MaxVideoBitrateKbps $profile.Bitrate
             $newSize = (Get-Item -LiteralPath $tempPath).Length
             $bitrateLabel = if ($profile.Bitrate -gt 0) { "$($profile.Bitrate)k maxrate" } else { "no maxrate" }
-            Write-Log "Long size-cap attempt $qualityLabel $($profile.Quality), max width $($profile.MaxWidth), $bitrateLabel -> $([math]::Round($newSize / 1MB, 2)) MB"
+            Write-Log "Size-cap attempt $qualityLabel $($profile.Quality), max width $($profile.MaxWidth), $bitrateLabel -> $([math]::Round($newSize / 1MB, 2)) MB"
 
             if ($newSize -lt $chosenSize) {
                 if ($chosenTempPath -and (Test-Path -LiteralPath $chosenTempPath)) {
@@ -2275,7 +2903,7 @@ function Invoke-LongOutputSizeCap {
     }
 
     if (-not $chosenTempPath -or -not (Test-Path -LiteralPath $chosenTempPath)) {
-        Write-Log "Long output size-cap re-encode did not produce a candidate: $OutputPath" "WARN"
+        Write-Log "Output size-cap re-encode did not produce a candidate: $OutputPath" "WARN"
         return
     }
 
@@ -2283,10 +2911,10 @@ function Invoke-LongOutputSizeCap {
     Clear-Metadata -Path $OutputPath
 
     if ($chosenSize -gt $maxBytes) {
-        Write-Log "Long output still above size cap after all attempts ($([math]::Round($chosenSize / 1MB, 2)) MB): $OutputPath" "WARN"
+        Write-Log "Output still above size cap after all attempts ($([math]::Round($chosenSize / 1MB, 2)) MB): $OutputPath" "WARN"
     }
     else {
-        Write-Log "Long output compressed to size cap ($([math]::Round($chosenSize / 1MB, 2)) MB): $OutputPath"
+        Write-Log "Output compressed to size cap ($([math]::Round($chosenSize / 1MB, 2)) MB): $OutputPath"
     }
 }
 
@@ -2326,7 +2954,7 @@ function Start-LongOutputRecompressBatch {
     foreach ($path in $targets) {
         try {
             $before = (Get-Item -LiteralPath $path).Length
-            Invoke-LongOutputSizeCap -OutputPath $path
+            Invoke-OutputSizeCap -OutputPath $path -MaxSizeMegabytes $LongMaxOutputSizeMB -FallbackMaxWidth $LongSizeCapFallbackMaxWidth
             $after = (Get-Item -LiteralPath $path).Length
             Write-Log "Recompressed long output: $path ($([math]::Round($before / 1MB, 2)) MB -> $([math]::Round($after / 1MB, 2)) MB)"
             $processed++
@@ -2358,7 +2986,7 @@ function Convert-LongVideoVariant {
         [int]$TrimMs
     )
 
-    $outputPath = New-RandomFilePath -Directory $LongOutputDir -Prefix ("long_s{0:00}_v{1:00}" -f $SegmentNumber, $VariantNumber) -Extension ".mp4"
+    $outputPath = New-RandomFilePath -Directory $LongOutputDir -Prefix "lg" -NameSuffix ("s{0:00}_v{1:00}" -f $SegmentNumber, $VariantNumber) -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
     $targetDuration = [Math]::Max(0.1, $SegmentDurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
@@ -2366,11 +2994,11 @@ function Convert-LongVideoVariant {
 
     Write-Log "Long segment $SegmentNumber variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
 
-    $qualityValue = if ($script:UseNvenc) { $LongNvencCq } else { $Crf }
-    $maxVideoBitrateKbps = Get-LongPrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration
+    $qualityValue = if ($script:UseNvenc) { $LongNvencCq } elseif ($script:UseAmf) { $LongAmfQp } else { $Crf }
+    $maxVideoBitrateKbps = Get-PrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration -MaxSizeMegabytes $LongMaxOutputSizeMB -MaxrateScale $LongNvencPrimaryMaxrateScale
     Invoke-LongVideoEncode -InputPath $InputPath -OutputPath $outputPath -DurationSeconds $targetDuration -QualityValue $qualityValue -MaxWidthValue $MaxWidth -MaxVideoBitrateKbps $maxVideoBitrateKbps
     Clear-Metadata -Path $outputPath
-    Invoke-LongOutputSizeCap -OutputPath $outputPath -SourceInputPath $InputPath -SegmentDurationSeconds $SegmentDurationSeconds -TrimMs $TrimMs
+    Invoke-OutputSizeCap -OutputPath $outputPath -MaxSizeMegabytes $LongMaxOutputSizeMB -FallbackMaxWidth $LongSizeCapFallbackMaxWidth -SourceInputPath $InputPath -SegmentDurationSeconds $SegmentDurationSeconds -TrimMs $TrimMs
     Write-Log "Created long output: $outputPath"
 
     return $outputPath
@@ -2542,10 +3170,26 @@ function Get-CandidateSetBatchFiles {
     } | Sort-Object LastWriteTime, FullName)
 }
 
+function Get-CandidateAssetStoreFiles {
+    if (-not (Test-Path -LiteralPath $AssetStoreInputDir)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $AssetStoreInputDir -File | Where-Object {
+        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsSupportedMedia $_.FullName)
+    } | Sort-Object LastWriteTime, FullName)
+}
+
 function Start-PollingWatcher {
     Write-Log "Watcher started."
     Write-Log "Input: $InputDir"
     Write-Log "Output: $OutputDir"
+    if ($DefaultMaxOutputSizeMB -gt 0) {
+        Write-Log "Default pipeline size cap: $DefaultMaxOutputSizeMB MB (fallback max width: $DefaultSizeCapFallbackMaxWidth px)"
+    }
+    else {
+        Write-Log "Default pipeline size cap: disabled"
+    }
     Write-Log "Original archive: $OriginalDir"
     Write-Log "Failed: $FailedDir"
     Write-Log "Convert input: $RemuxInputDir"
@@ -2564,6 +3208,8 @@ function Start-PollingWatcher {
     Write-Log "Set pipeline output: $SetOutputDir"
     Write-Log "Set batch input: $SetBatchInputDir"
     Write-Log "Set batch output: $SetBatchOutputDir ($SetBatchCount sets per batch)"
+    Write-Log "Asset store input: $AssetStoreInputDir"
+    Write-Log "Asset store output: $AssetStoreOutputDir ($AssetStoreSetCount sets per batch, micro-trim $AssetStoreMinTrimMs-$AssetStoreMaxTrimMs ms, manifest schema $AssetStoreManifestSchema)"
     if ($ArchiveEnabled) {
         Write-Log "Output archive enabled: files older than $ArchiveAgeHours hours move under $ArchiveRootDir (checked every $ArchiveCheckIntervalMinutes minutes)."
         foreach ($target in Get-OutputArchiveTargets) {
@@ -2571,6 +3217,7 @@ function Start-PollingWatcher {
         }
         Write-Log "Output archive target: sets -> $ArchiveSetOutputDir"
         Write-Log "Output archive target: setbatch -> $ArchiveSetBatchOutputDir"
+        Write-Log "Output archive target: assetstore -> $ArchiveAssetStoreOutputDir"
     }
     if ($script:SupportsParallel) {
         Write-Log "Image processing concurrency: $ImageProcessingConcurrency (parallel enabled on PowerShell $($PSVersionTable.PSVersion))."
@@ -2616,6 +3263,35 @@ function Start-PollingWatcher {
             }
             else {
                 $script:LastSetBatchSignature = $null
+            }
+
+            $assetStoreFiles = Get-CandidateAssetStoreFiles
+            if ($assetStoreFiles.Count -gt 0) {
+                $assetReady = $true
+                foreach ($assetFile in $assetStoreFiles) {
+                    if (-not (Test-FileUnlocked $assetFile.FullName)) {
+                        $assetReady = $false
+                        break
+                    }
+                }
+
+                $assetSignature = (($assetStoreFiles | ForEach-Object { '{0}|{1}' -f $_.FullName, $_.Length }) -join ';')
+                $assetNewestWrite = ($assetStoreFiles | Measure-Object -Property LastWriteTime -Maximum).Maximum
+                $assetSettled = ((Get-Date) - $assetNewestWrite).TotalSeconds -ge $StableSeconds
+
+                if ($assetReady -and $assetSettled -and $assetSignature -eq $script:LastAssetStoreSignature) {
+                    Process-AssetStoreBatchSafely -Files $assetStoreFiles
+                    $script:LastAssetStoreSignature = $null
+                }
+                else {
+                    if ($assetSignature -ne $script:LastAssetStoreSignature) {
+                        Write-Log "Asset store batch: $($assetStoreFiles.Count) file(s) detected; waiting for the batch to settle before processing."
+                    }
+                    $script:LastAssetStoreSignature = $assetSignature
+                }
+            }
+            else {
+                $script:LastAssetStoreSignature = $null
             }
 
             $imageBulkFiles = Get-CandidateImageBulkFiles
