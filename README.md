@@ -114,6 +114,11 @@ D:\MediaPipeline\
     output\
     original\
     failed\
+  imageclean\
+    input\
+    output\
+    original\
+    failed\
   sets\
     input\
     output\
@@ -151,6 +156,10 @@ D:\MediaPipeline\
 - `images\output`: bulk image variants are written here.
 - `images\original`: source images are moved here after all image variants succeed.
 - `images\failed`: source images are moved here if bulk image processing fails.
+- `imageclean\input`: put images here when you want one cleaned output per source image.
+- `imageclean\output`: cleaned images are written here with pure random filenames.
+- `imageclean\original`: source images are moved here after cleanup succeeds.
+- `imageclean\failed`: source images are moved here if cleanup fails.
 - `sets\input`: put media files here when you want one output folder per source file.
 - `sets\output`: each source file gets a random subfolder containing several processed copies.
 - `sets\original`: source files are moved here after all copies succeed.
@@ -201,11 +210,12 @@ The watcher uses a polling loop:
 7. Move failed originals to `default\failed`.
 
 The default input pipeline and the video-heavy pipelines process one file at a time. The image
-pipelines run conversions in parallel: the convert pipeline processes multiple files at once, and the
-bulk image pipeline renders its per-file variants concurrently. The number of simultaneous image
-conversions is controlled by `ImageProcessingConcurrency` in `config.ini` (default: up to 6, capped
-by CPU count). Parallel processing requires PowerShell 7 (installed by `Install.bat`); under Windows
-PowerShell 5.1 the script still runs, but image conversions fall back to sequential.
+pipelines run conversions in parallel: the convert and image-cleanup pipelines process multiple files
+at once, and the bulk image pipeline renders its per-file variants concurrently. The number of
+simultaneous image conversions is controlled by `ImageProcessingConcurrency` in `config.ini`
+(default: up to 6, capped by CPU count). Parallel processing requires PowerShell 7 (installed by
+`Install.bat`); under Windows PowerShell 5.1 the script still runs, but image conversions fall back to
+sequential.
 
 It also watches the other lanes described below.
 
@@ -289,6 +299,40 @@ original. It is not a guarantee that files are impossible to detect or compare.
 
 Successful source images move to `D:\MediaPipeline\images\original`. Failed source images move to
 `D:\MediaPipeline\images\failed`.
+
+## Image Cleanup Pipeline
+
+Use this lane when you want to clean a folder of images without making duplicates. For example, 300
+input images produce 300 processed output images.
+
+Put source images here:
+
+```text
+D:\MediaPipeline\imageclean\input
+```
+
+The watcher writes one cleaned image per source image here:
+
+```text
+D:\MediaPipeline\imageclean\output
+```
+
+Each output gets the same image cleanup treatment as the bulk image pipeline:
+
+- pure random filename like `<random>.jpg`, with no date, variant number, or source name
+- metadata removed with ExifTool
+- FFmpeg re-encode, not a byte-for-byte copy
+- tiny randomized crop and scale back to the original dimensions when the image is large enough
+
+Supported inputs and output format behavior match the bulk image pipeline:
+
+- `.jpg`, `.jpeg` -> `.jpg` / `.jpeg`
+- `.png` -> `.png`
+- `.webp` -> `.webp`
+- `.heic` -> `.png`
+
+Successful source images move to `D:\MediaPipeline\imageclean\original`. Failed source images move to
+`D:\MediaPipeline\imageclean\failed`.
 
 ## Media Set Pipeline
 
@@ -559,10 +603,11 @@ Successful source files move to `D:\MediaPipeline\long\original`. Failed source 
 
 ## Output File Names
 
-Output names are random and not based on the source filename. Pipeline codes come first (shortened:
-`dt` default/media, `lg` long, `img` bulk images, `st` sets, `bt` set batch, `as` asset store, `rx`
-remux, `cv` convert), then the creation date as `DD-MM-YYYY` (day and month separated by `-`) so the
-date stays readable when cloud tools truncate the end of long paths.
+Output names are random and not based on the source filename. Most pipelines put a code first
+(shortened: `dt` default/media, `lg` long, `img` bulk images, `st` sets, `bt` set batch, `as` asset
+store, `rx` remux, `cv` convert), then the creation date as `DD-MM-YYYY` (day and month separated by
+`-`) so the date stays readable when cloud tools truncate the end of long paths. The image cleanup
+pipeline is the exception: its output filenames are just random tokens plus the extension.
 
 ```text
 dt_DD-MM-YYYY_<random>.mp4
@@ -571,6 +616,7 @@ rx_DD-MM-YYYY_<random>.mp4
 cv_DD-MM-YYYY_<random>.jpg
 lg_DD-MM-YYYY_s01_v01_<random>.mp4
 img_v01_DD-MM-YYYY_<random>.jpg
+<random>.jpg
 dt_v01_DD-MM-YYYY_<random>.mp4
 st_DD-MM-YYYY_<random>\
 bt_DD-MM-YYYY_<random>\

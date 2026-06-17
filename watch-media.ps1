@@ -189,6 +189,11 @@ $ImageBulkInputDir = Join-Path $ImageBulkRootDir "input"
 $ImageBulkOutputDir = Join-Path $ImageBulkRootDir "output"
 $ImageBulkOriginalDir = Join-Path $ImageBulkRootDir "original"
 $ImageBulkFailedDir = Join-Path $ImageBulkRootDir "failed"
+$ImageCleanRootDir = Join-Path $PipelineRoot "imageclean"
+$ImageCleanInputDir = Join-Path $ImageCleanRootDir "input"
+$ImageCleanOutputDir = Join-Path $ImageCleanRootDir "output"
+$ImageCleanOriginalDir = Join-Path $ImageCleanRootDir "original"
+$ImageCleanFailedDir = Join-Path $ImageCleanRootDir "failed"
 $SetRootDir = Join-Path $PipelineRoot "sets"
 $SetInputDir = Join-Path $SetRootDir "input"
 $SetOutputDir = Join-Path $SetRootDir "output"
@@ -207,6 +212,7 @@ $AssetStoreFailedDir = Join-Path $AssetStoreRootDir "failed"
 $ArchiveRootDir = Join-Path $PipelineRoot "archive"
 $ArchiveDefaultOutputDir = Join-Path $ArchiveRootDir "output"
 $ArchiveImageBulkOutputDir = Join-Path $ArchiveRootDir "images"
+$ArchiveImageCleanOutputDir = Join-Path $ArchiveRootDir "imageclean"
 $ArchiveRemuxOutputDir = Join-Path $ArchiveRootDir "convert"
 $ArchiveLongOutputDir = Join-Path $ArchiveRootDir "long"
 $ArchiveSetOutputDir = Join-Path $ArchiveRootDir "sets"
@@ -247,7 +253,20 @@ function Get-DefaultPipelineCopyCount {
 }
 
 function Initialize-Folders {
-    foreach ($directory in @($InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir, $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxOriginalVideosDir, $RemuxOriginalImagesDir, $RemuxFailedDir, $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir, $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir, $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir, $SetBatchInputDir, $SetBatchOutputDir, $SetBatchOriginalDir, $SetBatchFailedDir, $AssetStoreInputDir, $AssetStoreOutputDir, $AssetStoreOriginalDir, $AssetStoreFailedDir, $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir, $ArchiveSetOutputDir, $ArchiveSetBatchOutputDir, $ArchiveAssetStoreOutputDir)) {
+    $directories = @(
+        $InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir,
+        $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxOriginalVideosDir, $RemuxOriginalImagesDir, $RemuxFailedDir,
+        $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir,
+        $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir,
+        $ImageCleanInputDir, $ImageCleanOutputDir, $ImageCleanOriginalDir, $ImageCleanFailedDir,
+        $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir,
+        $SetBatchInputDir, $SetBatchOutputDir, $SetBatchOriginalDir, $SetBatchFailedDir,
+        $AssetStoreInputDir, $AssetStoreOutputDir, $AssetStoreOriginalDir, $AssetStoreFailedDir,
+        $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveImageCleanOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir,
+        $ArchiveSetOutputDir, $ArchiveSetBatchOutputDir, $ArchiveAssetStoreOutputDir
+    )
+
+    foreach ($directory in $directories) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
@@ -771,6 +790,26 @@ function New-RandomFilePath {
     return $path
 }
 
+function New-PureRandomFilePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Directory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Extension,
+
+        [int]$TokenBytes = 12
+    )
+
+    do {
+        $token = New-RandomToken -ByteCount $TokenBytes
+        $fileName = "{0}{1}" -f $token, $Extension.ToLowerInvariant()
+        $path = Join-Path $Directory $fileName
+    } while (Test-Path -LiteralPath $path)
+
+    return $path
+}
+
 function New-ImageBulkBatchId {
     return "{0}_{1}" -f (Get-OutputDateStamp), (New-RandomToken)
 }
@@ -973,6 +1012,11 @@ function Get-OutputArchiveTargets {
             SourceDirectory = $ImageBulkOutputDir
             ArchiveDirectory = $ArchiveImageBulkOutputDir
             Label = "images"
+        },
+        [pscustomobject]@{
+            SourceDirectory = $ImageCleanOutputDir
+            ArchiveDirectory = $ArchiveImageCleanOutputDir
+            Label = "imageclean"
         },
         [pscustomobject]@{
             SourceDirectory = $LongOutputDir
@@ -1602,6 +1646,131 @@ function Process-ImageBulkFileSafely {
         }
         catch {
             Write-Log "Could not move failed image bulk file '$fullPath': $($_.Exception.Message)" "ERROR"
+        }
+    }
+    finally {
+        [void]$script:ProcessingPaths.Remove($fullPath)
+    }
+}
+
+function Convert-ImageCleanFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Dimensions,
+
+        [string]$SourcePath = $InputPath
+    )
+
+    $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
+    $outputPath = New-PureRandomFilePath -Directory $ImageCleanOutputDir -Extension $outputExtension
+    $width = $Dimensions.Width
+    $height = $Dimensions.Height
+    $canCrop = ($width -ge 200 -and $height -ge 200)
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath,
+        "-frames:v", "1",
+        "-map_metadata", "-1"
+    )
+
+    if ($canCrop) {
+        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
+        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
+        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
+        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
+        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
+        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
+        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
+        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
+        $arguments += @("-vf", $filter)
+        Write-Log "Image clean crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
+    }
+    else {
+        Write-Log "Image clean skipping crop because image is small: ${width}x${height}" "WARN"
+    }
+
+    if ($outputExtension -in @(".jpg", ".jpeg")) {
+        $arguments += @("-q:v", "2")
+    }
+    elseif ($outputExtension -eq ".webp") {
+        $arguments += @("-quality", "92")
+    }
+    elseif ($outputExtension -eq ".png") {
+        $arguments += @("-compression_level", "6")
+    }
+
+    $arguments += @($outputPath)
+
+    try {
+        Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+        Clear-Metadata -Path $outputPath
+        Write-Log "Created image clean output: $outputPath"
+        return $outputPath
+    }
+    catch {
+        Remove-GeneratedOutputs -Paths @($outputPath)
+        throw
+    }
+}
+
+function Process-ImageCleanFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $createdOutputs = New-Object System.Collections.Generic.List[string]
+    $processingSource = Resolve-ImageProcessingSource -Path $Path
+
+    try {
+        $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
+        Write-Log "Image clean dimensions: $($dimensions.Width)x$($dimensions.Height)"
+
+        $outputPath = Convert-ImageCleanFile -InputPath $processingSource.ProcessingPath -SourcePath $Path -Dimensions $dimensions
+        $createdOutputs.Add($outputPath)
+
+        Move-InputFile -Path $Path -DestinationDirectory $ImageCleanOriginalDir
+        Write-Log "Successfully processed image clean file: $Path"
+    }
+    catch {
+        Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
+        throw
+    }
+    finally {
+        Remove-HeicWorkingCopy -Path $processingSource.TempPath
+    }
+}
+
+function Process-ImageCleanFileSafely {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+
+    if (-not $script:ProcessingPaths.Add($fullPath)) {
+        return
+    }
+
+    try {
+        Write-Log "Detected image clean file: $fullPath"
+        Wait-FileReady -Path $fullPath
+        Process-ImageCleanFile -Path $fullPath
+    }
+    catch {
+        Write-Log "Failed image clean processing '$fullPath': $($_.Exception.Message)" "ERROR"
+        try {
+            Move-InputFile -Path $fullPath -DestinationDirectory $ImageCleanFailedDir
+        }
+        catch {
+            Write-Log "Could not move failed image clean file '$fullPath': $($_.Exception.Message)" "ERROR"
         }
     }
     finally {
@@ -3150,6 +3319,16 @@ function Get-CandidateImageBulkFiles {
     } | Sort-Object LastWriteTime, FullName)
 }
 
+function Get-CandidateImageCleanFiles {
+    if (-not (Test-Path -LiteralPath $ImageCleanInputDir)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $ImageCleanInputDir -File | Where-Object {
+        (-not (Test-IsTemporaryDownload $_.FullName)) -and ($ImageExtensions -contains $_.Extension.ToLowerInvariant())
+    } | Sort-Object LastWriteTime, FullName)
+}
+
 function Get-CandidateSetMediaFiles {
     if (-not (Test-Path -LiteralPath $SetInputDir)) {
         return @()
@@ -3204,6 +3383,8 @@ function Start-PollingWatcher {
     }
     Write-Log "Image bulk input: $ImageBulkInputDir"
     Write-Log "Image bulk output: $ImageBulkOutputDir"
+    Write-Log "Image clean input: $ImageCleanInputDir"
+    Write-Log "Image clean output: $ImageCleanOutputDir"
     Write-Log "Set pipeline input: $SetInputDir"
     Write-Log "Set pipeline output: $SetOutputDir"
     Write-Log "Set batch input: $SetBatchInputDir"
@@ -3292,6 +3473,26 @@ function Start-PollingWatcher {
             }
             else {
                 $script:LastAssetStoreSignature = $null
+            }
+
+            $imageCleanFiles = Get-CandidateImageCleanFiles
+            if ($script:SupportsParallel -and $imageCleanFiles.Count -gt 1) {
+                $libPath = $script:ScriptPath
+                $ffPath = $script:FFmpegPath
+                $fpPath = $script:FFprobePath
+                $exPath = $script:ExifToolPath
+                $imageCleanFiles | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
+                    . $using:libPath -AsLibrary
+                    $script:FFmpegPath = $using:ffPath
+                    $script:FFprobePath = $using:fpPath
+                    $script:ExifToolPath = $using:exPath
+                    Process-ImageCleanFileSafely -Path $_.FullName
+                }
+            }
+            else {
+                foreach ($file in $imageCleanFiles) {
+                    Process-ImageCleanFileSafely -Path $file.FullName
+                }
             }
 
             $imageBulkFiles = Get-CandidateImageBulkFiles
