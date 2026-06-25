@@ -126,6 +126,9 @@ $ImageBulkCropMaxPermille = Get-Setting 'ImageBulkCropMaxPermille' 20
 $ImageBulkPngCompressionLevel = Get-Setting 'ImageBulkPngCompressionLevel' 1
 if ($ImageBulkPngCompressionLevel -lt 0) { $ImageBulkPngCompressionLevel = 0 }
 elseif ($ImageBulkPngCompressionLevel -gt 9) { $ImageBulkPngCompressionLevel = 9 }
+$ImageCleanPngCompressionLevel = Get-Setting 'ImageCleanPngCompressionLevel' 1
+if ($ImageCleanPngCompressionLevel -lt 0) { $ImageCleanPngCompressionLevel = 0 }
+elseif ($ImageCleanPngCompressionLevel -gt 9) { $ImageCleanPngCompressionLevel = 9 }
 $MinTrimMs = Get-Setting 'MinTrimMs' 15
 $MaxTrimMs = Get-Setting 'MaxTrimMs' 95
 $PreferNvenc = Get-Setting 'PreferNvenc' $true
@@ -1711,7 +1714,7 @@ function Convert-ImageCleanFile {
         $arguments += @("-quality", "92")
     }
     elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", "6")
+        $arguments += @("-compression_level", ([string]$ImageCleanPngCompressionLevel))
     }
 
     $arguments += @($outputPath)

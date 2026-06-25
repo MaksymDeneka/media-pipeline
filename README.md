@@ -69,6 +69,7 @@ Some of the most useful settings:
 | `DefaultPipelineAlternatingCopiesPerFile` / `DefaultPipelineMinCopiesPerFile` | How many output copies the **default** pipeline makes (these two alternate per file — set them equal for a fixed count) | `8` / `7` |
 | `ImageBulkCopiesPerFile` | Variants per image in the bulk-image pipeline | `20` |
 | `ImageBulkPngCompressionLevel` | PNG compression for bulk images (`1` = faster/larger, `6` = old behavior) | `1` |
+| `ImageCleanPngCompressionLevel` | PNG compression for image-clean outputs (`1` = faster/larger, `6` = old behavior) | `1` |
 | `SetCopiesPerFile` | Copies per file in the set pipeline | `10` |
 | `SetBatchCount` | How many complete sets the set-batch pipeline makes | `10` |
 | `AssetStoreSetCount` | How many complete sets the asset-store (manifest) pipeline makes | `15` |
@@ -335,6 +336,9 @@ Supported inputs and output format behavior match the bulk image pipeline:
 - `.png` -> `.png`
 - `.webp` -> `.webp`
 - `.heic` -> `.png`
+
+Image-clean PNG output uses `ImageCleanPngCompressionLevel` (default `1`) so PNG-heavy cleanup
+batches finish faster. Raise it toward `6` if you prefer smaller PNG files over speed.
 
 Successful source images move to `D:\MediaPipeline\imageclean\original`. Failed source images move to
 `D:\MediaPipeline\imageclean\failed`.
