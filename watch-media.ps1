@@ -123,6 +123,9 @@ else {
 
 $ImageBulkCropMinPermille = Get-Setting 'ImageBulkCropMinPermille' 5
 $ImageBulkCropMaxPermille = Get-Setting 'ImageBulkCropMaxPermille' 20
+$ImageBulkPngCompressionLevel = Get-Setting 'ImageBulkPngCompressionLevel' 1
+if ($ImageBulkPngCompressionLevel -lt 0) { $ImageBulkPngCompressionLevel = 0 }
+elseif ($ImageBulkPngCompressionLevel -gt 9) { $ImageBulkPngCompressionLevel = 9 }
 $MinTrimMs = Get-Setting 'MinTrimMs' 15
 $MaxTrimMs = Get-Setting 'MaxTrimMs' 95
 $PreferNvenc = Get-Setting 'PreferNvenc' $true
@@ -160,7 +163,6 @@ $AssetStoreSetCount = Get-Setting 'AssetStoreSetCount' 15
 $AssetStoreMinTrimMs = Get-Setting 'AssetStoreMinTrimMs' 10
 $AssetStoreMaxTrimMs = Get-Setting 'AssetStoreMaxTrimMs' 40
 $AssetStoreManifestSchema = Get-Setting 'AssetStoreManifestSchema' 'heatup.assetStoreMediaManifest.v1'
-$AssetStoreImportRoot = Get-Setting 'AssetStoreImportRoot' ''
 
 # --- Derived directory paths (computed from $PipelineRoot above) ---
 # Default pipeline folders live under "default" so they no longer sit loose in
@@ -1545,7 +1547,7 @@ function Convert-ImageBulkVariant {
         $arguments += @("-quality", "92")
     }
     elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", "6")
+        $arguments += @("-compression_level", ([string]$ImageBulkPngCompressionLevel))
     }
 
     $arguments += @($outputPath)
@@ -1560,20 +1562,23 @@ function Convert-ImageBulkVariant {
 function Process-ImageBulkFile {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [int]$VariantConcurrency = $ImageProcessingConcurrency
     )
 
     $createdOutputs = New-Object System.Collections.Generic.List[string]
     $processingSource = Resolve-ImageProcessingSource -Path $Path
 
     try {
+        $effectiveVariantConcurrency = [Math]::Max(1, $VariantConcurrency)
         $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
         Write-Log "Image bulk dimensions: $($dimensions.Width)x$($dimensions.Height)"
 
         $batchId = New-ImageBulkBatchId
         Write-Log "Image bulk batch id: $batchId"
 
-        if ($script:SupportsParallel -and $ImageBulkCopiesPerFile -gt 1) {
+        if ($script:SupportsParallel -and $ImageBulkCopiesPerFile -gt 1 -and $effectiveVariantConcurrency -gt 1) {
             $libPath = $script:ScriptPath
             $ffPath = $script:FFmpegPath
             $fpPath = $script:FFprobePath
@@ -1582,7 +1587,7 @@ function Process-ImageBulkFile {
             $srcPath = $Path
             $dims = $dimensions
             $bId = $batchId
-            $variantResults = 1..$ImageBulkCopiesPerFile | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
+            $variantResults = 1..$ImageBulkCopiesPerFile | ForEach-Object -ThrottleLimit $effectiveVariantConcurrency -Parallel {
                 . $using:libPath -AsLibrary
                 $script:FFmpegPath = $using:ffPath
                 $script:FFprobePath = $using:fpPath
@@ -1614,7 +1619,9 @@ function Process-ImageBulkFile {
         Write-Log "Successfully processed image bulk file: $Path"
     }
     catch {
-        Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
+        if ($createdOutputs.Count -gt 0) {
+            Write-Log "Preserving $($createdOutputs.Count) completed image bulk output(s) after failure: $Path" "WARN"
+        }
         throw
     }
     finally {
@@ -1625,7 +1632,9 @@ function Process-ImageBulkFile {
 function Process-ImageBulkFileSafely {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [int]$VariantConcurrency = $ImageProcessingConcurrency
     )
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
@@ -1637,7 +1646,7 @@ function Process-ImageBulkFileSafely {
     try {
         Write-Log "Detected image bulk file: $fullPath"
         Wait-FileReady -Path $fullPath
-        Process-ImageBulkFile -Path $fullPath
+        Process-ImageBulkFile -Path $fullPath -VariantConcurrency $VariantConcurrency
     }
     catch {
         Write-Log "Failed image bulk processing '$fullPath': $($_.Exception.Message)" "ERROR"
@@ -2458,18 +2467,10 @@ function Write-AssetStoreManifest {
         [object[]]$Variants
     )
 
-    # When no import root is configured, point it at the batch folder itself so
-    # the relative "set_NN/<file>" paths resolve next to the manifest.
-    $importRoot = $AssetStoreImportRoot
-    if ([string]::IsNullOrWhiteSpace($importRoot)) {
-        $importRoot = $BatchDirectory
-    }
-    $importRoot = ($importRoot -replace '\\', '/')
-
     $manifest = [ordered]@{
         schema      = $AssetStoreManifestSchema
         generatedAt = $GeneratedAt
-        importRoot  = $importRoot
+        importRoot  = "."
         variants    = [object[]]$Variants
     }
 
@@ -3496,8 +3497,24 @@ function Start-PollingWatcher {
             }
 
             $imageBulkFiles = Get-CandidateImageBulkFiles
-            foreach ($file in $imageBulkFiles) {
-                Process-ImageBulkFileSafely -Path $file.FullName
+            if ($script:SupportsParallel -and $imageBulkFiles.Count -gt 1) {
+                $libPath = $script:ScriptPath
+                $ffPath = $script:FFmpegPath
+                $fpPath = $script:FFprobePath
+                $exPath = $script:ExifToolPath
+                Write-Log "Image bulk processing $($imageBulkFiles.Count) file(s) with file concurrency $ImageProcessingConcurrency and per-file variant concurrency 1."
+                $imageBulkFiles | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
+                    . $using:libPath -AsLibrary
+                    $script:FFmpegPath = $using:ffPath
+                    $script:FFprobePath = $using:fpPath
+                    $script:ExifToolPath = $using:exPath
+                    Process-ImageBulkFileSafely -Path $_.FullName -VariantConcurrency 1
+                }
+            }
+            else {
+                foreach ($file in $imageBulkFiles) {
+                    Process-ImageBulkFileSafely -Path $file.FullName
+                }
             }
 
             $longFiles = Get-CandidateLongFiles

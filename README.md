@@ -68,6 +68,7 @@ Some of the most useful settings:
 | `PipelineRoot` | Where all the watcher's folders live | `D:\MediaPipeline` |
 | `DefaultPipelineAlternatingCopiesPerFile` / `DefaultPipelineMinCopiesPerFile` | How many output copies the **default** pipeline makes (these two alternate per file — set them equal for a fixed count) | `8` / `7` |
 | `ImageBulkCopiesPerFile` | Variants per image in the bulk-image pipeline | `20` |
+| `ImageBulkPngCompressionLevel` | PNG compression for bulk images (`1` = faster/larger, `6` = old behavior) | `1` |
 | `SetCopiesPerFile` | Copies per file in the set pipeline | `10` |
 | `SetBatchCount` | How many complete sets the set-batch pipeline makes | `10` |
 | `AssetStoreSetCount` | How many complete sets the asset-store (manifest) pipeline makes | `15` |
@@ -211,11 +212,11 @@ The watcher uses a polling loop:
 
 The default input pipeline and the video-heavy pipelines process one file at a time. The image
 pipelines run conversions in parallel: the convert and image-cleanup pipelines process multiple files
-at once, and the bulk image pipeline renders its per-file variants concurrently. The number of
-simultaneous image conversions is controlled by `ImageProcessingConcurrency` in `config.ini`
-(default: up to 6, capped by CPU count). Parallel processing requires PowerShell 7 (installed by
-`Install.bat`); under Windows PowerShell 5.1 the script still runs, but image conversions fall back to
-sequential.
+at once, and the bulk image pipeline processes multiple source files at once when a batch is waiting.
+For a single bulk-image source, variants are still rendered concurrently. The number of simultaneous
+image conversions is controlled by `ImageProcessingConcurrency` in `config.ini` (default: up to 6,
+capped by CPU count). Parallel processing requires PowerShell 7 (installed by `Install.bat`); under
+Windows PowerShell 5.1 the script still runs, but image conversions fall back to sequential.
 
 It also watches the other lanes described below.
 
@@ -294,11 +295,15 @@ Output format behavior:
 - `.webp` -> `.webp`
 - `.heic` -> `.png`
 
+Bulk PNG output uses `ImageBulkPngCompressionLevel` (default `1`) so PNG-heavy batches finish faster.
+Raise it toward `6` if you prefer smaller PNG files over speed.
+
 This makes outputs different at the file and pixel level while keeping them visually close to the
 original. It is not a guarantee that files are impossible to detect or compare.
 
 Successful source images move to `D:\MediaPipeline\images\original`. Failed source images move to
-`D:\MediaPipeline\images\failed`.
+`D:\MediaPipeline\images\failed`. If a later variant fails, already completed bulk-image outputs are
+left in `images\output` instead of being deleted.
 
 ## Image Cleanup Pipeline
 
@@ -469,7 +474,7 @@ so each rendition differs at the file level without noticeably changing its leng
 {
   "schema": "heatup.assetStoreMediaManifest.v1",
   "generatedAt": "2026-06-04T12:00:00.000Z",
-  "importRoot": "D:/MediaPipeline/assetstore/output/as_04-06-2026_<random>",
+  "importRoot": ".",
   "variants": [
     {
       "familyKey": "video_001",
@@ -503,9 +508,8 @@ How the fields map to the output:
   encoder and the exact trim applied.
 
 Path resolution for a consumer: an absolute `path` is used as-is; a relative `path` resolves from
-`importRoot` when present, otherwise relative to the manifest file's own folder. By default
-`importRoot` is the batch folder itself (so the relative paths resolve next to the manifest); set
-`AssetStoreImportRoot` in `config.ini` only if your importer needs a fixed root.
+`importRoot` when present, otherwise relative to the manifest file's own folder. Asset-store
+manifests always set `importRoot` to `"."`, so the relative paths resolve next to the manifest.
 
 Processing is all-or-nothing: if any file fails, the partial batch folder is removed and every source
 file is moved to `assetstore\failed`. On success (including writing the manifest) the source files
