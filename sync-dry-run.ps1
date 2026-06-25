@@ -9,8 +9,11 @@ param(
     [string]$RemotePipelineRoot = '/D:/MediaPipeline',
     [string]$RemoteName = 'heatup-remote-sftp',
 
-    [int]$Transfers = 3,
+    [int]$Transfers = 8,
     [int]$Checkers = 8,
+    [int]$MultiThreadStreams = 8,
+    [string]$MultiThreadChunkSize = '128M',
+    [string]$BufferSize = '64M',
     [switch]$Mirror
 )
 
@@ -21,6 +24,9 @@ $arguments = @{
     RemoteName = $RemoteName
     Transfers = $Transfers
     Checkers = $Checkers
+    MultiThreadStreams = $MultiThreadStreams
+    MultiThreadChunkSize = $MultiThreadChunkSize
+    BufferSize = $BufferSize
     DryRun = $true
 }
 

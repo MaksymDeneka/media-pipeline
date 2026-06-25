@@ -9,8 +9,11 @@ param(
     [string]$RemotePipelineRoot = '/D:/MediaPipeline',
     [string]$RemoteName = 'heatup-remote-sftp',
 
-    [int]$Transfers = 3,
+    [int]$Transfers = 8,
     [int]$Checkers = 8,
+    [int]$MultiThreadStreams = 8,
+    [string]$MultiThreadChunkSize = '128M',
+    [string]$BufferSize = '64M',
     [switch]$DryRun,
     [switch]$Mirror,
     [switch]$ConfirmDelete
@@ -79,6 +82,10 @@ $rcloneArgs = @(
     '--stats', '10s',
     '--transfers', $Transfers.ToString(),
     '--checkers', $Checkers.ToString(),
+    '--multi-thread-streams', $MultiThreadStreams.ToString(),
+    '--multi-thread-chunk-size', $MultiThreadChunkSize,
+    '--multi-thread-cutoff', '128M',
+    '--buffer-size', $BufferSize,
     '--retries', '5',
     '--low-level-retries', '20',
     '--timeout', '10m',
@@ -99,6 +106,7 @@ Write-Host "Download source:      $RemotePath"
 Write-Host "Download destination: $LocalPath"
 Write-Host "Mode:                 $operation"
 Write-Host "Dry run:              $($DryRun.IsPresent)"
+Write-Host "Large-file streams:   $MultiThreadStreams"
 Write-Host "Log file:             $logFile"
 
 Invoke-RcloneChecked -Arguments $rcloneArgs
