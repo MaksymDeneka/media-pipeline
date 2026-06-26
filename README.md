@@ -159,7 +159,7 @@ D:\MediaPipeline\
 - `images\original`: source images are moved here after all image variants succeed.
 - `images\failed`: source images are moved here if bulk image processing fails.
 - `imageclean\input`: put images here when you want one cleaned output per source image.
-- `imageclean\output`: cleaned images are written here with pure random filenames.
+- `imageclean\output`: cleaned images are written here with ordinary-looking random filenames.
 - `imageclean\original`: source images are moved here after cleanup succeeds.
 - `imageclean\failed`: source images are moved here if cleanup fails.
 - `sets\input`: put media files here when you want one output folder per source file.
@@ -167,11 +167,11 @@ D:\MediaPipeline\
 - `sets\original`: source files are moved here after all copies succeed.
 - `sets\failed`: source files are moved here if set processing fails.
 - `setbatch\input`: drop a whole group of files here to get several complete, differentiated copies of the entire group.
-- `setbatch\output`: each processed batch becomes one `bt_DD-MM-YYYY_<token>` folder containing `set_01` .. `set_NN` subfolders, each holding one processed copy of every source file.
+- `setbatch\output`: each processed batch becomes one random folder containing random set subfolders, each holding one processed copy of every source file.
 - `setbatch\original`: source files are moved here after the whole batch succeeds.
 - `setbatch\failed`: every source file in the batch is moved here if batch processing fails.
 - `assetstore\input`: drop a whole group of files here to get several complete sets plus a `heatup.assetStoreMediaManifest.v1` manifest describing every generated variant.
-- `assetstore\output`: each processed batch becomes one `as_DD-MM-YYYY_<token>` folder containing `set_01` .. `set_NN` subfolders and a `manifest.json` at its root.
+- `assetstore\output`: each processed batch becomes one random folder containing random set subfolders and a `manifest.json` at its root.
 - `assetstore\original`: source files are moved here after the whole batch (and its manifest) succeeds.
 - `assetstore\failed`: every source file in the batch is moved here if batch processing fails.
 
@@ -325,7 +325,7 @@ D:\MediaPipeline\imageclean\output
 
 Each output gets the same image cleanup treatment as the bulk image pipeline:
 
-- pure random filename like `<random>.jpg`, with no date, variant number, or source name
+- ordinary-looking random filename, with no date, pipeline code, variant number, set number, or source name
 - metadata removed with ExifTool
 - FFmpeg re-encode, not a byte-for-byte copy
 - tiny randomized crop and scale back to the original dimensions when the image is large enough
@@ -404,15 +404,15 @@ is still being written, the file list is unchanged for a poll cycle, and nothing
 writes one folder per processed batch:
 
 ```text
-D:\MediaPipeline\setbatch\output\bt_DD-MM-YYYY_<random>\
-  set_01\
-  set_02\
+D:\MediaPipeline\setbatch\output\summer-gallery-58291\
+  morning-album-18406\
+  garden-video-73924\
   ...
-  set_10\
+  quiet-photo-40618\
 ```
 
-Each `set_NN` folder contains one processed copy of every source file. The default is 10 sets,
-controlled by `SetBatchCount` in `config.ini`.
+Each random set folder contains one processed copy of every source file. The default is 10 sets,
+controlled by `SetBatchCount` in `config.ini`; folder names do not include set numbers.
 
 For images, each copy gets:
 
@@ -437,7 +437,7 @@ batches (many files times many sets) can take a while.
 
 Use this lane when you want the same "several complete sets of the whole group" output as the Batch
 Sets pipeline **plus** a machine-readable manifest that an importer can ingest. For example, drop 14
-source videos and get 15 sets (`set_01` .. `set_15`), each containing one processed copy of every
+source videos and get 15 randomly named set folders, each containing one processed copy of every
 video — 210 processed media in total — described by one `manifest.json`.
 
 Drop the whole group of files here:
@@ -451,16 +451,16 @@ it waits until no file is still being written, the file list is unchanged for a 
 nothing is locked), then writes one folder per processed batch:
 
 ```text
-D:\MediaPipeline\assetstore\output\as_DD-MM-YYYY_<random>\
+D:\MediaPipeline\assetstore\output\market-collection-73642\
   manifest.json
-  set_01\
-  set_02\
+  sunny-upload-29418\
+  cedar-scene-68073\
   ...
-  set_15\
+  coastal-frame-51980\
 ```
 
-Each `set_NN` folder contains one processed copy of every source file. The number of sets is
-`AssetStoreSetCount` in `config.ini` (default `15`).
+Each random set folder contains one processed copy of every source file. The number of sets is
+`AssetStoreSetCount` in `config.ini` (default `15`); folder names do not include set numbers.
 
 Every copy is fully processed like the other lanes — videos are re-encoded to H.264 MP4 with AAC
 audio, width capped at 1080px without upscaling, and metadata stripped with both FFmpeg
@@ -471,7 +471,7 @@ so each rendition differs at the file level without noticeably changing its leng
 
 ### The manifest
 
-`manifest.json` is written at the root of each `as_...` batch folder using the
+`manifest.json` is written at the root of each random asset-store batch folder using the
 `heatup.assetStoreMediaManifest.v1` schema:
 
 ```json
@@ -482,10 +482,10 @@ so each rendition differs at the file level without noticeably changing its leng
   "variants": [
     {
       "familyKey": "video_001",
-      "variantKey": "video_001__set_01",
-      "path": "set_01/dt_v01_04-06-2026_<random>.mp4",
-      "renditionSetKey": "set_01",
-      "generationBatchKey": "as_04-06-2026_<random>",
+      "variantKey": "video_001__sunny-upload-29418",
+      "path": "sunny-upload-29418/summer-clip-58291.mp4",
+      "renditionSetKey": "sunny-upload-29418",
+      "generationBatchKey": "market-collection-73642",
       "sourceOriginalName": "video_001.mp4",
       "sourceFamilyName": "video_001",
       "durationSeconds": 1.978,
@@ -502,12 +502,12 @@ How the fields map to the output:
 
 - `familyKey` — one per **source original** (the file's base name, sanitized). 14 source videos give
   14 family keys. Duplicate base names within a batch get a numeric suffix so keys stay unique.
-- `variantKey` — `"<familyKey>__set_NN"`, unique within the family and across the batch (one per
-  generated copy).
-- `path` — relative to `importRoot`, e.g. `set_01/<file>.mp4`.
-- `renditionSetKey` — which set the copy belongs to (`set_01` .. `set_NN`). This is the "15 complete
-  sets" grouping; group the variants by this key to get one full set of every source.
-- `generationBatchKey` — the `as_...` batch folder name.
+- `variantKey` — `"<familyKey>__<random set name>"`, unique within the family and across the batch
+  (one per generated copy).
+- `path` — relative to `importRoot`, e.g. `<random-set-folder>/<random-file>.mp4`.
+- `renditionSetKey` — which random set folder the copy belongs to. This is the "15 complete sets"
+  grouping; group the variants by this key to get one full set of every source.
+- `generationBatchKey` — the random batch folder name.
 - `durationSeconds` (videos only) and `sizeBytes` describe the produced file; `metadata` records the
   encoder and the exact trim applied.
 
@@ -540,8 +540,9 @@ Source formats and their targets:
 - `.heic` -> `.jpg`
 
 Any other supported media file dropped here (for example `.jpg`, `.png`, `.webp`, or `.mp4`) is passed
-through to the output folder unchanged. This makes it safe to drop a mixed batch: files that need
-conversion are converted, and files that are already in a good format are simply moved to the output.
+through to the output folder with a random output name. This makes it safe to drop a mixed batch:
+files that need conversion are converted, and files that are already in a good format are simply
+moved to the output.
 
 This does not create multiple variants. Videos are not re-encoded: `.mov` uses FFmpeg stream copy for
 video and audio:
@@ -558,8 +559,8 @@ Images are decoded and re-encoded to high-quality JPEG with `-q:v 2`, and metada
 `.heic` is the common iPhone photo format; JPEG is chosen for broad compatibility at high quality.
 
 Converted source files are moved into `convert\original\videos` or `convert\original\images`.
-Passed-through files go straight to `convert\output` (they are unchanged, so no separate original copy
-is kept). Failed source files are moved to `convert\failed`.
+Passed-through files go straight to `convert\output` with new random names (the media content is
+unchanged, so no separate original copy is kept). Failed source files are moved to `convert\failed`.
 
 ## Long Video Pipeline
 
@@ -611,23 +612,18 @@ Successful source files move to `D:\MediaPipeline\long\original`. Failed source 
 
 ## Output File Names
 
-Output names are random and not based on the source filename. Most pipelines put a code first
-(shortened: `dt` default/media, `lg` long, `img` bulk images, `st` sets, `bt` set batch, `as` asset
-store, `rx` remux, `cv` convert), then the creation date as `DD-MM-YYYY` (day and month separated by
-`-`) so the date stays readable when cloud tools truncate the end of long paths. The image cleanup
-pipeline is the exception: its output filenames are just random tokens plus the extension.
+Output media names are random and not based on the source filename. They use ordinary-looking
+word/number combinations and do not include pipeline codes, dates, variant numbers, segment numbers,
+set numbers, or sequence counters. Batch folders and set folders use the same style.
 
 ```text
-dt_DD-MM-YYYY_<random>.mp4
-dt_DD-MM-YYYY_<random>.jpg
-rx_DD-MM-YYYY_<random>.mp4
-cv_DD-MM-YYYY_<random>.jpg
-lg_DD-MM-YYYY_s01_v01_<random>.mp4
-img_v01_DD-MM-YYYY_<random>.jpg
-<random>.jpg
-dt_v01_DD-MM-YYYY_<random>.mp4
-st_DD-MM-YYYY_<random>\
-bt_DD-MM-YYYY_<random>\
+summer-clip-58291.mp4
+garden-photo-18406.jpg
+morning-album-73924.webp
+quiet-video-40618.mp4
+market-collection-73642\
+  sunny-upload-29418\
+    coastal-frame-51980.mp4
 ```
 
 ---

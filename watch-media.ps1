@@ -748,112 +748,96 @@ function New-RandomToken {
     return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
 }
 
-function Get-OutputDateStamp {
-    return (Get-Date).ToString("dd-MM-yyyy")
-}
+$script:OutputNameFirstWords = @(
+    "autumn", "bright", "calm", "cedar", "clear", "coastal", "daily", "evening",
+    "fresh", "garden", "golden", "harbor", "local", "maple", "meadow", "modern",
+    "morning", "natural", "open", "quiet", "river", "silver", "simple", "spring",
+    "studio", "summer", "sunny", "travel", "urban", "warm", "weekend", "winter"
+)
 
-function New-RandomOutputPath {
+$script:OutputNameSecondWords = @(
+    "album", "capture", "clip", "collection", "frame", "gallery", "image", "media",
+    "memory", "moment", "photo", "picture", "post", "project", "scene", "shot",
+    "snapshot", "story", "take", "update", "upload", "video", "view", "work"
+)
+
+function Get-RandomInt {
     param(
+        [int]$Minimum = 0,
+
         [Parameter(Mandatory = $true)]
-        [string]$Extension
+        [int]$Maximum
     )
 
-    do {
-        $token = New-RandomToken
-        $fileName = "dt_{0}_{1}{2}" -f (Get-OutputDateStamp), $token, $Extension.ToLowerInvariant()
-        $path = Join-Path $OutputDir $fileName
-    } while (Test-Path -LiteralPath $path)
+    if ($Maximum -le $Minimum) {
+        throw "Maximum must be greater than minimum."
+    }
 
-    return $path
+    $range = $Maximum - $Minimum
+    $limit = [int]::MaxValue - ([int]::MaxValue % $range)
+    $bytes = New-Object byte[] 4
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+
+    try {
+        do {
+            $rng.GetBytes($bytes)
+            $value = [System.BitConverter]::ToInt32($bytes, 0) -band 0x7fffffff
+        } while ($value -ge $limit)
+    }
+    finally {
+        $rng.Dispose()
+    }
+
+    return $Minimum + ($value % $range)
 }
 
-function New-RandomFilePath {
+function New-RegularRandomName {
+    $first = $script:OutputNameFirstWords[(Get-RandomInt -Maximum $script:OutputNameFirstWords.Count)]
+    $second = $script:OutputNameSecondWords[(Get-RandomInt -Maximum $script:OutputNameSecondWords.Count)]
+    $number = Get-RandomInt -Minimum 10000 -Maximum 100000
+
+    return "{0}-{1}-{2}" -f $first, $second, $number
+}
+
+function New-RegularRandomFilePath {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Directory,
 
         [Parameter(Mandatory = $true)]
-        [string]$Prefix,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Extension,
-
-        [string]$NameSuffix
+        [string]$Extension
     )
 
+    $normalizedExtension = $Extension.ToLowerInvariant()
+    if (-not $normalizedExtension.StartsWith(".")) {
+        $normalizedExtension = ".{0}" -f $normalizedExtension
+    }
+
     do {
-        $token = New-RandomToken
-        if ($NameSuffix) {
-            $fileName = "{0}_{1}_{2}_{3}{4}" -f $Prefix, (Get-OutputDateStamp), $NameSuffix, $token, $Extension.ToLowerInvariant()
-        }
-        else {
-            $fileName = "{0}_{1}_{2}{3}" -f $Prefix, (Get-OutputDateStamp), $token, $Extension.ToLowerInvariant()
-        }
+        $fileName = "{0}{1}" -f (New-RegularRandomName), $normalizedExtension
         $path = Join-Path $Directory $fileName
     } while (Test-Path -LiteralPath $path)
 
     return $path
 }
 
-function New-PureRandomFilePath {
+function New-RegularRandomDirectory {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Directory,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Extension,
-
-        [int]$TokenBytes = 12
+        [string]$Directory
     )
 
     do {
-        $token = New-RandomToken -ByteCount $TokenBytes
-        $fileName = "{0}{1}" -f $token, $Extension.ToLowerInvariant()
-        $path = Join-Path $Directory $fileName
-    } while (Test-Path -LiteralPath $path)
-
-    return $path
-}
-
-function New-ImageBulkBatchId {
-    return "{0}_{1}" -f (Get-OutputDateStamp), (New-RandomToken)
-}
-
-function New-ImageBulkOutputPath {
-    param(
-        [Parameter(Mandatory = $true)]
-        [int]$VariantNumber,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Extension
-    )
-
-    do {
-        $token = New-RandomToken
-        $fileName = "img_v{0:00}_{1}_{2}{3}" -f $VariantNumber, (Get-OutputDateStamp), $token, $Extension.ToLowerInvariant()
-        $path = Join-Path $ImageBulkOutputDir $fileName
-    } while (Test-Path -LiteralPath $path)
-
-    return $path
-}
-
-function New-RandomOutputDirectory {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Directory,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Prefix
-    )
-
-    do {
-        $token = New-RandomToken
-        $directoryName = "{0}_{1}_{2}" -f $Prefix, (Get-OutputDateStamp), $token
+        $directoryName = New-RegularRandomName
         $path = Join-Path $Directory $directoryName
     } while (Test-Path -LiteralPath $path)
 
     New-Item -ItemType Directory -Path $path -Force | Out-Null
     return $path
+}
+
+function New-ImageBulkBatchId {
+    return (New-RegularRandomName)
 }
 
 function Get-UniqueDestinationPath {
@@ -874,8 +858,7 @@ function Get-UniqueDestinationPath {
     $extension = [System.IO.Path]::GetExtension($OriginalFileName)
 
     do {
-        $suffix = "{0}_{1}" -f (Get-OutputDateStamp), (New-RandomToken 4)
-        $fileName = "{0}_{1}{2}" -f $baseName, $suffix, $extension
+        $fileName = "{0}-{1}{2}" -f $baseName, (New-RegularRandomName), $extension
         $destination = Join-Path $Directory $fileName
     } while (Test-Path -LiteralPath $destination)
 
@@ -1077,6 +1060,28 @@ function Move-InputFile {
     $destination = Get-UniqueDestinationPath -Directory $DestinationDirectory -OriginalFileName ([System.IO.Path]::GetFileName($Path))
     Move-Item -LiteralPath $Path -Destination $destination -Force
     Write-Log "Moved input file to: $destination"
+}
+
+function Move-InputFileToRandomOutput {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Log "Input file is no longer present, cannot move to output: $Path" "WARN"
+        return $null
+    }
+
+    $extension = [System.IO.Path]::GetExtension($Path)
+    $destination = New-RegularRandomFilePath -Directory $DestinationDirectory -Extension $extension
+    Move-Item -LiteralPath $Path -Destination $destination -Force
+    Write-Log "Moved input file to random output path: $destination"
+
+    return $destination
 }
 
 function Remove-GeneratedOutputs {
@@ -1340,7 +1345,7 @@ function Convert-VideoVariant {
         [int]$TrimMs
     )
 
-    $outputPath = New-RandomOutputPath -Extension ".mp4"
+    $outputPath = New-RegularRandomFilePath -Directory $OutputDir -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
     $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
@@ -1391,7 +1396,7 @@ function Convert-ImageVariant {
         $outputExtension = ".png"
     }
 
-    $outputPath = New-RandomOutputPath -Extension $outputExtension
+    $outputPath = New-RegularRandomFilePath -Directory $OutputDir -Extension $outputExtension
 
     if ($extension -eq ".heic") {
         $arguments = @(
@@ -1513,7 +1518,7 @@ function Convert-ImageBulkVariant {
     )
 
     $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-ImageBulkOutputPath -VariantNumber $VariantNumber -Extension $outputExtension
+    $outputPath = New-RegularRandomFilePath -Directory $ImageBulkOutputDir -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -1677,7 +1682,7 @@ function Convert-ImageCleanFile {
     )
 
     $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-PureRandomFilePath -Directory $ImageCleanOutputDir -Extension $outputExtension
+    $outputPath = New-RegularRandomFilePath -Directory $ImageCleanOutputDir -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -1808,7 +1813,7 @@ function Convert-SetVideoVariant {
         [int]$TrimMs
     )
 
-    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix ("dt_v{0:00}" -f $VariantNumber) -Extension ".mp4"
+    $outputPath = New-RegularRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
     $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
@@ -1860,7 +1865,7 @@ function Convert-SetImageVariant {
     )
 
     $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix ("dt_v{0:00}" -f $VariantNumber) -Extension $outputExtension
+    $outputPath = New-RegularRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -1918,7 +1923,7 @@ function Process-SetMediaFile {
     $outputDirectory = $null
 
     try {
-        $outputDirectory = New-RandomOutputDirectory -Directory $SetOutputDir -Prefix "st"
+        $outputDirectory = New-RegularRandomDirectory -Directory $SetOutputDir
         Write-Log "Set output directory: $outputDirectory"
 
         if (Test-IsVideo $Path) {
@@ -2034,7 +2039,7 @@ function Convert-SetBatchImageVariant {
     )
 
     $outputExtension = Get-SetBatchOutputExtension -InputPath $SourcePath
-    $outputPath = New-RandomFilePath -Directory $OutputDirectory -Prefix "dt" -Extension $outputExtension
+    $outputPath = New-RegularRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -2167,14 +2172,13 @@ function Process-SetBatch {
         [System.IO.FileInfo[]]$Files
     )
 
-    $batchDirectory = New-RandomOutputDirectory -Directory $SetBatchOutputDir -Prefix "bt"
+    $batchDirectory = New-RegularRandomDirectory -Directory $SetBatchOutputDir
     Write-Log "Set batch output directory: $batchDirectory ($SetBatchCount sets, $($Files.Count) source file(s))"
 
     try {
         $setDirectories = @()
         for ($setNumber = 1; $setNumber -le $SetBatchCount; $setNumber++) {
-            $setDirectory = Join-Path $batchDirectory ("set_{0:00}" -f $setNumber)
-            New-Item -ItemType Directory -Path $setDirectory -Force | Out-Null
+            $setDirectory = New-RegularRandomDirectory -Directory $batchDirectory
             $setDirectories += $setDirectory
         }
 
@@ -2229,7 +2233,7 @@ function Process-SetBatchSafely {
 # Asset store manifest pipeline
 # ---------------------------------------------------------------------------
 # Treats everything dropped in assetstore\input as one batch. Produces
-# $AssetStoreSetCount sets (set_01 .. set_NN), each holding one processed,
+# $AssetStoreSetCount randomly named sets, each holding one processed,
 # metadata-stripped copy of every source file, then writes a
 # heatup.assetStoreMediaManifest.v1 manifest describing every generated variant.
 # Each video copy gets a tiny end-trim (tens of ms at most, see
@@ -2493,7 +2497,7 @@ function Process-AssetStoreBatch {
         [System.IO.FileInfo[]]$Files
     )
 
-    $batchDirectory = New-RandomOutputDirectory -Directory $AssetStoreOutputDir -Prefix "as"
+    $batchDirectory = New-RegularRandomDirectory -Directory $AssetStoreOutputDir
     $batchKey = [System.IO.Path]::GetFileName($batchDirectory)
     $generatedAt = Get-UtcIsoTimestamp
     Write-Log "Asset store batch output directory: $batchDirectory ($AssetStoreSetCount set(s), $($Files.Count) source file(s))"
@@ -2504,9 +2508,8 @@ function Process-AssetStoreBatch {
         $setDirectories = @()
         $setNames = @()
         for ($setNumber = 1; $setNumber -le $AssetStoreSetCount; $setNumber++) {
-            $setName = "set_{0:00}" -f $setNumber
-            $setDirectory = Join-Path $batchDirectory $setName
-            New-Item -ItemType Directory -Path $setDirectory -Force | Out-Null
+            $setDirectory = New-RegularRandomDirectory -Directory $batchDirectory
+            $setName = [System.IO.Path]::GetFileName($setDirectory)
             $setDirectories += $setDirectory
             $setNames += $setName
         }
@@ -2707,7 +2710,7 @@ function Convert-RemuxMediaFile {
     $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
 
     if ($RemuxVideoSourceExtensions -contains $extension) {
-        $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "rx" -Extension ".mp4"
+        $outputPath = New-RegularRandomFilePath -Directory $RemuxOutputDir -Extension ".mp4"
 
         Write-Log "Started convert (video) for: $Path"
         Write-Log "Convert output path: $outputPath"
@@ -2727,7 +2730,7 @@ function Convert-RemuxMediaFile {
     }
 
     if ($RemuxImageSourceExtensions -contains $extension) {
-        $outputPath = New-RandomFilePath -Directory $RemuxOutputDir -Prefix "cv" -Extension $RemuxImageOutputExtension
+        $outputPath = New-RegularRandomFilePath -Directory $RemuxOutputDir -Extension $RemuxImageOutputExtension
 
         Write-Log "Started convert (image) for: $Path"
         Write-Log "Convert output path: $outputPath"
@@ -2748,8 +2751,8 @@ function Convert-RemuxMediaFile {
 
     if (Test-IsSupportedMedia $Path) {
         Write-Log "Convert pass-through (already a supported format): $Path"
-        Move-InputFile -Path $Path -DestinationDirectory $RemuxOutputDir
-        Write-Log "Passed through to convert output unchanged: $Path"
+        $outputPath = Move-InputFileToRandomOutput -Path $Path -DestinationDirectory $RemuxOutputDir
+        Write-Log "Passed through to convert output unchanged: $outputPath"
         return
     }
 
@@ -3159,7 +3162,7 @@ function Convert-LongVideoVariant {
         [int]$TrimMs
     )
 
-    $outputPath = New-RandomFilePath -Directory $LongOutputDir -Prefix "lg" -NameSuffix ("s{0:00}_v{1:00}" -f $SegmentNumber, $VariantNumber) -Extension ".mp4"
+    $outputPath = New-RegularRandomFilePath -Directory $LongOutputDir -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
     $targetDuration = [Math]::Max(0.1, $SegmentDurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
