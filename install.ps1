@@ -4,7 +4,7 @@
 #  Run this via "Install.bat" (which elevates to administrator). It:
 #    1. installs FFmpeg, ExifTool and PowerShell 7 with winget,
 #    2. makes sure the settings file (config.ini) is usable,
-#    3. moves any files left in the old folder layout into default\,
+#    3. moves any files left in the old folder layout into default\LC\,
 #    4. registers the watcher to start automatically when you sign in,
 #    5. validates everything and starts the watcher.
 #
@@ -126,9 +126,9 @@ try {
         Write-Ok 'Location looks good.'
     }
 
-    # --- 5. Migrate files from the old (root-level) layout into default\ ---
+    # --- 5. Migrate files from the old (root-level) layout into default\LC\ ---
     Write-Step 'Checking for files from the old folder layout...'
-    $defaultRoot = Join-Path $pipelineRoot 'default'
+    $defaultRoot = Join-Path (Join-Path $pipelineRoot 'default') 'LC'
     $pairs = @(
         @{ Old = (Join-Path $pipelineRoot 'input');    New = (Join-Path $defaultRoot 'input') },
         @{ Old = (Join-Path $pipelineRoot 'output');   New = (Join-Path $defaultRoot 'output') },
@@ -195,7 +195,7 @@ try {
     Write-Host ''
     Write-Host 'Next steps:'
     Write-Host ('  1. Set your browser''s download folder to:')
-    Write-Host ('       ' + (Join-Path (Join-Path $pipelineRoot 'default') 'input')) -ForegroundColor White
+    Write-Host ('       ' + (Join-Path (Join-Path (Join-Path $pipelineRoot 'default') 'LC') 'input')) -ForegroundColor White
     Write-Host '  2. To change settings: run "Edit Config.bat", save, then'
     Write-Host '     run "Restart Watcher.bat" to apply them.'
     Write-Host '  3. The watcher will start by itself every time you sign in.'

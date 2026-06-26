@@ -168,61 +168,107 @@ $AssetStoreMaxTrimMs = Get-Setting 'AssetStoreMaxTrimMs' 40
 $AssetStoreManifestSchema = Get-Setting 'AssetStoreManifestSchema' 'heatup.assetStoreMediaManifest.v1'
 
 # --- Derived directory paths (computed from $PipelineRoot above) ---
-# Default pipeline folders live under "default" so they no longer sit loose in
-# the pipeline root next to the other pipeline folders.
+# Each pipeline is divided into workspaces so assets can stay categorized.
+# Existing pre-workspace assets are migrated into LC.
+$WorkspaceNames = @("LC", "MD", "general")
+$DefaultWorkspaceName = "LC"
+
 $DefaultRootDir = Join-Path $PipelineRoot "default"
-$InputDir = Join-Path $DefaultRootDir "input"
-$OutputDir = Join-Path $DefaultRootDir "output"
-$OriginalDir = Join-Path $DefaultRootDir "original"
-$FailedDir = Join-Path $DefaultRootDir "failed"
 $LogsDir = Join-Path $PipelineRoot "logs"
 $RemuxRootDir = Join-Path $PipelineRoot "convert"
-$RemuxInputDir = Join-Path $RemuxRootDir "input"
-$RemuxOutputDir = Join-Path $RemuxRootDir "output"
-$RemuxOriginalDir = Join-Path $RemuxRootDir "original"
-$RemuxOriginalVideosDir = Join-Path $RemuxOriginalDir "videos"
-$RemuxOriginalImagesDir = Join-Path $RemuxOriginalDir "images"
-$RemuxFailedDir = Join-Path $RemuxRootDir "failed"
 $LongRootDir = Join-Path $PipelineRoot "long"
-$LongInputDir = Join-Path $LongRootDir "input"
-$LongOutputDir = Join-Path $LongRootDir "output"
-$LongOriginalDir = Join-Path $LongRootDir "original"
-$LongFailedDir = Join-Path $LongRootDir "failed"
-$LongWorkDir = Join-Path $LongRootDir "work"
 $ImageBulkRootDir = Join-Path $PipelineRoot "images"
-$ImageBulkInputDir = Join-Path $ImageBulkRootDir "input"
-$ImageBulkOutputDir = Join-Path $ImageBulkRootDir "output"
-$ImageBulkOriginalDir = Join-Path $ImageBulkRootDir "original"
-$ImageBulkFailedDir = Join-Path $ImageBulkRootDir "failed"
 $ImageCleanRootDir = Join-Path $PipelineRoot "imageclean"
-$ImageCleanInputDir = Join-Path $ImageCleanRootDir "input"
-$ImageCleanOutputDir = Join-Path $ImageCleanRootDir "output"
-$ImageCleanOriginalDir = Join-Path $ImageCleanRootDir "original"
-$ImageCleanFailedDir = Join-Path $ImageCleanRootDir "failed"
 $SetRootDir = Join-Path $PipelineRoot "sets"
-$SetInputDir = Join-Path $SetRootDir "input"
-$SetOutputDir = Join-Path $SetRootDir "output"
-$SetOriginalDir = Join-Path $SetRootDir "original"
-$SetFailedDir = Join-Path $SetRootDir "failed"
 $SetBatchRootDir = Join-Path $PipelineRoot "setbatch"
-$SetBatchInputDir = Join-Path $SetBatchRootDir "input"
-$SetBatchOutputDir = Join-Path $SetBatchRootDir "output"
-$SetBatchOriginalDir = Join-Path $SetBatchRootDir "original"
-$SetBatchFailedDir = Join-Path $SetBatchRootDir "failed"
 $AssetStoreRootDir = Join-Path $PipelineRoot "assetstore"
-$AssetStoreInputDir = Join-Path $AssetStoreRootDir "input"
-$AssetStoreOutputDir = Join-Path $AssetStoreRootDir "output"
-$AssetStoreOriginalDir = Join-Path $AssetStoreRootDir "original"
-$AssetStoreFailedDir = Join-Path $AssetStoreRootDir "failed"
 $ArchiveRootDir = Join-Path $PipelineRoot "archive"
-$ArchiveDefaultOutputDir = Join-Path $ArchiveRootDir "output"
-$ArchiveImageBulkOutputDir = Join-Path $ArchiveRootDir "images"
-$ArchiveImageCleanOutputDir = Join-Path $ArchiveRootDir "imageclean"
-$ArchiveRemuxOutputDir = Join-Path $ArchiveRootDir "convert"
-$ArchiveLongOutputDir = Join-Path $ArchiveRootDir "long"
-$ArchiveSetOutputDir = Join-Path $ArchiveRootDir "sets"
-$ArchiveSetBatchOutputDir = Join-Path $ArchiveRootDir "setbatch"
-$ArchiveAssetStoreOutputDir = Join-Path $ArchiveRootDir "assetstore"
+
+function Get-WorkspacePathSet {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkspaceName
+    )
+
+    $defaultWorkspaceRoot = Join-Path $DefaultRootDir $WorkspaceName
+    $remuxWorkspaceRoot = Join-Path $RemuxRootDir $WorkspaceName
+    $longWorkspaceRoot = Join-Path $LongRootDir $WorkspaceName
+    $imageBulkWorkspaceRoot = Join-Path $ImageBulkRootDir $WorkspaceName
+    $imageCleanWorkspaceRoot = Join-Path $ImageCleanRootDir $WorkspaceName
+    $setWorkspaceRoot = Join-Path $SetRootDir $WorkspaceName
+    $setBatchWorkspaceRoot = Join-Path $SetBatchRootDir $WorkspaceName
+    $assetStoreWorkspaceRoot = Join-Path $AssetStoreRootDir $WorkspaceName
+
+    $archiveDefaultWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "default") $WorkspaceName
+    $archiveImageBulkWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "images") $WorkspaceName
+    $archiveImageCleanWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "imageclean") $WorkspaceName
+    $archiveRemuxWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "convert") $WorkspaceName
+    $archiveLongWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "long") $WorkspaceName
+    $archiveSetWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "sets") $WorkspaceName
+    $archiveSetBatchWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "setbatch") $WorkspaceName
+    $archiveAssetStoreWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "assetstore") $WorkspaceName
+
+    return [pscustomobject]@{
+        CurrentWorkspaceName = $WorkspaceName
+        InputDir = Join-Path $defaultWorkspaceRoot "input"
+        OutputDir = Join-Path $defaultWorkspaceRoot "output"
+        OriginalDir = Join-Path $defaultWorkspaceRoot "original"
+        FailedDir = Join-Path $defaultWorkspaceRoot "failed"
+        RemuxInputDir = Join-Path $remuxWorkspaceRoot "input"
+        RemuxOutputDir = Join-Path $remuxWorkspaceRoot "output"
+        RemuxOriginalDir = Join-Path $remuxWorkspaceRoot "original"
+        RemuxOriginalVideosDir = Join-Path (Join-Path $remuxWorkspaceRoot "original") "videos"
+        RemuxOriginalImagesDir = Join-Path (Join-Path $remuxWorkspaceRoot "original") "images"
+        RemuxFailedDir = Join-Path $remuxWorkspaceRoot "failed"
+        LongInputDir = Join-Path $longWorkspaceRoot "input"
+        LongOutputDir = Join-Path $longWorkspaceRoot "output"
+        LongOriginalDir = Join-Path $longWorkspaceRoot "original"
+        LongFailedDir = Join-Path $longWorkspaceRoot "failed"
+        LongWorkDir = Join-Path $longWorkspaceRoot "work"
+        ImageBulkInputDir = Join-Path $imageBulkWorkspaceRoot "input"
+        ImageBulkOutputDir = Join-Path $imageBulkWorkspaceRoot "output"
+        ImageBulkOriginalDir = Join-Path $imageBulkWorkspaceRoot "original"
+        ImageBulkFailedDir = Join-Path $imageBulkWorkspaceRoot "failed"
+        ImageCleanInputDir = Join-Path $imageCleanWorkspaceRoot "input"
+        ImageCleanOutputDir = Join-Path $imageCleanWorkspaceRoot "output"
+        ImageCleanOriginalDir = Join-Path $imageCleanWorkspaceRoot "original"
+        ImageCleanFailedDir = Join-Path $imageCleanWorkspaceRoot "failed"
+        SetInputDir = Join-Path $setWorkspaceRoot "input"
+        SetOutputDir = Join-Path $setWorkspaceRoot "output"
+        SetOriginalDir = Join-Path $setWorkspaceRoot "original"
+        SetFailedDir = Join-Path $setWorkspaceRoot "failed"
+        SetBatchInputDir = Join-Path $setBatchWorkspaceRoot "input"
+        SetBatchOutputDir = Join-Path $setBatchWorkspaceRoot "output"
+        SetBatchOriginalDir = Join-Path $setBatchWorkspaceRoot "original"
+        SetBatchFailedDir = Join-Path $setBatchWorkspaceRoot "failed"
+        AssetStoreInputDir = Join-Path $assetStoreWorkspaceRoot "input"
+        AssetStoreOutputDir = Join-Path $assetStoreWorkspaceRoot "output"
+        AssetStoreOriginalDir = Join-Path $assetStoreWorkspaceRoot "original"
+        AssetStoreFailedDir = Join-Path $assetStoreWorkspaceRoot "failed"
+        ArchiveDefaultOutputDir = Join-Path $archiveDefaultWorkspaceRoot "output"
+        ArchiveImageBulkOutputDir = Join-Path $archiveImageBulkWorkspaceRoot "output"
+        ArchiveImageCleanOutputDir = Join-Path $archiveImageCleanWorkspaceRoot "output"
+        ArchiveRemuxOutputDir = Join-Path $archiveRemuxWorkspaceRoot "output"
+        ArchiveLongOutputDir = Join-Path $archiveLongWorkspaceRoot "output"
+        ArchiveSetOutputDir = Join-Path $archiveSetWorkspaceRoot "output"
+        ArchiveSetBatchOutputDir = Join-Path $archiveSetBatchWorkspaceRoot "output"
+        ArchiveAssetStoreOutputDir = Join-Path $archiveAssetStoreWorkspaceRoot "output"
+    }
+}
+
+function Set-PipelineWorkspacePaths {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkspaceName
+    )
+
+    $paths = Get-WorkspacePathSet -WorkspaceName $WorkspaceName
+    foreach ($property in $paths.PSObject.Properties) {
+        Set-Variable -Name $property.Name -Value $property.Value -Scope Script
+    }
+}
+
+Set-PipelineWorkspacePaths -WorkspaceName $DefaultWorkspaceName
 
 $VideoExtensions = @(".mp4", ".mov", ".mkv", ".webm", ".avi")
 $ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic")
@@ -247,6 +293,44 @@ $script:SupportsParallel = ($PSVersionTable.PSVersion.Major -ge 7)
 $script:DefaultPipelineEntryCount = 0
 $script:LastSetBatchSignature = $null
 $script:LastAssetStoreSignature = $null
+$script:WorkspaceRuntimeState = @{}
+
+function Use-PipelineWorkspace {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkspaceName
+    )
+
+    Set-PipelineWorkspacePaths -WorkspaceName $WorkspaceName
+
+    if (-not $script:WorkspaceRuntimeState.ContainsKey($WorkspaceName)) {
+        $script:WorkspaceRuntimeState[$WorkspaceName] = @{
+            LastArchiveCheck = $null
+            LastSetBatchSignature = $null
+            LastAssetStoreSignature = $null
+        }
+    }
+
+    $state = $script:WorkspaceRuntimeState[$WorkspaceName]
+    $script:LastArchiveCheck = $state.LastArchiveCheck
+    $script:LastSetBatchSignature = $state.LastSetBatchSignature
+    $script:LastAssetStoreSignature = $state.LastAssetStoreSignature
+}
+
+function Save-PipelineWorkspaceState {
+    if ([string]::IsNullOrWhiteSpace($script:CurrentWorkspaceName)) {
+        return
+    }
+
+    if (-not $script:WorkspaceRuntimeState.ContainsKey($script:CurrentWorkspaceName)) {
+        $script:WorkspaceRuntimeState[$script:CurrentWorkspaceName] = @{}
+    }
+
+    $state = $script:WorkspaceRuntimeState[$script:CurrentWorkspaceName]
+    $state.LastArchiveCheck = $script:LastArchiveCheck
+    $state.LastSetBatchSignature = $script:LastSetBatchSignature
+    $state.LastAssetStoreSignature = $script:LastAssetStoreSignature
+}
 
 function Get-DefaultPipelineCopyCount {
     $script:DefaultPipelineEntryCount++
@@ -258,24 +342,32 @@ function Get-DefaultPipelineCopyCount {
 }
 
 function Initialize-Folders {
-    $directories = @(
-        $InputDir, $OutputDir, $OriginalDir, $FailedDir, $LogsDir,
-        $RemuxInputDir, $RemuxOutputDir, $RemuxOriginalDir, $RemuxOriginalVideosDir, $RemuxOriginalImagesDir, $RemuxFailedDir,
-        $LongInputDir, $LongOutputDir, $LongOriginalDir, $LongFailedDir, $LongWorkDir,
-        $ImageBulkInputDir, $ImageBulkOutputDir, $ImageBulkOriginalDir, $ImageBulkFailedDir,
-        $ImageCleanInputDir, $ImageCleanOutputDir, $ImageCleanOriginalDir, $ImageCleanFailedDir,
-        $SetInputDir, $SetOutputDir, $SetOriginalDir, $SetFailedDir,
-        $SetBatchInputDir, $SetBatchOutputDir, $SetBatchOriginalDir, $SetBatchFailedDir,
-        $AssetStoreInputDir, $AssetStoreOutputDir, $AssetStoreOriginalDir, $AssetStoreFailedDir,
-        $ArchiveDefaultOutputDir, $ArchiveImageBulkOutputDir, $ArchiveImageCleanOutputDir, $ArchiveRemuxOutputDir, $ArchiveLongOutputDir,
-        $ArchiveSetOutputDir, $ArchiveSetBatchOutputDir, $ArchiveAssetStoreOutputDir
-    )
+    $directories = New-Object System.Collections.Generic.List[string]
+    $directories.Add($LogsDir) | Out-Null
+
+    if (-not (Test-Path -LiteralPath $LogsDir)) {
+        New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
+    }
+
+    Move-LegacyPipelineAssetsToDefaultWorkspace
+
+    foreach ($workspaceName in $WorkspaceNames) {
+        $paths = Get-WorkspacePathSet -WorkspaceName $workspaceName
+        foreach ($property in $paths.PSObject.Properties) {
+            if ($property.Name -eq "CurrentWorkspaceName") { continue }
+            if ($property.Name.EndsWith("Dir")) {
+                $directories.Add([string]$property.Value) | Out-Null
+            }
+        }
+    }
 
     foreach ($directory in $directories) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
         }
     }
+
+    Use-PipelineWorkspace -WorkspaceName $DefaultWorkspaceName
 }
 
 function Write-Log {
@@ -865,6 +957,138 @@ function Get-UniqueDestinationPath {
     return $destination
 }
 
+function Move-LegacyDirectoryContents {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceDirectory)) {
+        return 0
+    }
+
+    $sourceFullPath = [System.IO.Path]::GetFullPath($SourceDirectory).TrimEnd('\')
+    $destinationFullPath = [System.IO.Path]::GetFullPath($DestinationDirectory).TrimEnd('\')
+    if ($sourceFullPath.Equals($destinationFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return 0
+    }
+
+    $items = @(Get-ChildItem -LiteralPath $SourceDirectory -Force -ErrorAction SilentlyContinue)
+    if ($items.Count -eq 0) {
+        return 0
+    }
+
+    if (-not (Test-Path -LiteralPath $DestinationDirectory)) {
+        New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
+    }
+
+    $moved = 0
+    foreach ($item in $items) {
+        if ($item.PSIsContainer -and ($WorkspaceNames -contains $item.Name)) {
+            continue
+        }
+
+        $itemFullPath = [System.IO.Path]::GetFullPath($item.FullName).TrimEnd('\')
+        if ($itemFullPath.Equals($destinationFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        if ($destinationFullPath.StartsWith($itemFullPath + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        try {
+            $destination = Get-UniqueDestinationPath -Directory $DestinationDirectory -OriginalFileName $item.Name
+            Move-Item -LiteralPath $item.FullName -Destination $destination -Force
+            $moved++
+        }
+        catch {
+            Write-Log "Could not migrate legacy $Label item '$($item.FullName)': $($_.Exception.Message)" "WARN"
+        }
+    }
+
+    if ($moved -gt 0) {
+        Write-Log "Migrated $moved legacy $Label item(s) to $DestinationDirectory."
+    }
+
+    return $moved
+}
+
+function Move-LegacyPipelineAssetsToDefaultWorkspace {
+    $paths = Get-WorkspacePathSet -WorkspaceName $DefaultWorkspaceName
+    $pairs = @(
+        @{ Label = "root default input"; Old = (Join-Path $PipelineRoot "input"); New = $paths.InputDir },
+        @{ Label = "root default output"; Old = (Join-Path $PipelineRoot "output"); New = $paths.OutputDir },
+        @{ Label = "root default original"; Old = (Join-Path $PipelineRoot "original"); New = $paths.OriginalDir },
+        @{ Label = "root default failed"; Old = (Join-Path $PipelineRoot "failed"); New = $paths.FailedDir },
+
+        @{ Label = "default input"; Old = (Join-Path $DefaultRootDir "input"); New = $paths.InputDir },
+        @{ Label = "default output"; Old = (Join-Path $DefaultRootDir "output"); New = $paths.OutputDir },
+        @{ Label = "default original"; Old = (Join-Path $DefaultRootDir "original"); New = $paths.OriginalDir },
+        @{ Label = "default failed"; Old = (Join-Path $DefaultRootDir "failed"); New = $paths.FailedDir },
+
+        @{ Label = "convert input"; Old = (Join-Path $RemuxRootDir "input"); New = $paths.RemuxInputDir },
+        @{ Label = "convert output"; Old = (Join-Path $RemuxRootDir "output"); New = $paths.RemuxOutputDir },
+        @{ Label = "convert original videos"; Old = (Join-Path (Join-Path $RemuxRootDir "original") "videos"); New = $paths.RemuxOriginalVideosDir },
+        @{ Label = "convert original images"; Old = (Join-Path (Join-Path $RemuxRootDir "original") "images"); New = $paths.RemuxOriginalImagesDir },
+        @{ Label = "convert failed"; Old = (Join-Path $RemuxRootDir "failed"); New = $paths.RemuxFailedDir },
+
+        @{ Label = "long input"; Old = (Join-Path $LongRootDir "input"); New = $paths.LongInputDir },
+        @{ Label = "long output"; Old = (Join-Path $LongRootDir "output"); New = $paths.LongOutputDir },
+        @{ Label = "long original"; Old = (Join-Path $LongRootDir "original"); New = $paths.LongOriginalDir },
+        @{ Label = "long failed"; Old = (Join-Path $LongRootDir "failed"); New = $paths.LongFailedDir },
+        @{ Label = "long work"; Old = (Join-Path $LongRootDir "work"); New = $paths.LongWorkDir },
+
+        @{ Label = "images input"; Old = (Join-Path $ImageBulkRootDir "input"); New = $paths.ImageBulkInputDir },
+        @{ Label = "images output"; Old = (Join-Path $ImageBulkRootDir "output"); New = $paths.ImageBulkOutputDir },
+        @{ Label = "images original"; Old = (Join-Path $ImageBulkRootDir "original"); New = $paths.ImageBulkOriginalDir },
+        @{ Label = "images failed"; Old = (Join-Path $ImageBulkRootDir "failed"); New = $paths.ImageBulkFailedDir },
+
+        @{ Label = "imageclean input"; Old = (Join-Path $ImageCleanRootDir "input"); New = $paths.ImageCleanInputDir },
+        @{ Label = "imageclean output"; Old = (Join-Path $ImageCleanRootDir "output"); New = $paths.ImageCleanOutputDir },
+        @{ Label = "imageclean original"; Old = (Join-Path $ImageCleanRootDir "original"); New = $paths.ImageCleanOriginalDir },
+        @{ Label = "imageclean failed"; Old = (Join-Path $ImageCleanRootDir "failed"); New = $paths.ImageCleanFailedDir },
+
+        @{ Label = "sets input"; Old = (Join-Path $SetRootDir "input"); New = $paths.SetInputDir },
+        @{ Label = "sets output"; Old = (Join-Path $SetRootDir "output"); New = $paths.SetOutputDir },
+        @{ Label = "sets original"; Old = (Join-Path $SetRootDir "original"); New = $paths.SetOriginalDir },
+        @{ Label = "sets failed"; Old = (Join-Path $SetRootDir "failed"); New = $paths.SetFailedDir },
+
+        @{ Label = "setbatch input"; Old = (Join-Path $SetBatchRootDir "input"); New = $paths.SetBatchInputDir },
+        @{ Label = "setbatch output"; Old = (Join-Path $SetBatchRootDir "output"); New = $paths.SetBatchOutputDir },
+        @{ Label = "setbatch original"; Old = (Join-Path $SetBatchRootDir "original"); New = $paths.SetBatchOriginalDir },
+        @{ Label = "setbatch failed"; Old = (Join-Path $SetBatchRootDir "failed"); New = $paths.SetBatchFailedDir },
+
+        @{ Label = "assetstore input"; Old = (Join-Path $AssetStoreRootDir "input"); New = $paths.AssetStoreInputDir },
+        @{ Label = "assetstore output"; Old = (Join-Path $AssetStoreRootDir "output"); New = $paths.AssetStoreOutputDir },
+        @{ Label = "assetstore original"; Old = (Join-Path $AssetStoreRootDir "original"); New = $paths.AssetStoreOriginalDir },
+        @{ Label = "assetstore failed"; Old = (Join-Path $AssetStoreRootDir "failed"); New = $paths.AssetStoreFailedDir },
+
+        @{ Label = "archive default"; Old = (Join-Path $ArchiveRootDir "output"); New = $paths.ArchiveDefaultOutputDir },
+        @{ Label = "archive images"; Old = (Join-Path $ArchiveRootDir "images"); New = $paths.ArchiveImageBulkOutputDir },
+        @{ Label = "archive imageclean"; Old = (Join-Path $ArchiveRootDir "imageclean"); New = $paths.ArchiveImageCleanOutputDir },
+        @{ Label = "archive convert"; Old = (Join-Path $ArchiveRootDir "convert"); New = $paths.ArchiveRemuxOutputDir },
+        @{ Label = "archive long"; Old = (Join-Path $ArchiveRootDir "long"); New = $paths.ArchiveLongOutputDir },
+        @{ Label = "archive sets"; Old = (Join-Path $ArchiveRootDir "sets"); New = $paths.ArchiveSetOutputDir },
+        @{ Label = "archive setbatch"; Old = (Join-Path $ArchiveRootDir "setbatch"); New = $paths.ArchiveSetBatchOutputDir },
+        @{ Label = "archive assetstore"; Old = (Join-Path $ArchiveRootDir "assetstore"); New = $paths.ArchiveAssetStoreOutputDir }
+    )
+
+    $totalMoved = 0
+    foreach ($pair in $pairs) {
+        $totalMoved += Move-LegacyDirectoryContents -SourceDirectory $pair.Old -DestinationDirectory $pair.New -Label $pair.Label
+    }
+
+    if ($totalMoved -gt 0) {
+        Write-Log "Legacy workspace migration complete: $totalMoved item(s) moved into $DefaultWorkspaceName."
+    }
+}
+
 function Get-OutputArchiveCutoffTime {
     return (Get-Date).AddHours(-1 * $ArchiveAgeHours)
 }
@@ -1362,7 +1586,7 @@ function Convert-VideoVariant {
         "-i", $InputPath,
         "-t", $targetDurationText,
         "-map", "0:v:0",
-        "-map", "0:a?"
+        "-map", "0:a:0?"
     )
     $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth -MaxVideoBitrateKbps $maxVideoBitrateKbps
     $arguments += @(
@@ -1829,7 +2053,7 @@ function Convert-SetVideoVariant {
         "-i", $InputPath,
         "-t", $targetDurationText,
         "-map", "0:v:0",
-        "-map", "0:a?"
+        "-map", "0:a:0?"
     )
     $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth
     $arguments += @(
@@ -2232,7 +2456,7 @@ function Process-SetBatchSafely {
 # ---------------------------------------------------------------------------
 # Asset store manifest pipeline
 # ---------------------------------------------------------------------------
-# Treats everything dropped in assetstore\input as one batch. Produces
+# Treats everything dropped in assetstore\<workspace>\input as one batch. Produces
 # $AssetStoreSetCount randomly named sets, each holding one processed,
 # metadata-stripped copy of every source file, then writes a
 # heatup.assetStoreMediaManifest.v1 manifest describing every generated variant.
@@ -2656,7 +2880,7 @@ function Invoke-MovToMp4Remux {
         "-loglevel", "error",
         "-i", $InputPath,
         "-map", "0:v:0",
-        "-map", "0:a?",
+        "-map", "0:a:0?",
         "-dn",
         "-c", "copy",
         "-map_metadata", "-1",
@@ -2926,7 +3150,7 @@ function Invoke-LongSegmentExtract {
         "-i", $InputPath,
         "-t", $durationText,
         "-map", "0:v:0",
-        "-map", "0:a?",
+        "-map", "0:a:0?",
         "-dn",
         "-c", "copy",
         "-map_metadata", "-1",
@@ -2979,7 +3203,7 @@ function Invoke-LongVideoEncode {
 
     $arguments += @(
         "-map", "0:v:0",
-        "-map", "0:a?"
+        "-map", "0:a:0?"
     )
     $arguments += New-VideoEncoderArguments -QualityValue $QualityValue -MaxWidthValue $MaxWidthValue -MaxVideoBitrateKbps $MaxVideoBitrateKbps
     $arguments += @(
@@ -3368,6 +3592,7 @@ function Get-CandidateAssetStoreFiles {
 
 function Start-PollingWatcher {
     Write-Log "Watcher started."
+    Write-Log "Workspaces: $($WorkspaceNames -join ', ')"
     Write-Log "Input: $InputDir"
     Write-Log "Output: $OutputDir"
     if ($DefaultMaxOutputSizeMB -gt 0) {
@@ -3416,6 +3641,8 @@ function Start-PollingWatcher {
     Write-Log "Polling every $PollSeconds seconds."
 
     while ($true) {
+        foreach ($workspaceName in $WorkspaceNames) {
+        Use-PipelineWorkspace -WorkspaceName $workspaceName
         try {
             Invoke-OutputArchiveIfDue
 
@@ -3488,8 +3715,10 @@ function Start-PollingWatcher {
                 $ffPath = $script:FFmpegPath
                 $fpPath = $script:FFprobePath
                 $exPath = $script:ExifToolPath
+                $workspaceNameForParallel = $script:CurrentWorkspaceName
                 $imageCleanFiles | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
                     . $using:libPath -AsLibrary
+                    Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
                     $script:FFmpegPath = $using:ffPath
                     $script:FFprobePath = $using:fpPath
                     $script:ExifToolPath = $using:exPath
@@ -3508,9 +3737,11 @@ function Start-PollingWatcher {
                 $ffPath = $script:FFmpegPath
                 $fpPath = $script:FFprobePath
                 $exPath = $script:ExifToolPath
+                $workspaceNameForParallel = $script:CurrentWorkspaceName
                 Write-Log "Image bulk processing $($imageBulkFiles.Count) file(s) with file concurrency $ImageProcessingConcurrency and per-file variant concurrency 1."
                 $imageBulkFiles | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
                     . $using:libPath -AsLibrary
+                    Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
                     $script:FFmpegPath = $using:ffPath
                     $script:FFprobePath = $using:fpPath
                     $script:ExifToolPath = $using:exPath
@@ -3534,8 +3765,10 @@ function Start-PollingWatcher {
                 $ffPath = $script:FFmpegPath
                 $fpPath = $script:FFprobePath
                 $exPath = $script:ExifToolPath
+                $workspaceNameForParallel = $script:CurrentWorkspaceName
                 $remuxFiles | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
                     . $using:libPath -AsLibrary
+                    Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
                     $script:FFmpegPath = $using:ffPath
                     $script:FFprobePath = $using:fpPath
                     $script:ExifToolPath = $using:exPath
@@ -3554,7 +3787,11 @@ function Start-PollingWatcher {
             }
         }
         catch {
-            Write-Log "Watcher loop error: $($_.Exception.Message)" "ERROR"
+            Write-Log "Watcher loop error [$($script:CurrentWorkspaceName)]: $($_.Exception.Message)" "ERROR"
+        }
+        finally {
+            Save-PipelineWorkspaceState
+        }
         }
 
         Start-Sleep -Seconds $PollSeconds
@@ -3583,7 +3820,15 @@ try {
     }
 
     if ($RecompressLongOutputs) {
-        Start-LongOutputRecompressBatch
+        foreach ($workspaceName in $WorkspaceNames) {
+            Use-PipelineWorkspace -WorkspaceName $workspaceName
+            try {
+                Start-LongOutputRecompressBatch
+            }
+            finally {
+                Save-PipelineWorkspaceState
+            }
+        }
         exit 0
     }
 

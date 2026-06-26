@@ -3,7 +3,7 @@
 Local Windows media-processing watcher. It watches a folder, waits for browser downloads to finish,
 then creates processed variants of each supported media file. Everything runs on your own PC.
 
-By default it watches `D:\MediaPipeline\default\input`. You can change that folder (and many other
+By default it watches `D:\MediaPipeline\default\LC\input`. You can change the root folder (and many other
 settings) in `config.ini` — see [Changing Settings](#changing-settings).
 
 ---
@@ -24,11 +24,11 @@ For a normal Windows PC, you do not need to touch the command line.
    normally:
 
    ```text
-   D:\MediaPipeline\default\input
+   D:\MediaPipeline\default\LC\input
    ```
 
 4. **Download or drop files** into that folder. Processed copies appear in
-   `D:\MediaPipeline\default\output`, and the originals move to `D:\MediaPipeline\default\original`.
+   `D:\MediaPipeline\default\LC\output`, and the originals move to `D:\MediaPipeline\default\LC\original`.
 
 That's it. The watcher runs quietly in the background from now on.
 
@@ -93,91 +93,103 @@ The watcher creates any missing folders automatically under `PipelineRoot` (defa
 ```text
 D:\MediaPipeline\
   default\          <- the main pipeline
-    input\
-    output\
-    original\
-    failed\
+    LC\
+      input\
+      output\
+      original\
+      failed\
+    MD\
+      input\
+      output\
+      original\
+      failed\
+    general\
+      input\
+      output\
+      original\
+      failed\
   logs\
   convert\
-    input\
-    output\
-    original\
-      videos\
-      images\
-    failed\
+    LC\
+      input\
+      output\
+      original\
+        videos\
+        images\
+      failed\
+    MD\...
+    general\...
   long\
-    input\
-    output\
-    original\
-    failed\
-    work\
+    LC\
+      input\
+      output\
+      original\
+      failed\
+      work\
+    MD\...
+    general\...
   images\
-    input\
-    output\
-    original\
-    failed\
+    LC\
+      input\
+      output\
+      original\
+      failed\
+    MD\...
+    general\...
   imageclean\
-    input\
-    output\
-    original\
-    failed\
+    LC\
+      input\
+      output\
+      original\
+      failed\
+    MD\...
+    general\...
   sets\
-    input\
-    output\
-    original\
-    failed\
+    LC\
+      input\
+      output\
+      original\
+      failed\
+    MD\...
+    general\...
   setbatch\
-    input\
-    output\
-    original\
-    failed\
+    LC\
+      input\
+      output\
+      original\
+      failed\
+    MD\...
+    general\...
   assetstore\
-    input\
-    output\
-    original\
-    failed\
-  archive\          <- old outputs are moved here when archiving is on
+    LC\
+      input\
+      output\
+      original\
+      failed\
+    MD\...
+    general\...
+  archive\          <- old outputs are moved here by pipeline and workspace
+    default\LC\output\
+    images\LC\output\
+    imageclean\LC\output\
+    convert\LC\output\
+    long\LC\output\
+    sets\LC\output\
+    setbatch\LC\output\
+    assetstore\LC\output\
 ```
 
-- `default\input`: set your browser download folder here.
-- `default\output`: processed variants are written here.
-- `default\original`: source files are moved here after all variants succeed.
-- `default\failed`: source files are moved here if processing fails.
+- Workspaces are `LC`, `MD`, and `general`. The watcher scans each workspace independently.
+- `default\LC\input`: set your browser download folder here for LC assets. Use `default\MD\input` or `default\general\input` for those categories.
+- `default\<workspace>\output`: processed variants are written here.
+- `default\<workspace>\original`: source files are moved here after all variants succeed.
+- `default\<workspace>\failed`: source files are moved here if processing fails.
 - `logs`: daily logs named like `media-pipeline-YYYYMMDD.log`.
-- `convert\input`: put `.mov` or `.heic` files here to convert them into widely supported formats; other supported files are passed through to the output unchanged.
-- `convert\output`: converted files are written here (`.mov` -> `.mp4`, `.heic` -> `.jpg`).
-- `convert\original\videos`: source videos are moved here after conversion succeeds.
-- `convert\original\images`: source images are moved here after conversion succeeds.
-- `convert\failed`: source files are moved here if conversion fails.
-- `long\input`: put long raw videos here for segmenting plus processed variants per segment.
-- `long\output`: processed long-pipeline segment variants are written here.
-- `long\original`: long-pipeline source files are moved here after all segment variants succeed.
-- `long\failed`: long-pipeline source files are moved here if processing fails.
-- `long\work`: temporary remux/intermediate workspace; the script cleans this automatically.
-- `images\input`: put images here when you want many re-encoded image variants.
-- `images\output`: bulk image variants are written here.
-- `images\original`: source images are moved here after all image variants succeed.
-- `images\failed`: source images are moved here if bulk image processing fails.
-- `imageclean\input`: put images here when you want one cleaned output per source image.
-- `imageclean\output`: cleaned images are written here with ordinary-looking random filenames.
-- `imageclean\original`: source images are moved here after cleanup succeeds.
-- `imageclean\failed`: source images are moved here if cleanup fails.
-- `sets\input`: put media files here when you want one output folder per source file.
-- `sets\output`: each source file gets a random subfolder containing several processed copies.
-- `sets\original`: source files are moved here after all copies succeed.
-- `sets\failed`: source files are moved here if set processing fails.
-- `setbatch\input`: drop a whole group of files here to get several complete, differentiated copies of the entire group.
-- `setbatch\output`: each processed batch becomes one random folder containing random set subfolders, each holding one processed copy of every source file.
-- `setbatch\original`: source files are moved here after the whole batch succeeds.
-- `setbatch\failed`: every source file in the batch is moved here if batch processing fails.
-- `assetstore\input`: drop a whole group of files here to get several complete sets plus a `heatup.assetStoreMediaManifest.v1` manifest describing every generated variant.
-- `assetstore\output`: each processed batch becomes one random folder containing random set subfolders and a `manifest.json` at its root.
-- `assetstore\original`: source files are moved here after the whole batch (and its manifest) succeeds.
-- `assetstore\failed`: every source file in the batch is moved here if batch processing fails.
+- Other pipelines use the same workspace level: `convert\<workspace>\input`, `long\<workspace>\input`, `images\<workspace>\input`, `imageclean\<workspace>\input`, `sets\<workspace>\input`, `setbatch\<workspace>\input`, and `assetstore\<workspace>\input`.
+- Archive output is grouped as `archive\<pipeline>\<workspace>\output`.
 
-> Upgrading from an older version? The default pipeline used to live directly in the root
-> (`input\`, `output\`, `original\`, `failed\`). `Install.bat` automatically moves any leftover
-> files from there into the new `default\` folders.
+> Upgrading from an older version? Existing assets from the old non-workspace folders are moved into
+> the `LC` workspace, including every pipeline and archive folder.
 
 ## Supported Files
 
@@ -203,13 +215,13 @@ Temporary browser download files are ignored:
 
 The watcher uses a polling loop:
 
-1. Scan `default\input` every couple of seconds (`PollSeconds`).
+1. Scan each workspace input, starting with `default\LC\input`, every couple of seconds (`PollSeconds`).
 2. Ignore unsupported files and temporary browser download files.
 3. Wait until file size is stable for a few seconds (`StableSeconds`).
 4. Wait until the file is no longer locked.
 5. Process one file at a time.
-6. Move successful originals to `default\original`.
-7. Move failed originals to `default\failed`.
+6. Move successful originals to `default\<workspace>\original`.
+7. Move failed originals to `default\<workspace>\failed`.
 
 The default input pipeline and the video-heavy pipelines process one file at a time. The image
 pipelines run conversions in parallel: the convert and image-cleanup pipelines process multiple files
@@ -267,13 +279,13 @@ Use this lane when you want many image variants from one source image.
 Put source images here:
 
 ```text
-D:\MediaPipeline\images\input
+D:\MediaPipeline\images\LC\input
 ```
 
 The watcher writes 20 image variants here by default (`ImageBulkCopiesPerFile`):
 
 ```text
-D:\MediaPipeline\images\output
+D:\MediaPipeline\images\LC\output
 ```
 
 Each output gets:
@@ -302,9 +314,9 @@ Raise it toward `6` if you prefer smaller PNG files over speed.
 This makes outputs different at the file and pixel level while keeping them visually close to the
 original. It is not a guarantee that files are impossible to detect or compare.
 
-Successful source images move to `D:\MediaPipeline\images\original`. Failed source images move to
-`D:\MediaPipeline\images\failed`. If a later variant fails, already completed bulk-image outputs are
-left in `images\output` instead of being deleted.
+Successful source images move to `D:\MediaPipeline\images\LC\original`. Failed source images move to
+`D:\MediaPipeline\images\LC\failed`. If a later variant fails, already completed bulk-image outputs are
+left in `images\LC\output` instead of being deleted.
 
 ## Image Cleanup Pipeline
 
@@ -314,13 +326,13 @@ input images produce 300 processed output images.
 Put source images here:
 
 ```text
-D:\MediaPipeline\imageclean\input
+D:\MediaPipeline\imageclean\LC\input
 ```
 
 The watcher writes one cleaned image per source image here:
 
 ```text
-D:\MediaPipeline\imageclean\output
+D:\MediaPipeline\imageclean\LC\output
 ```
 
 Each output gets the same image cleanup treatment as the bulk image pipeline:
@@ -340,8 +352,8 @@ Supported inputs and output format behavior match the bulk image pipeline:
 Image-clean PNG output uses `ImageCleanPngCompressionLevel` (default `1`) so PNG-heavy cleanup
 batches finish faster. Raise it toward `6` if you prefer smaller PNG files over speed.
 
-Successful source images move to `D:\MediaPipeline\imageclean\original`. Failed source images move to
-`D:\MediaPipeline\imageclean\failed`.
+Successful source images move to `D:\MediaPipeline\imageclean\LC\original`. Failed source images move to
+`D:\MediaPipeline\imageclean\LC\failed`.
 
 ## Media Set Pipeline
 
@@ -350,13 +362,13 @@ Use this lane when you want every source media file to get its own output folder
 Put source media files here:
 
 ```text
-D:\MediaPipeline\sets\input
+D:\MediaPipeline\sets\LC\input
 ```
 
 For each input file, the watcher creates a random folder here:
 
 ```text
-D:\MediaPipeline\sets\output
+D:\MediaPipeline\sets\LC\output
 ```
 
 Each folder contains 10 processed copies by default (`SetCopiesPerFile`).
@@ -380,8 +392,8 @@ For images, each copy gets:
 - tiny randomized crop and scale back to original dimensions when the image is large enough
 - `.heic` output converted to `.png`
 
-Successful source files move to `D:\MediaPipeline\sets\original`. Failed source files move to
-`D:\MediaPipeline\sets\failed`.
+Successful source files move to `D:\MediaPipeline\sets\LC\original`. Failed source files move to
+`D:\MediaPipeline\sets\LC\failed`.
 
 ## Batch Sets Pipeline
 
@@ -396,7 +408,7 @@ folders, each with one copy of every image).
 Drop the whole group of files here:
 
 ```text
-D:\MediaPipeline\setbatch\input
+D:\MediaPipeline\setbatch\LC\input
 ```
 
 The watcher treats everything in this folder as one batch. It waits until the batch settles — no file
@@ -404,7 +416,7 @@ is still being written, the file list is unchanged for a poll cycle, and nothing
 writes one folder per processed batch:
 
 ```text
-D:\MediaPipeline\setbatch\output\summer-gallery-58291\
+D:\MediaPipeline\setbatch\LC\output\summer-gallery-58291\
   morning-album-18406\
   garden-video-73924\
   ...
@@ -427,8 +439,8 @@ metadata stripped, width capped at 1080px without upscaling, and a small randomi
 end — one copy per set.
 
 Batch processing is all-or-nothing. If any file fails, the partial output folder is removed and every
-source file in the batch is moved to `setbatch\failed`. On success, the source files move to
-`setbatch\original`.
+source file in the batch is moved to `setbatch\LC\failed`. On success, the source files move to
+`setbatch\LC\original`.
 
 Because the whole batch is processed in one pass, the watcher is busy until it finishes; large
 batches (many files times many sets) can take a while.
@@ -443,7 +455,7 @@ video — 210 processed media in total — described by one `manifest.json`.
 Drop the whole group of files here:
 
 ```text
-D:\MediaPipeline\assetstore\input
+D:\MediaPipeline\assetstore\LC\input
 ```
 
 The watcher treats everything in the folder as one batch (same settle logic as the Batch Sets lane:
@@ -451,7 +463,7 @@ it waits until no file is still being written, the file list is unchanged for a 
 nothing is locked), then writes one folder per processed batch:
 
 ```text
-D:\MediaPipeline\assetstore\output\market-collection-73642\
+D:\MediaPipeline\assetstore\LC\output\market-collection-73642\
   manifest.json
   sunny-upload-29418\
   cedar-scene-68073\
@@ -516,8 +528,8 @@ Path resolution for a consumer: an absolute `path` is used as-is; a relative `pa
 manifests always set `importRoot` to `"."`, so the relative paths resolve next to the manifest.
 
 Processing is all-or-nothing: if any file fails, the partial batch folder is removed and every source
-file is moved to `assetstore\failed`. On success (including writing the manifest) the source files
-move to `assetstore\original`.
+file is moved to `assetstore\LC\failed`. On success (including writing the manifest) the source files
+move to `assetstore\LC\original`.
 
 ## Convert Workflow
 
@@ -525,13 +537,13 @@ Use this lane to convert media from formats you cannot use into widely supported
 both videos and images. Put the source file here:
 
 ```text
-D:\MediaPipeline\convert\input
+D:\MediaPipeline\convert\LC\input
 ```
 
 The watcher writes one converted file here:
 
 ```text
-D:\MediaPipeline\convert\output
+D:\MediaPipeline\convert\LC\output
 ```
 
 Source formats and their targets:
@@ -558,9 +570,9 @@ contain them.
 Images are decoded and re-encoded to high-quality JPEG with `-q:v 2`, and metadata is stripped.
 `.heic` is the common iPhone photo format; JPEG is chosen for broad compatibility at high quality.
 
-Converted source files are moved into `convert\original\videos` or `convert\original\images`.
-Passed-through files go straight to `convert\output` with new random names (the media content is
-unchanged, so no separate original copy is kept). Failed source files are moved to `convert\failed`.
+Converted source files are moved into `convert\LC\original\videos` or `convert\LC\original\images`.
+Passed-through files go straight to `convert\LC\output` with new random names (the media content is
+unchanged, so no separate original copy is kept). Failed source files are moved to `convert\LC\failed`.
 
 ## Long Video Pipeline
 
@@ -570,13 +582,13 @@ shorter clips before applying the normal multi-copy processing.
 Put source videos here:
 
 ```text
-D:\MediaPipeline\long\input
+D:\MediaPipeline\long\LC\input
 ```
 
 The watcher writes processed segment variants here:
 
 ```text
-D:\MediaPipeline\long\output
+D:\MediaPipeline\long\LC\output
 ```
 
 Supported inputs are the same video extensions as the main pipeline. If the input is `.mov`, the
@@ -607,8 +619,8 @@ Each segment variant then goes through the same final processing as normal video
 - small randomized trim from the end
 - random neutral output filename
 
-Successful source files move to `D:\MediaPipeline\long\original`. Failed source files move to
-`D:\MediaPipeline\long\failed`.
+Successful source files move to `D:\MediaPipeline\long\LC\original`. Failed source files move to
+`D:\MediaPipeline\long\LC\failed`.
 
 ## Output File Names
 
