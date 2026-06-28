@@ -840,17 +840,23 @@ function New-RandomToken {
     return (($bytes | ForEach-Object { $_.ToString("x2") }) -join "")
 }
 
-$script:OutputNameFirstWords = @(
+$script:OutputNameDescriptors = @(
     "autumn", "bright", "calm", "cedar", "clear", "coastal", "daily", "evening",
     "fresh", "garden", "golden", "harbor", "local", "maple", "meadow", "modern",
     "morning", "natural", "open", "quiet", "river", "silver", "simple", "spring",
     "studio", "summer", "sunny", "travel", "urban", "warm", "weekend", "winter"
 )
 
-$script:OutputNameSecondWords = @(
+$script:OutputNameSubjects = @(
     "album", "capture", "clip", "collection", "frame", "gallery", "image", "media",
     "memory", "moment", "photo", "picture", "post", "project", "scene", "shot",
     "snapshot", "story", "take", "update", "upload", "video", "view", "work"
+)
+
+$script:OutputNameContexts = @(
+    "archive", "backup", "camera", "desktop", "draft", "edit", "export", "folder",
+    "home", "inbox", "library", "mobile", "notes", "phone", "review", "share",
+    "social", "temp", "today", "trip", "week", "workshop"
 )
 
 function Get-RandomInt {
@@ -883,12 +889,70 @@ function Get-RandomInt {
     return $Minimum + ($value % $range)
 }
 
-function New-RegularRandomName {
-    $first = $script:OutputNameFirstWords[(Get-RandomInt -Maximum $script:OutputNameFirstWords.Count)]
-    $second = $script:OutputNameSecondWords[(Get-RandomInt -Maximum $script:OutputNameSecondWords.Count)]
-    $number = Get-RandomInt -Minimum 10000 -Maximum 100000
+function Get-RandomChoice {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Values
+    )
 
-    return "{0}-{1}-{2}" -f $first, $second, $number
+    return $Values[(Get-RandomInt -Maximum $Values.Count)]
+}
+
+function Convert-OutputNamePart {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Style
+    )
+
+    if ($Style -eq 1) {
+        return ($Value.Substring(0, 1).ToUpperInvariant() + $Value.Substring(1))
+    }
+
+    return $Value
+}
+
+function New-RegularRandomNumberText {
+    $digits = Get-RandomInt -Minimum 2 -Maximum 7
+    $minimum = [int][Math]::Pow(10, $digits - 1)
+    $maximum = [int][Math]::Pow(10, $digits)
+
+    return [string](Get-RandomInt -Minimum $minimum -Maximum $maximum)
+}
+
+function Join-RegularRandomNameParts {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Parts
+    )
+
+    $separator = Get-RandomChoice -Values @("-", "_", " ")
+    return ($Parts -join $separator)
+}
+
+function New-RegularRandomName {
+    $style = Get-RandomInt -Maximum 2
+    $descriptor = Convert-OutputNamePart -Value (Get-RandomChoice -Values $script:OutputNameDescriptors) -Style $style
+    $subject = Convert-OutputNamePart -Value (Get-RandomChoice -Values $script:OutputNameSubjects) -Style $style
+    $context = Convert-OutputNamePart -Value (Get-RandomChoice -Values $script:OutputNameContexts) -Style $style
+    $number = New-RegularRandomNumberText
+
+    switch (Get-RandomInt -Maximum 12) {
+        0 { return (Join-RegularRandomNameParts -Parts @($descriptor, $subject)) }
+        1 { return (Join-RegularRandomNameParts -Parts @($subject, $number)) }
+        2 { return (Join-RegularRandomNameParts -Parts @($descriptor, $subject, $number)) }
+        3 { return (Join-RegularRandomNameParts -Parts @($context, $subject)) }
+        4 { return (Join-RegularRandomNameParts -Parts @($subject, $context, $number)) }
+        5 { return (Join-RegularRandomNameParts -Parts @($descriptor, $context, $subject)) }
+        6 { return (Join-RegularRandomNameParts -Parts @($context, $number)) }
+        7 { return (Join-RegularRandomNameParts -Parts @($subject, $descriptor)) }
+        8 { return (Join-RegularRandomNameParts -Parts @($context, $descriptor, $number)) }
+        9 { return (Join-RegularRandomNameParts -Parts @($descriptor, $number)) }
+        10 { return (Join-RegularRandomNameParts -Parts @($subject, $context)) }
+        default { return (Join-RegularRandomNameParts -Parts @($descriptor, $context, $subject, $number)) }
+    }
 }
 
 function New-RegularRandomFilePath {

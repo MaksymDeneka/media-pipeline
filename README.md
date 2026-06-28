@@ -624,17 +624,18 @@ Successful source files move to `D:\MediaPipeline\long\LC\original`. Failed sour
 
 ## Output File Names
 
-Output media names are random and not based on the source filename. They use ordinary-looking
-word/number combinations and do not include pipeline codes, dates, variant numbers, segment numbers,
-set numbers, or sequence counters. Batch folders and set folders use the same style.
+Output media names are random and not based on the source filename. They use varied ordinary-looking
+word combinations with mixed separators, optional numbers, and variable number lengths. They do not
+include pipeline codes, dates, variant numbers, segment numbers, set numbers, or sequence counters.
+Batch folders and set folders use the same style.
 
 ```text
-summer-clip-58291.mp4
-garden-photo-18406.jpg
-morning-album-73924.webp
-quiet-video-40618.mp4
-market-collection-73642\
-  sunny-upload-29418\
+Summer Trip Clip.mp4
+gallery_482.jpg
+fresh-phone-photo-9137.webp
+workshop update.png
+archive_collection_73642\
+  sunny upload\
     coastal-frame-51980.mp4
 ```
 
