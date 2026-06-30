@@ -219,6 +219,9 @@ $encodedRemoteScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetByt
 Invoke-Checked -Command 'ssh' -Arguments @(
     '-o', 'BatchMode=yes',
     '-o', 'ConnectTimeout=8',
+    '-o', 'ServerAliveInterval=30',
+    '-o', 'ServerAliveCountMax=3',
+    '-o', 'TCPKeepAlive=yes',
     '-i', (Join-Path $HOME '.ssh\heatup_remote_debug_ed25519'),
     '-p', '2222',
     'root@100.124.72.13',

@@ -270,6 +270,51 @@ function Set-PipelineWorkspacePaths {
 
 Set-PipelineWorkspacePaths -WorkspaceName $DefaultWorkspaceName
 
+function Get-WorkspaceNameFromInputPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    foreach ($workspaceName in $WorkspaceNames) {
+        $paths = Get-WorkspacePathSet -WorkspaceName $workspaceName
+        $inputDirectories = @(
+            $paths.InputDir,
+            $paths.RemuxInputDir,
+            $paths.LongInputDir,
+            $paths.ImageBulkInputDir,
+            $paths.ImageCleanInputDir,
+            $paths.SetInputDir,
+            $paths.SetBatchInputDir,
+            $paths.AssetStoreInputDir
+        )
+
+        foreach ($inputDirectory in $inputDirectories) {
+            $prefix = [System.IO.Path]::GetFullPath($inputDirectory).TrimEnd('\') + '\'
+            if ($fullPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $workspaceName
+            }
+        }
+    }
+
+    return $null
+}
+
+function Set-PipelineWorkspaceFromInputPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $workspaceName = Get-WorkspaceNameFromInputPath -Path $Path
+    if ($workspaceName) {
+        Set-PipelineWorkspacePaths -WorkspaceName $workspaceName
+    }
+
+    return $workspaceName
+}
+
 $VideoExtensions = @(".mp4", ".mov", ".mkv", ".webm", ".avi")
 $ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic")
 $TempExtensions = @(".crdownload", ".tmp", ".part", ".download")
@@ -1883,8 +1928,10 @@ function Process-ImageBulkFile {
             $srcPath = $Path
             $dims = $dimensions
             $bId = $batchId
+            $workspaceNameForParallel = $script:CurrentWorkspaceName
             $variantResults = 1..$ImageBulkCopiesPerFile | ForEach-Object -ThrottleLimit $effectiveVariantConcurrency -Parallel {
                 . $using:libPath -AsLibrary
+                Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
                 $script:FFmpegPath = $using:ffPath
                 $script:FFprobePath = $using:fpPath
                 $script:ExifToolPath = $using:exPath
@@ -1933,6 +1980,7 @@ function Process-ImageBulkFileSafely {
         [int]$VariantConcurrency = $ImageProcessingConcurrency
     )
 
+    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
     $fullPath = [System.IO.Path]::GetFullPath($Path)
 
     if (-not $script:ProcessingPaths.Add($fullPath)) {
@@ -2058,6 +2106,7 @@ function Process-ImageCleanFileSafely {
         [string]$Path
     )
 
+    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
     $fullPath = [System.IO.Path]::GetFullPath($Path)
 
     if (-not $script:ProcessingPaths.Add($fullPath)) {
@@ -2264,6 +2313,7 @@ function Process-SetMediaFileSafely {
         [string]$Path
     )
 
+    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
     $fullPath = [System.IO.Path]::GetFullPath($Path)
 
     if (-not $script:ProcessingPaths.Add($fullPath)) {
@@ -2424,8 +2474,10 @@ function Process-SetBatchSourceFile {
             $srcPath = $path
             $dims = $dimensions
             $dirs = $SetDirectories
+            $workspaceNameForParallel = $script:CurrentWorkspaceName
             $variantResults = 1..$SetBatchCount | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
                 . $using:libPath -AsLibrary
+                Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
                 $script:FFmpegPath = $using:ffPath
                 $script:FFprobePath = $using:fpPath
                 $script:ExifToolPath = $using:exPath
@@ -2499,6 +2551,10 @@ function Process-SetBatchSafely {
         [Parameter(Mandatory = $true)]
         [System.IO.FileInfo[]]$Files
     )
+
+    if ($Files -and $Files.Count -gt 0) {
+        [void](Set-PipelineWorkspaceFromInputPath -Path $Files[0].FullName)
+    }
 
     try {
         Write-Log "Detected set batch: $($Files.Count) file(s)."
@@ -2849,6 +2905,10 @@ function Process-AssetStoreBatchSafely {
         [System.IO.FileInfo[]]$Files
     )
 
+    if ($Files -and $Files.Count -gt 0) {
+        [void](Set-PipelineWorkspaceFromInputPath -Path $Files[0].FullName)
+    }
+
     try {
         Write-Log "Detected asset store batch: $($Files.Count) file(s)."
         Process-AssetStoreBatch -Files $Files
@@ -2906,6 +2966,7 @@ function Process-OneSafely {
         [string]$Path
     )
 
+    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
     $fullPath = [System.IO.Path]::GetFullPath($Path)
 
     if (-not $script:ProcessingPaths.Add($fullPath)) {
@@ -3053,6 +3114,7 @@ function Process-RemuxFileSafely {
         [string]$Path
     )
 
+    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
     $fullPath = [System.IO.Path]::GetFullPath($Path)
 
     if (-not $script:ProcessingPaths.Add($fullPath)) {
@@ -3549,6 +3611,7 @@ function Process-LongFileSafely {
         [string]$Path
     )
 
+    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
     $fullPath = [System.IO.Path]::GetFullPath($Path)
 
     if (-not $script:ProcessingPaths.Add($fullPath)) {
