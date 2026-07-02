@@ -79,7 +79,7 @@ Some of the most useful settings:
 | `MaxWidth` | Max output video width in pixels | `1080` |
 | `DefaultMaxOutputSizeMB` | Size cap per default-pipeline video (`0` = off) | `8` |
 | `ArchiveEnabled` / `ArchiveAgeHours` | Auto-move old outputs into `archive\` after N hours | `true` / `15` |
-| `AssetRetentionDays` | Delete archived/sync asset entries this many days after creation (`0` = off) | `5` |
+| `AssetRetentionDays` | Delete retained non-image asset entries this many days after creation (`0` = off) | `5` |
 
 `config.ini` has more (audio bitrate, trim amounts, polling interval, GPU encoder tuning, etc.), each
 documented in the file.
@@ -188,7 +188,7 @@ D:\MediaPipeline\
 - `logs`: daily logs named like `media-pipeline-YYYYMMDD.log`.
 - Other pipelines use the same workspace level: `convert\<workspace>\input`, `long\<workspace>\input`, `images\<workspace>\input`, `imageclean\<workspace>\input`, `sets\<workspace>\input`, `setbatch\<workspace>\input`, and `assetstore\<workspace>\input`.
 - Archive output is grouped as `archive\<pipeline>\<workspace>\output`.
-- Retention deletes top-level entries from non-image archive folders, root/pipeline `sync\` folders, and `.sync-parts\` after `AssetRetentionDays`. The `images` and `imageclean` pipelines are excluded.
+- Retention deletes top-level entries from non-image archive, `original\`, `failed\`, long `work\`, root/pipeline `sync\`, and `.sync-parts\` folders after `AssetRetentionDays`. The `images` and `imageclean` pipelines are excluded. Chunked uploads also delete their local and remote parts folders immediately after a successful reassembly.
 
 > Upgrading from an older version? Existing assets from the old non-workspace folders are moved into
 > the `LC` workspace, including every pipeline and archive folder.

@@ -213,6 +213,13 @@ if (`$actualLength -ne `$expectedLength) {
 Move-Item -LiteralPath `$tmpPath -Destination `$finalPath -Force
 (Get-Item -LiteralPath `$finalPath).LastWriteTimeUtc = `$sourceLastWriteTimeUtc
 Write-Host "Reassembled `$finalPath (`$actualLength bytes)"
+try {
+    Remove-Item -LiteralPath `$partsDirectory -Recurse -Force
+    Write-Host "Deleted remote parts folder `$partsDirectory"
+}
+catch {
+    Write-Warning ("Could not delete remote parts folder {0}: {1}" -f `$partsDirectory, `$_.Exception.Message)
+}
 "@
 
 $encodedRemoteScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remoteScript))
@@ -227,3 +234,11 @@ Invoke-Checked -Command 'ssh' -Arguments @(
     'root@100.124.72.13',
     "powershell -NoProfile -EncodedCommand $encodedRemoteScript"
 )
+
+try {
+    Remove-Item -LiteralPath $partsDirectory -Recurse -Force
+    Write-Host "Deleted local parts folder $partsDirectory"
+}
+catch {
+    Write-Warning "Could not delete local parts folder ${partsDirectory}: $($_.Exception.Message)"
+}

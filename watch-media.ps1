@@ -1221,7 +1221,14 @@ function Move-OldOutputFile {
     }
 
     $destination = Get-UniqueDestinationPath -Directory $ArchiveDirectory -OriginalFileName $File.Name
+    $creationTime = $File.CreationTime
     Move-Item -LiteralPath $File.FullName -Destination $destination -Force
+    try {
+        (Get-Item -LiteralPath $destination).CreationTime = $creationTime
+    }
+    catch {
+        Write-Log "Could not preserve archive creation time for '$destination': $($_.Exception.Message)" "WARN"
+    }
     return $destination
 }
 
@@ -1239,7 +1246,14 @@ function Move-OldOutputDirectory {
     }
 
     $destination = Get-UniqueDestinationPath -Directory $ArchiveDirectory -OriginalFileName $Directory.Name
+    $creationTime = $Directory.CreationTime
     Move-Item -LiteralPath $Directory.FullName -Destination $destination -Force
+    try {
+        (Get-Item -LiteralPath $destination).CreationTime = $creationTime
+    }
+    catch {
+        Write-Log "Could not preserve archive creation time for '$destination': $($_.Exception.Message)" "WARN"
+    }
     return $destination
 }
 
@@ -1386,6 +1400,107 @@ function Get-ArchiveRetentionTargets {
     )
 }
 
+function Get-LegacyArchiveRetentionTargets {
+    return @(
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $ArchiveRootDir "output"
+            Label = "legacy archive output"
+            ExcludedNames = @()
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $ArchiveRootDir "default"
+            Label = "legacy archive default"
+            ExcludedNames = $WorkspaceNames
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $ArchiveRootDir "convert"
+            Label = "legacy archive convert"
+            ExcludedNames = $WorkspaceNames
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $ArchiveRootDir "long"
+            Label = "legacy archive long"
+            ExcludedNames = $WorkspaceNames
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $ArchiveRootDir "sets"
+            Label = "legacy archive sets"
+            ExcludedNames = $WorkspaceNames
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $ArchiveRootDir "setbatch"
+            Label = "legacy archive setbatch"
+            ExcludedNames = $WorkspaceNames
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $ArchiveRootDir "assetstore"
+            Label = "legacy archive assetstore"
+            ExcludedNames = $WorkspaceNames
+        }
+    )
+}
+
+function Get-PipelineAssetRetentionTargets {
+    return @(
+        [pscustomobject]@{
+            TargetDirectory = $OriginalDir
+            Label = "default original"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $FailedDir
+            Label = "default failed"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $RemuxOriginalVideosDir
+            Label = "convert original videos"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $RemuxOriginalImagesDir
+            Label = "convert original images"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $RemuxFailedDir
+            Label = "convert failed"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $LongOriginalDir
+            Label = "long original"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $LongFailedDir
+            Label = "long failed"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $LongWorkDir
+            Label = "long work"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $SetOriginalDir
+            Label = "sets original"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $SetFailedDir
+            Label = "sets failed"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $SetBatchOriginalDir
+            Label = "setbatch original"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $SetBatchFailedDir
+            Label = "setbatch failed"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $AssetStoreOriginalDir
+            Label = "assetstore original"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $AssetStoreFailedDir
+            Label = "assetstore failed"
+        }
+    )
+}
+
 function Get-SyncRetentionTargets {
     return @(
         [pscustomobject]@{
@@ -1435,11 +1550,32 @@ function Invoke-AssetRetentionCleanup {
         [void](Invoke-RetentionCleanup -TargetDirectory $target.TargetDirectory -Label $target.Label -CutoffTime $cutoffTime)
     }
 
+    foreach ($target in Get-PipelineAssetRetentionTargets) {
+        [void](Invoke-RetentionCleanup -TargetDirectory $target.TargetDirectory -Label $target.Label -CutoffTime $cutoffTime)
+    }
+
     if ($script:CurrentWorkspaceName -eq $DefaultWorkspaceName) {
+        foreach ($target in Get-LegacyArchiveRetentionTargets) {
+            [void](Invoke-RetentionCleanup -TargetDirectory $target.TargetDirectory -Label $target.Label -CutoffTime $cutoffTime -ExcludedNames $target.ExcludedNames)
+        }
+
         foreach ($target in Get-SyncRetentionTargets) {
             [void](Invoke-RetentionCleanup -TargetDirectory $target.TargetDirectory -Label $target.Label -CutoffTime $cutoffTime)
         }
     }
+}
+
+function Get-RetentionEntryTime {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileSystemInfo]$Entry
+    )
+
+    if ($Entry.CreationTime -le $Entry.LastWriteTime) {
+        return $Entry.CreationTime
+    }
+
+    return $Entry.LastWriteTime
 }
 
 function Invoke-RetentionCleanup {
@@ -1451,17 +1587,30 @@ function Invoke-RetentionCleanup {
         [string]$Label,
 
         [Parameter(Mandatory = $true)]
-        [datetime]$CutoffTime
+        [datetime]$CutoffTime,
+
+        [string[]]$ExcludedNames = @()
     )
 
     if (-not (Test-Path -LiteralPath $TargetDirectory)) {
         return 0
     }
 
+    $excludedNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $ExcludedNames) {
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            [void]$excludedNameSet.Add($name)
+        }
+    }
+
     $count = 0
     $entries = @(Get-ChildItem -LiteralPath $TargetDirectory -Force -ErrorAction SilentlyContinue)
     foreach ($entry in $entries) {
-        if ($entry.CreationTime -gt $CutoffTime) {
+        if ($excludedNameSet.Contains($entry.Name)) {
+            continue
+        }
+
+        if ((Get-RetentionEntryTime -Entry $entry) -gt $CutoffTime) {
             continue
         }
 
@@ -3893,7 +4042,7 @@ function Start-PollingWatcher {
         Write-Log "Output archive target: assetstore -> $ArchiveAssetStoreOutputDir"
     }
     if ($AssetRetentionDays -gt 0) {
-        Write-Log "Asset retention enabled: non-image archive, sync, and .sync-parts entries are deleted $AssetRetentionDays day(s) after creation."
+        Write-Log "Asset retention enabled: non-image archive, original, failed, sync, long work, and .sync-parts entries are deleted $AssetRetentionDays day(s) after creation."
     }
     else {
         Write-Log "Asset retention disabled."
