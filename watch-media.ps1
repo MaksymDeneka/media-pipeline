@@ -157,6 +157,7 @@ $LongSizeCapFallbackMaxWidth = Get-Setting 'LongSizeCapFallbackMaxWidth' 720
 $ArchiveEnabled = Get-Setting 'ArchiveEnabled' $true
 $ArchiveAgeHours = Get-Setting 'ArchiveAgeHours' 15
 $ArchiveCheckIntervalMinutes = Get-Setting 'ArchiveCheckIntervalMinutes' 30
+$AssetRetentionDays = Get-Setting 'AssetRetentionDays' 5
 
 # Asset store pipeline: like set-batch (one processed copy of every source file
 # per set), but it also writes a heatup.assetStoreMediaManifest.v1 JSON next to
@@ -1202,6 +1203,10 @@ function Get-OutputArchiveCutoffTime {
     return (Get-Date).AddHours(-1 * $ArchiveAgeHours)
 }
 
+function Get-AssetRetentionCutoffTime {
+    return (Get-Date).AddDays(-1 * $AssetRetentionDays)
+}
+
 function Move-OldOutputFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -1352,8 +1357,132 @@ function Get-OutputArchiveTargets {
     )
 }
 
+function Get-ArchiveRetentionTargets {
+    return @(
+        [pscustomobject]@{
+            TargetDirectory = $ArchiveDefaultOutputDir
+            Label = "archive default"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $ArchiveLongOutputDir
+            Label = "archive long"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $ArchiveRemuxOutputDir
+            Label = "archive convert"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $ArchiveSetOutputDir
+            Label = "archive sets"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $ArchiveSetBatchOutputDir
+            Label = "archive setbatch"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $ArchiveAssetStoreOutputDir
+            Label = "archive assetstore"
+        }
+    )
+}
+
+function Get-SyncRetentionTargets {
+    return @(
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $PipelineRoot "sync"
+            Label = "root sync"
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $DefaultRootDir "sync"
+            Label = "default sync"
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $RemuxRootDir "sync"
+            Label = "convert sync"
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $LongRootDir "sync"
+            Label = "long sync"
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $SetRootDir "sync"
+            Label = "sets sync"
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $SetBatchRootDir "sync"
+            Label = "setbatch sync"
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $AssetStoreRootDir "sync"
+            Label = "assetstore sync"
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $PipelineRoot ".sync-parts"
+            Label = "sync parts"
+        }
+    )
+}
+
+function Invoke-AssetRetentionCleanup {
+    if ($AssetRetentionDays -le 0) {
+        return
+    }
+
+    $cutoffTime = Get-AssetRetentionCutoffTime
+    Write-Log "Running asset retention cleanup (entries created before $($cutoffTime.ToString('yyyy-MM-dd HH:mm:ss')))."
+
+    foreach ($target in Get-ArchiveRetentionTargets) {
+        [void](Invoke-RetentionCleanup -TargetDirectory $target.TargetDirectory -Label $target.Label -CutoffTime $cutoffTime)
+    }
+
+    if ($script:CurrentWorkspaceName -eq $DefaultWorkspaceName) {
+        foreach ($target in Get-SyncRetentionTargets) {
+            [void](Invoke-RetentionCleanup -TargetDirectory $target.TargetDirectory -Label $target.Label -CutoffTime $cutoffTime)
+        }
+    }
+}
+
+function Invoke-RetentionCleanup {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TargetDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$CutoffTime
+    )
+
+    if (-not (Test-Path -LiteralPath $TargetDirectory)) {
+        return 0
+    }
+
+    $count = 0
+    $entries = @(Get-ChildItem -LiteralPath $TargetDirectory -Force -ErrorAction SilentlyContinue)
+    foreach ($entry in $entries) {
+        if ($entry.CreationTime -gt $CutoffTime) {
+            continue
+        }
+
+        try {
+            Remove-Item -LiteralPath $entry.FullName -Recurse -Force
+            $count++
+        }
+        catch {
+            Write-Log "Could not delete expired $Label entry '$($entry.FullName)': $($_.Exception.Message)" "WARN"
+        }
+    }
+
+    if ($count -gt 0) {
+        Write-Log "Deleted $count expired entr$(if ($count -eq 1) { 'y' } else { 'ies' }) from $Label."
+    }
+
+    return $count
+}
+
 function Invoke-OutputArchiveIfDue {
-    if (-not $ArchiveEnabled) {
+    if ((-not $ArchiveEnabled) -and ($AssetRetentionDays -le 0)) {
         return
     }
 
@@ -1363,17 +1492,21 @@ function Invoke-OutputArchiveIfDue {
     }
 
     $script:LastArchiveCheck = $now
-    $cutoffTime = Get-OutputArchiveCutoffTime
+    if ($ArchiveEnabled) {
+        $cutoffTime = Get-OutputArchiveCutoffTime
 
-    Write-Log "Running scheduled output archive check (older than $ArchiveAgeHours hours)."
+        Write-Log "Running scheduled output archive check (older than $ArchiveAgeHours hours)."
 
-    foreach ($target in Get-OutputArchiveTargets) {
-        [void](Invoke-FlatOutputArchive -SourceDirectory $target.SourceDirectory -ArchiveDirectory $target.ArchiveDirectory -Label $target.Label -CutoffTime $cutoffTime)
+        foreach ($target in Get-OutputArchiveTargets) {
+            [void](Invoke-FlatOutputArchive -SourceDirectory $target.SourceDirectory -ArchiveDirectory $target.ArchiveDirectory -Label $target.Label -CutoffTime $cutoffTime)
+        }
+
+        [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetOutputDir -ArchiveDirectory $ArchiveSetOutputDir -Label "sets" -CutoffTime $cutoffTime)
+        [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetBatchOutputDir -ArchiveDirectory $ArchiveSetBatchOutputDir -Label "setbatch" -CutoffTime $cutoffTime)
+        [void](Invoke-DirectoryOutputArchive -SourceDirectory $AssetStoreOutputDir -ArchiveDirectory $ArchiveAssetStoreOutputDir -Label "assetstore" -CutoffTime $cutoffTime)
     }
 
-    [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetOutputDir -ArchiveDirectory $ArchiveSetOutputDir -Label "sets" -CutoffTime $cutoffTime)
-    [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetBatchOutputDir -ArchiveDirectory $ArchiveSetBatchOutputDir -Label "setbatch" -CutoffTime $cutoffTime)
-    [void](Invoke-DirectoryOutputArchive -SourceDirectory $AssetStoreOutputDir -ArchiveDirectory $ArchiveAssetStoreOutputDir -Label "assetstore" -CutoffTime $cutoffTime)
+    Invoke-AssetRetentionCleanup
 }
 
 function Move-InputFile {
@@ -3758,6 +3891,12 @@ function Start-PollingWatcher {
         Write-Log "Output archive target: sets -> $ArchiveSetOutputDir"
         Write-Log "Output archive target: setbatch -> $ArchiveSetBatchOutputDir"
         Write-Log "Output archive target: assetstore -> $ArchiveAssetStoreOutputDir"
+    }
+    if ($AssetRetentionDays -gt 0) {
+        Write-Log "Asset retention enabled: non-image archive, sync, and .sync-parts entries are deleted $AssetRetentionDays day(s) after creation."
+    }
+    else {
+        Write-Log "Asset retention disabled."
     }
     if ($script:SupportsParallel) {
         Write-Log "Image processing concurrency: $ImageProcessingConcurrency (parallel enabled on PowerShell $($PSVersionTable.PSVersion))."
