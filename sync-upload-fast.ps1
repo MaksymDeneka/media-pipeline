@@ -6,7 +6,7 @@ param(
     [string]$LocalPath,
     [string]$RemotePath,
     [string]$LocalPipelineRoot = 'D:\MediaPipeline',
-    [string]$RemoteRoot = '\\100.124.72.13\MediaPipeline',
+    [string]$RemoteRoot = '\\100.100.82.37\MediaPipeline',
 
     [int]$Threads = 16,
     [switch]$DryRun

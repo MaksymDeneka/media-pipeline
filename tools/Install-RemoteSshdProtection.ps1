@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$HostName = '100.124.72.13',
+    [string]$HostName = '100.100.82.37',
     [string]$User = 'root',
     [int]$Port = 2222,
     [string]$KeyFile = (Join-Path $HOME '.ssh\heatup_remote_debug_ed25519'),

@@ -2,10 +2,13 @@
 param(
     [string]$FilePath,
     [string]$LocalPipelineRoot = 'D:\MediaPipeline',
-    [string]$RemoteName = 'heatup-remote-sftp',
+    [string]$RemoteName = 'heatup-remote',
     [string]$RemoteSftpPartsRoot = '/D:/MediaPipeline/.sync-parts',
     [string]$RemotePartsRoot = 'D:\MediaPipeline\.sync-parts',
     [string]$RemoteDirectory = 'D:\MediaPipeline\sync',
+    [string]$RemoteSshHost = 'heatup-remote',
+    [int]$RemoteSshPort = 2222,
+    [string]$RemoteSshKeyFile = (Join-Path $HOME '.ssh\heatup_remote_debug_ed25519'),
     [int]$ChunkSizeMB = 256,
     [int]$Transfers = 12,
     [switch]$SkipSplit,
@@ -116,6 +119,7 @@ Write-Host "Chunk size:           $ChunkSizeMB MB"
 Write-Host "Chunk count:          $chunkCount"
 Write-Host "Local parts folder:   $partsDirectory"
 Write-Host "Remote parts folder:  $remoteRclonePath"
+Write-Host "Remote SSH target:    ${RemoteSshHost}:$RemoteSshPort"
 Write-Host "Parallel transfers:   $Transfers"
 
 if (-not $SkipSplit) {
@@ -229,9 +233,9 @@ Invoke-Checked -Command 'ssh' -Arguments @(
     '-o', 'ServerAliveInterval=30',
     '-o', 'ServerAliveCountMax=3',
     '-o', 'TCPKeepAlive=yes',
-    '-i', (Join-Path $HOME '.ssh\heatup_remote_debug_ed25519'),
-    '-p', '2222',
-    'heatup-remote-new',
+    '-i', $RemoteSshKeyFile,
+    '-p', $RemoteSshPort.ToString(),
+    $RemoteSshHost,
     "powershell -NoProfile -EncodedCommand $encodedRemoteScript"
 )
 
