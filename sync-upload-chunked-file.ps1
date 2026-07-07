@@ -231,7 +231,7 @@ Invoke-Checked -Command 'ssh' -Arguments @(
     '-o', 'TCPKeepAlive=yes',
     '-i', (Join-Path $HOME '.ssh\heatup_remote_debug_ed25519'),
     '-p', '2222',
-    'root@100.124.72.13',
+    'heatup-remote-new',
     "powershell -NoProfile -EncodedCommand $encodedRemoteScript"
 )
 

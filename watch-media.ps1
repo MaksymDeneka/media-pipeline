@@ -171,7 +171,7 @@ $AssetStoreManifestSchema = Get-Setting 'AssetStoreManifestSchema' 'heatup.asset
 # --- Derived directory paths (computed from $PipelineRoot above) ---
 # Each pipeline is divided into workspaces so assets can stay categorized.
 # Existing pre-workspace assets are migrated into LC.
-$WorkspaceNames = @("LC", "MD", "general")
+$WorkspaceNames = @("LC", "MD", "YL", "general")
 $DefaultWorkspaceName = "LC"
 
 $DefaultRootDir = Join-Path $PipelineRoot "default"
@@ -317,12 +317,12 @@ function Set-PipelineWorkspaceFromInputPath {
 }
 
 $VideoExtensions = @(".mp4", ".mov", ".mkv", ".webm", ".avi")
-$ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic")
+$ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif")
 $TempExtensions = @(".crdownload", ".tmp", ".part", ".download")
 
 # Convert pipeline: source formats that get rewritten into widely supported ones.
 $RemuxVideoSourceExtensions = @(".mov")
-$RemuxImageSourceExtensions = @(".heic")
+$RemuxImageSourceExtensions = @(".heic", ".heif")
 $RemuxImageOutputExtension = ".jpg"
 
 $script:ProcessingPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1378,6 +1378,10 @@ function Get-ArchiveRetentionTargets {
             Label = "archive default"
         },
         [pscustomobject]@{
+            TargetDirectory = $ArchiveImageBulkOutputDir
+            Label = "archive images"
+        },
+        [pscustomobject]@{
             TargetDirectory = $ArchiveLongOutputDir
             Label = "archive long"
         },
@@ -1410,6 +1414,11 @@ function Get-LegacyArchiveRetentionTargets {
         [pscustomobject]@{
             TargetDirectory = Join-Path $ArchiveRootDir "default"
             Label = "legacy archive default"
+            ExcludedNames = $WorkspaceNames
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $ArchiveRootDir "images"
+            Label = "legacy archive images"
             ExcludedNames = $WorkspaceNames
         },
         [pscustomobject]@{
@@ -1463,6 +1472,14 @@ function Get-PipelineAssetRetentionTargets {
             Label = "convert failed"
         },
         [pscustomobject]@{
+            TargetDirectory = $ImageBulkOriginalDir
+            Label = "images original"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $ImageBulkFailedDir
+            Label = "images failed"
+        },
+        [pscustomobject]@{
             TargetDirectory = $LongOriginalDir
             Label = "long original"
         },
@@ -1514,6 +1531,10 @@ function Get-SyncRetentionTargets {
         [pscustomobject]@{
             TargetDirectory = Join-Path $RemuxRootDir "sync"
             Label = "convert sync"
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $ImageBulkRootDir "sync"
+            Label = "images sync"
         },
         [pscustomobject]@{
             TargetDirectory = Join-Path $LongRootDir "sync"
@@ -1798,6 +1819,38 @@ function Get-MediaDimensions {
     }
 }
 
+function Test-IsHeicContainer {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $arguments = @(
+        "-v", "error",
+        "-show_entries", "format_tags=major_brand,compatible_brands",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        $Path
+    )
+
+    try {
+        $brandText = ((Invoke-ExternalTool -Command $script:FFprobePath -Arguments $arguments | Out-String).Trim()).ToLowerInvariant()
+        return ($brandText -match "(^|\s)(heic|heix|hevc|hevx|mif1|msf1)(\s|$)")
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-IsHeicImage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    return (($extension -in @(".heic", ".heif")) -or (Test-IsHeicContainer -Path $Path))
+}
+
 function Resolve-ImageProcessingSource {
     param(
         [Parameter(Mandatory = $true)]
@@ -1810,8 +1863,7 @@ function Resolve-ImageProcessingSource {
         TempPath = $null
     }
 
-    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
-    if ($extension -ne ".heic") {
+    if (-not (Test-IsHeicImage -Path $Path)) {
         return $source
     }
 
@@ -2108,11 +2160,24 @@ function Get-ImageBulkOutputExtension {
     )
 
     $extension = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
-    if ($extension -eq ".heic") {
+    if ($extension -in @(".heic", ".heif")) {
         return ".png"
     }
 
     return $extension
+}
+
+function Get-ImageCleanOutputExtension {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath
+    )
+
+    if (Test-IsHeicImage -Path $InputPath) {
+        return ".jpg"
+    }
+
+    return (Get-ImageBulkOutputExtension -InputPath $InputPath)
 }
 
 function Convert-ImageBulkVariant {
@@ -2156,7 +2221,7 @@ function Convert-ImageBulkVariant {
         $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
         $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
         $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-vf", $filter)
+        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
         Write-Log "Image bulk variant $VariantNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
     }
     else {
@@ -2299,7 +2364,8 @@ function Convert-ImageCleanFile {
         [string]$SourcePath = $InputPath
     )
 
-    $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
+    $sourceIsHeic = Test-IsHeicImage -Path $SourcePath
+    $outputExtension = Get-ImageCleanOutputExtension -InputPath $SourcePath
     $outputPath = New-RegularRandomFilePath -Directory $ImageCleanOutputDir -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
@@ -2323,7 +2389,7 @@ function Convert-ImageCleanFile {
         $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
         $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
         $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-vf", $filter)
+        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
         Write-Log "Image clean crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
     }
     else {
@@ -2331,7 +2397,8 @@ function Convert-ImageCleanFile {
     }
 
     if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $arguments += @("-q:v", "2")
+        $jpegQuality = if ($sourceIsHeic) { "4" } else { "2" }
+        $arguments += @("-q:v", $jpegQuality)
     }
     elseif ($outputExtension -eq ".webp") {
         $arguments += @("-quality", "92")
@@ -2507,7 +2574,7 @@ function Convert-SetImageVariant {
         $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
         $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
         $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-vf", $filter)
+        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
         Write-Log "Set image variant $VariantNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
     }
     else {
@@ -2634,7 +2701,7 @@ function Get-SetBatchOutputExtension {
     )
 
     $extension = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
-    if ($extension -eq ".heic") {
+    if ($extension -in @(".heic", ".heif")) {
         return ".jpg"
     }
 
@@ -2682,7 +2749,7 @@ function Convert-SetBatchImageVariant {
         $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
         $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
         $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-vf", $filter)
+        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
         Write-Log "Set batch image set $SetNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
     }
     else {
@@ -4042,7 +4109,7 @@ function Start-PollingWatcher {
         Write-Log "Output archive target: assetstore -> $ArchiveAssetStoreOutputDir"
     }
     if ($AssetRetentionDays -gt 0) {
-        Write-Log "Asset retention enabled: non-image archive, original, failed, sync, long work, and .sync-parts entries are deleted $AssetRetentionDays day(s) after creation."
+        Write-Log "Asset retention enabled: archive, original, failed, sync, long work, and .sync-parts entries are deleted $AssetRetentionDays day(s) after creation; image-clean is excluded."
     }
     else {
         Write-Log "Asset retention disabled."

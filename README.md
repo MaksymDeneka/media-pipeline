@@ -79,7 +79,7 @@ Some of the most useful settings:
 | `MaxWidth` | Max output video width in pixels | `1080` |
 | `DefaultMaxOutputSizeMB` | Size cap per default-pipeline video (`0` = off) | `8` |
 | `ArchiveEnabled` / `ArchiveAgeHours` | Auto-move old outputs into `archive\` after N hours | `true` / `15` |
-| `AssetRetentionDays` | Delete retained non-image asset entries this many days after creation (`0` = off) | `5` |
+| `AssetRetentionDays` | Delete retained asset entries this many days after creation (`0` = off) | `5` |
 
 `config.ini` has more (audio bitrate, trim amounts, polling interval, GPU encoder tuning, etc.), each
 documented in the file.
@@ -104,6 +104,11 @@ D:\MediaPipeline\
       output\
       original\
       failed\
+    YL\
+      input\
+      output\
+      original\
+      failed\
     general\
       input\
       output\
@@ -119,6 +124,7 @@ D:\MediaPipeline\
         images\
       failed\
     MD\...
+    YL\...
     general\...
   long\
     LC\
@@ -128,6 +134,7 @@ D:\MediaPipeline\
       failed\
       work\
     MD\...
+    YL\...
     general\...
   images\
     LC\
@@ -136,6 +143,7 @@ D:\MediaPipeline\
       original\
       failed\
     MD\...
+    YL\...
     general\...
   imageclean\
     LC\
@@ -144,6 +152,7 @@ D:\MediaPipeline\
       original\
       failed\
     MD\...
+    YL\...
     general\...
   sets\
     LC\
@@ -152,6 +161,7 @@ D:\MediaPipeline\
       original\
       failed\
     MD\...
+    YL\...
     general\...
   setbatch\
     LC\
@@ -160,6 +170,7 @@ D:\MediaPipeline\
       original\
       failed\
     MD\...
+    YL\...
     general\...
   assetstore\
     LC\
@@ -168,27 +179,28 @@ D:\MediaPipeline\
       original\
       failed\
     MD\...
+    YL\...
     general\...
   archive\          <- old outputs are moved here by pipeline and workspace
-    default\LC\output\
-    images\LC\output\
-    imageclean\LC\output\
-    convert\LC\output\
-    long\LC\output\
-    sets\LC\output\
-    setbatch\LC\output\
-    assetstore\LC\output\
+    default\<workspace>\output\
+    images\<workspace>\output\
+    imageclean\<workspace>\output\
+    convert\<workspace>\output\
+    long\<workspace>\output\
+    sets\<workspace>\output\
+    setbatch\<workspace>\output\
+    assetstore\<workspace>\output\
 ```
 
-- Workspaces are `LC`, `MD`, and `general`. The watcher scans each workspace independently.
-- `default\LC\input`: set your browser download folder here for LC assets. Use `default\MD\input` or `default\general\input` for those categories.
+- Workspaces are `LC`, `MD`, `YL`, and `general`. The watcher scans each workspace independently.
+- `default\LC\input`: set your browser download folder here for LC assets. Use `default\MD\input`, `default\YL\input`, or `default\general\input` for those categories.
 - `default\<workspace>\output`: processed variants are written here.
 - `default\<workspace>\original`: source files are moved here after all variants succeed.
 - `default\<workspace>\failed`: source files are moved here if processing fails.
 - `logs`: daily logs named like `media-pipeline-YYYYMMDD.log`.
 - Other pipelines use the same workspace level: `convert\<workspace>\input`, `long\<workspace>\input`, `images\<workspace>\input`, `imageclean\<workspace>\input`, `sets\<workspace>\input`, `setbatch\<workspace>\input`, and `assetstore\<workspace>\input`.
 - Archive output is grouped as `archive\<pipeline>\<workspace>\output`.
-- Retention deletes top-level entries from non-image archive, `original\`, `failed\`, long `work\`, root/pipeline `sync\`, and `.sync-parts\` folders after `AssetRetentionDays`. The `images` and `imageclean` pipelines are excluded. Chunked uploads also delete their local and remote parts folders immediately after a successful reassembly.
+- Retention deletes top-level entries from archive, `original\`, `failed\`, long `work\`, root/pipeline `sync\`, and `.sync-parts\` folders after `AssetRetentionDays`. The `images` pipeline is included; `imageclean` is excluded. Chunked uploads also delete their local and remote parts folders immediately after a successful reassembly.
 
 > Upgrading from an older version? Existing assets from the old non-workspace folders are moved into
 > the `LC` workspace, including every pipeline and archive folder.
