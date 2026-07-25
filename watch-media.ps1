@@ -123,7 +123,11 @@ else {
 
 $ImageBulkCropMinPermille = Get-Setting 'ImageBulkCropMinPermille' 5
 $ImageBulkCropMaxPermille = Get-Setting 'ImageBulkCropMaxPermille' 20
-$ImageBulkPngCompressionLevel = Get-Setting 'ImageBulkPngCompressionLevel' 1
+$ImageBulkConvertPngToJpeg = Get-Setting 'ImageBulkConvertPngToJpeg' $true
+$ImageBulkConvertedJpegQuality = Get-Setting 'ImageBulkConvertedJpegQuality' 12
+if ($ImageBulkConvertedJpegQuality -lt 2) { $ImageBulkConvertedJpegQuality = 2 }
+elseif ($ImageBulkConvertedJpegQuality -gt 31) { $ImageBulkConvertedJpegQuality = 31 }
+$ImageBulkPngCompressionLevel = Get-Setting 'ImageBulkPngCompressionLevel' 6
 if ($ImageBulkPngCompressionLevel -lt 0) { $ImageBulkPngCompressionLevel = 0 }
 elseif ($ImageBulkPngCompressionLevel -gt 9) { $ImageBulkPngCompressionLevel = 9 }
 $ImageCleanPngCompressionLevel = Get-Setting 'ImageCleanPngCompressionLevel' 1
@@ -171,10 +175,11 @@ $AssetStoreManifestSchema = Get-Setting 'AssetStoreManifestSchema' 'heatup.asset
 # --- Derived directory paths (computed from $PipelineRoot above) ---
 # Each pipeline is divided into workspaces so assets can stay categorized.
 # Existing pre-workspace assets are migrated into LC.
-$WorkspaceNames = @("LC", "MD", "YL", "general")
+$WorkspaceNames = @("LC", "MD", "YL", "PL", "general")
 $DefaultWorkspaceName = "LC"
 
 $DefaultRootDir = Join-Path $PipelineRoot "default"
+$VideoCleanRootDir = Join-Path $PipelineRoot "videoclean"
 $LogsDir = Join-Path $PipelineRoot "logs"
 $RemuxRootDir = Join-Path $PipelineRoot "convert"
 $LongRootDir = Join-Path $PipelineRoot "long"
@@ -192,6 +197,7 @@ function Get-WorkspacePathSet {
     )
 
     $defaultWorkspaceRoot = Join-Path $DefaultRootDir $WorkspaceName
+    $videoCleanWorkspaceRoot = Join-Path $VideoCleanRootDir $WorkspaceName
     $remuxWorkspaceRoot = Join-Path $RemuxRootDir $WorkspaceName
     $longWorkspaceRoot = Join-Path $LongRootDir $WorkspaceName
     $imageBulkWorkspaceRoot = Join-Path $ImageBulkRootDir $WorkspaceName
@@ -201,6 +207,7 @@ function Get-WorkspacePathSet {
     $assetStoreWorkspaceRoot = Join-Path $AssetStoreRootDir $WorkspaceName
 
     $archiveDefaultWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "default") $WorkspaceName
+    $archiveVideoCleanWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "videoclean") $WorkspaceName
     $archiveImageBulkWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "images") $WorkspaceName
     $archiveImageCleanWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "imageclean") $WorkspaceName
     $archiveRemuxWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "convert") $WorkspaceName
@@ -215,6 +222,10 @@ function Get-WorkspacePathSet {
         OutputDir = Join-Path $defaultWorkspaceRoot "output"
         OriginalDir = Join-Path $defaultWorkspaceRoot "original"
         FailedDir = Join-Path $defaultWorkspaceRoot "failed"
+        VideoCleanInputDir = Join-Path $videoCleanWorkspaceRoot "input"
+        VideoCleanOutputDir = Join-Path $videoCleanWorkspaceRoot "output"
+        VideoCleanOriginalDir = Join-Path $videoCleanWorkspaceRoot "original"
+        VideoCleanFailedDir = Join-Path $videoCleanWorkspaceRoot "failed"
         RemuxInputDir = Join-Path $remuxWorkspaceRoot "input"
         RemuxOutputDir = Join-Path $remuxWorkspaceRoot "output"
         RemuxOriginalDir = Join-Path $remuxWorkspaceRoot "original"
@@ -247,6 +258,7 @@ function Get-WorkspacePathSet {
         AssetStoreOriginalDir = Join-Path $assetStoreWorkspaceRoot "original"
         AssetStoreFailedDir = Join-Path $assetStoreWorkspaceRoot "failed"
         ArchiveDefaultOutputDir = Join-Path $archiveDefaultWorkspaceRoot "output"
+        ArchiveVideoCleanOutputDir = Join-Path $archiveVideoCleanWorkspaceRoot "output"
         ArchiveImageBulkOutputDir = Join-Path $archiveImageBulkWorkspaceRoot "output"
         ArchiveImageCleanOutputDir = Join-Path $archiveImageCleanWorkspaceRoot "output"
         ArchiveRemuxOutputDir = Join-Path $archiveRemuxWorkspaceRoot "output"
@@ -282,6 +294,7 @@ function Get-WorkspaceNameFromInputPath {
         $paths = Get-WorkspacePathSet -WorkspaceName $workspaceName
         $inputDirectories = @(
             $paths.InputDir,
+            $paths.VideoCleanInputDir,
             $paths.RemuxInputDir,
             $paths.LongInputDir,
             $paths.ImageBulkInputDir,
@@ -1001,7 +1014,7 @@ function New-RegularRandomName {
     }
 }
 
-function New-RegularRandomFilePath {
+function New-IPhoneRandomFilePath {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Directory,
@@ -1010,13 +1023,15 @@ function New-RegularRandomFilePath {
         [string]$Extension
     )
 
-    $normalizedExtension = $Extension.ToLowerInvariant()
+    $normalizedExtension = $Extension.ToUpperInvariant()
     if (-not $normalizedExtension.StartsWith(".")) {
         $normalizedExtension = ".{0}" -f $normalizedExtension
     }
 
     do {
-        $fileName = "{0}{1}" -f (New-RegularRandomName), $normalizedExtension
+        # Match the four-digit naming convention used by the iPhone Camera app
+        # while choosing the number independently for every generated file.
+        $fileName = "IMG_{0:D4}{1}" -f (Get-RandomInt -Minimum 1 -Maximum 10000), $normalizedExtension
         $path = Join-Path $Directory $fileName
     } while (Test-Path -LiteralPath $path)
 
@@ -1142,6 +1157,11 @@ function Move-LegacyPipelineAssetsToDefaultWorkspace {
         @{ Label = "default original"; Old = (Join-Path $DefaultRootDir "original"); New = $paths.OriginalDir },
         @{ Label = "default failed"; Old = (Join-Path $DefaultRootDir "failed"); New = $paths.FailedDir },
 
+        @{ Label = "videoclean input"; Old = (Join-Path $VideoCleanRootDir "input"); New = $paths.VideoCleanInputDir },
+        @{ Label = "videoclean output"; Old = (Join-Path $VideoCleanRootDir "output"); New = $paths.VideoCleanOutputDir },
+        @{ Label = "videoclean original"; Old = (Join-Path $VideoCleanRootDir "original"); New = $paths.VideoCleanOriginalDir },
+        @{ Label = "videoclean failed"; Old = (Join-Path $VideoCleanRootDir "failed"); New = $paths.VideoCleanFailedDir },
+
         @{ Label = "convert input"; Old = (Join-Path $RemuxRootDir "input"); New = $paths.RemuxInputDir },
         @{ Label = "convert output"; Old = (Join-Path $RemuxRootDir "output"); New = $paths.RemuxOutputDir },
         @{ Label = "convert original videos"; Old = (Join-Path (Join-Path $RemuxRootDir "original") "videos"); New = $paths.RemuxOriginalVideosDir },
@@ -1180,6 +1200,7 @@ function Move-LegacyPipelineAssetsToDefaultWorkspace {
         @{ Label = "assetstore failed"; Old = (Join-Path $AssetStoreRootDir "failed"); New = $paths.AssetStoreFailedDir },
 
         @{ Label = "archive default"; Old = (Join-Path $ArchiveRootDir "output"); New = $paths.ArchiveDefaultOutputDir },
+        @{ Label = "archive videoclean"; Old = (Join-Path $ArchiveRootDir "videoclean"); New = $paths.ArchiveVideoCleanOutputDir },
         @{ Label = "archive images"; Old = (Join-Path $ArchiveRootDir "images"); New = $paths.ArchiveImageBulkOutputDir },
         @{ Label = "archive imageclean"; Old = (Join-Path $ArchiveRootDir "imageclean"); New = $paths.ArchiveImageCleanOutputDir },
         @{ Label = "archive convert"; Old = (Join-Path $ArchiveRootDir "convert"); New = $paths.ArchiveRemuxOutputDir },
@@ -1349,6 +1370,11 @@ function Get-OutputArchiveTargets {
             Label = "default"
         },
         [pscustomobject]@{
+            SourceDirectory = $VideoCleanOutputDir
+            ArchiveDirectory = $ArchiveVideoCleanOutputDir
+            Label = "videoclean"
+        },
+        [pscustomobject]@{
             SourceDirectory = $ImageBulkOutputDir
             ArchiveDirectory = $ArchiveImageBulkOutputDir
             Label = "images"
@@ -1378,8 +1404,8 @@ function Get-ArchiveRetentionTargets {
             Label = "archive default"
         },
         [pscustomobject]@{
-            TargetDirectory = $ArchiveImageBulkOutputDir
-            Label = "archive images"
+            TargetDirectory = $ArchiveVideoCleanOutputDir
+            Label = "archive videoclean"
         },
         [pscustomobject]@{
             TargetDirectory = $ArchiveLongOutputDir
@@ -1417,8 +1443,8 @@ function Get-LegacyArchiveRetentionTargets {
             ExcludedNames = $WorkspaceNames
         },
         [pscustomobject]@{
-            TargetDirectory = Join-Path $ArchiveRootDir "images"
-            Label = "legacy archive images"
+            TargetDirectory = Join-Path $ArchiveRootDir "videoclean"
+            Label = "legacy archive videoclean"
             ExcludedNames = $WorkspaceNames
         },
         [pscustomobject]@{
@@ -1458,6 +1484,14 @@ function Get-PipelineAssetRetentionTargets {
         [pscustomobject]@{
             TargetDirectory = $FailedDir
             Label = "default failed"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $VideoCleanOriginalDir
+            Label = "videoclean original"
+        },
+        [pscustomobject]@{
+            TargetDirectory = $VideoCleanFailedDir
+            Label = "videoclean failed"
         },
         [pscustomobject]@{
             TargetDirectory = $RemuxOriginalVideosDir
@@ -1527,6 +1561,10 @@ function Get-SyncRetentionTargets {
         [pscustomobject]@{
             TargetDirectory = Join-Path $DefaultRootDir "sync"
             Label = "default sync"
+        },
+        [pscustomobject]@{
+            TargetDirectory = Join-Path $VideoCleanRootDir "sync"
+            Label = "videoclean sync"
         },
         [pscustomobject]@{
             TargetDirectory = Join-Path $RemuxRootDir "sync"
@@ -1713,7 +1751,7 @@ function Move-InputFileToRandomOutput {
     }
 
     $extension = [System.IO.Path]::GetExtension($Path)
-    $destination = New-RegularRandomFilePath -Directory $DestinationDirectory -Extension $extension
+    $destination = New-IPhoneRandomFilePath -Directory $DestinationDirectory -Extension $extension
     Move-Item -LiteralPath $Path -Destination $destination -Force
     Write-Log "Moved input file to random output path: $destination"
 
@@ -2009,10 +2047,12 @@ function Convert-VideoVariant {
         [double]$DurationSeconds,
 
         [Parameter(Mandatory = $true)]
-        [int]$TrimMs
+        [int]$TrimMs,
+
+        [string]$OutputDirectory = $OutputDir
     )
 
-    $outputPath = New-RegularRandomFilePath -Directory $OutputDir -Extension ".mp4"
+    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
     $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
@@ -2063,7 +2103,7 @@ function Convert-ImageVariant {
         $outputExtension = ".png"
     }
 
-    $outputPath = New-RegularRandomFilePath -Directory $OutputDir -Extension $outputExtension
+    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDir -Extension $outputExtension
 
     if ($extension -eq ".heic") {
         $arguments = @(
@@ -2094,7 +2134,9 @@ function Process-VideoFile {
         [string]$Path,
 
         [Parameter(Mandatory = $true)]
-        [int]$CopyCount
+        [int]$CopyCount,
+
+        [string]$OutputDirectory = $OutputDir
     )
 
     $createdOutputs = New-Object System.Collections.Generic.List[string]
@@ -2116,7 +2158,7 @@ function Process-VideoFile {
 
         for ($variant = 1; $variant -le $CopyCount; $variant++) {
             $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $CopyCount
-            $outputPath = Convert-VideoVariant -InputPath $Path -VariantNumber $variant -DurationSeconds $duration -TrimMs $trimMs
+            $outputPath = Convert-VideoVariant -InputPath $Path -VariantNumber $variant -DurationSeconds $duration -TrimMs $trimMs -OutputDirectory $OutputDirectory
             $createdOutputs.Add($outputPath)
         }
 
@@ -2197,8 +2239,16 @@ function Convert-ImageBulkVariant {
         [string]$SourcePath = $InputPath
     )
 
+    $sourceExtension = [System.IO.Path]::GetExtension($SourcePath).ToLowerInvariant()
     $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-RegularRandomFilePath -Directory $ImageBulkOutputDir -Extension $outputExtension
+    $isPngFamilyConversion = (
+        $ImageBulkConvertPngToJpeg -and
+        $sourceExtension -in @(".png", ".heic", ".heif")
+    )
+    if ($isPngFamilyConversion) {
+        $outputExtension = ".jpg"
+    }
+    $outputPath = New-IPhoneRandomFilePath -Directory $ImageBulkOutputDir -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -2229,7 +2279,13 @@ function Convert-ImageBulkVariant {
     }
 
     if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $arguments += @("-q:v", "2")
+        $jpegQuality = if ($isPngFamilyConversion) {
+            [string]$ImageBulkConvertedJpegQuality
+        }
+        else {
+            "2"
+        }
+        $arguments += @("-q:v", $jpegQuality)
     }
     elseif ($outputExtension -eq ".webp") {
         $arguments += @("-quality", "92")
@@ -2366,7 +2422,7 @@ function Convert-ImageCleanFile {
 
     $sourceIsHeic = Test-IsHeicImage -Path $SourcePath
     $outputExtension = Get-ImageCleanOutputExtension -InputPath $SourcePath
-    $outputPath = New-RegularRandomFilePath -Directory $ImageCleanOutputDir -Extension $outputExtension
+    $outputPath = New-IPhoneRandomFilePath -Directory $ImageCleanOutputDir -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -2499,7 +2555,7 @@ function Convert-SetVideoVariant {
         [int]$TrimMs
     )
 
-    $outputPath = New-RegularRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
+    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
     $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
@@ -2551,7 +2607,7 @@ function Convert-SetImageVariant {
     )
 
     $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-RegularRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
+    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -2726,7 +2782,7 @@ function Convert-SetBatchImageVariant {
     )
 
     $outputExtension = Get-SetBatchOutputExtension -InputPath $SourcePath
-    $outputPath = New-RegularRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
+    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
     $canCrop = ($width -ge 200 -and $height -ge 200)
@@ -3339,6 +3395,54 @@ function Process-OneSafely {
     }
 }
 
+function Process-VideoCleanFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    Write-Log "Started video clean processing: $Path"
+    [void](Process-VideoFile -Path $Path -CopyCount 1 -OutputDirectory $VideoCleanOutputDir)
+    Move-InputFile -Path $Path -DestinationDirectory $VideoCleanOriginalDir
+    Write-Log "Successfully processed video clean file: $Path"
+}
+
+function Process-VideoCleanFileSafely {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+
+    if (-not $script:ProcessingPaths.Add($fullPath)) {
+        return
+    }
+
+    try {
+        Write-Log "Detected video clean file: $fullPath"
+        Wait-FileReady -Path $fullPath
+        Process-VideoCleanFile -Path $fullPath
+    }
+    catch {
+        Write-Log "Failed video clean processing '$fullPath': $($_.Exception.Message)" "ERROR"
+        try {
+            Move-InputFile -Path $fullPath -DestinationDirectory $VideoCleanFailedDir
+        }
+        catch {
+            Write-Log "Could not move failed video clean file '$fullPath': $($_.Exception.Message)" "ERROR"
+        }
+    }
+    finally {
+        [void]$script:ProcessingPaths.Remove($fullPath)
+    }
+}
+
 function Invoke-MovToMp4Remux {
     param(
         [Parameter(Mandatory = $true)]
@@ -3408,7 +3512,7 @@ function Convert-RemuxMediaFile {
     $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
 
     if ($RemuxVideoSourceExtensions -contains $extension) {
-        $outputPath = New-RegularRandomFilePath -Directory $RemuxOutputDir -Extension ".mp4"
+        $outputPath = New-IPhoneRandomFilePath -Directory $RemuxOutputDir -Extension ".mp4"
 
         Write-Log "Started convert (video) for: $Path"
         Write-Log "Convert output path: $outputPath"
@@ -3428,7 +3532,7 @@ function Convert-RemuxMediaFile {
     }
 
     if ($RemuxImageSourceExtensions -contains $extension) {
-        $outputPath = New-RegularRandomFilePath -Directory $RemuxOutputDir -Extension $RemuxImageOutputExtension
+        $outputPath = New-IPhoneRandomFilePath -Directory $RemuxOutputDir -Extension $RemuxImageOutputExtension
 
         Write-Log "Started convert (image) for: $Path"
         Write-Log "Convert output path: $outputPath"
@@ -3861,7 +3965,7 @@ function Convert-LongVideoVariant {
         [int]$TrimMs
     )
 
-    $outputPath = New-RegularRandomFilePath -Directory $LongOutputDir -Extension ".mp4"
+    $outputPath = New-IPhoneRandomFilePath -Directory $LongOutputDir -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
     $targetDuration = [Math]::Max(0.1, $SegmentDurationSeconds - $trimSeconds)
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
@@ -3996,6 +4100,16 @@ function Get-CandidateInputFiles {
     } | Sort-Object LastWriteTime, FullName)
 }
 
+function Get-CandidateVideoCleanFiles {
+    if (-not (Test-Path -LiteralPath $VideoCleanInputDir)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $VideoCleanInputDir -File | Where-Object {
+        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsVideo $_.FullName)
+    } | Sort-Object LastWriteTime, FullName)
+}
+
 function Get-CandidateRemuxFiles {
     if (-not (Test-Path -LiteralPath $RemuxInputDir)) {
         return @()
@@ -4079,6 +4193,8 @@ function Start-PollingWatcher {
     }
     Write-Log "Original archive: $OriginalDir"
     Write-Log "Failed: $FailedDir"
+    Write-Log "Video clean input: $VideoCleanInputDir"
+    Write-Log "Video clean output: $VideoCleanOutputDir (one processed MP4 per input)"
     Write-Log "Convert input: $RemuxInputDir"
     Write-Log "Convert output: $RemuxOutputDir"
     Write-Log "Long pipeline input: $LongInputDir"
@@ -4091,6 +4207,7 @@ function Start-PollingWatcher {
     }
     Write-Log "Image bulk input: $ImageBulkInputDir"
     Write-Log "Image bulk output: $ImageBulkOutputDir"
+    Write-Log "Image bulk PNG/HEIC to JPEG: $ImageBulkConvertPngToJpeg (FFmpeg JPEG quality $ImageBulkConvertedJpegQuality)"
     Write-Log "Image clean input: $ImageCleanInputDir"
     Write-Log "Image clean output: $ImageCleanOutputDir"
     Write-Log "Set pipeline input: $SetInputDir"
@@ -4109,7 +4226,7 @@ function Start-PollingWatcher {
         Write-Log "Output archive target: assetstore -> $ArchiveAssetStoreOutputDir"
     }
     if ($AssetRetentionDays -gt 0) {
-        Write-Log "Asset retention enabled: archive, original, failed, sync, long work, and .sync-parts entries are deleted $AssetRetentionDays day(s) after creation; image-clean is excluded."
+        Write-Log "Asset retention enabled: archive (except archive/images), original, failed, sync, long work, and .sync-parts entries are deleted $AssetRetentionDays day(s) after creation; image-clean is excluded."
     }
     else {
         Write-Log "Asset retention disabled."
@@ -4261,6 +4378,11 @@ function Start-PollingWatcher {
                 foreach ($file in $remuxFiles) {
                     Process-RemuxFileSafely -Path $file.FullName
                 }
+            }
+
+            $videoCleanFiles = Get-CandidateVideoCleanFiles
+            foreach ($file in $videoCleanFiles) {
+                Process-VideoCleanFileSafely -Path $file.FullName
             }
 
             $files = Get-CandidateInputFiles

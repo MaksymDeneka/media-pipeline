@@ -135,10 +135,6 @@ if ($files.Count -eq 0) {
 }
 
 $totalSlots = $ProfileCount * $ImagesPerProfile
-if ($files.Count -gt $totalSlots) {
-    throw "Source image count ($($files.Count)) is greater than available profile slots ($totalSlots)."
-}
-
 $baseUseCount = [int][Math]::Floor($totalSlots / $files.Count)
 $extraUseCount = $totalSlots - ($baseUseCount * $files.Count)
 $usedFamilyKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -378,6 +374,16 @@ $results |
     Export-Csv -LiteralPath $allocationCsvPath -NoTypeInformation -Encoding UTF8
 
 $useCounts = @($results | Group-Object FamilyKey | ForEach-Object { $_.Count })
+$usedSourceCount = ($results | Select-Object -ExpandProperty FamilyKey -Unique | Measure-Object).Count
+$unusedSourceCount = $files.Count - $usedSourceCount
+$sourceUseDistribution = [ordered]@{}
+if ($unusedSourceCount -gt 0) {
+    $sourceUseDistribution["0"] = [int]$unusedSourceCount
+}
+foreach ($group in @($useCounts | Group-Object | Sort-Object { [int]$_.Name })) {
+    $sourceUseDistribution[$group.Name] = [int]$group.Count
+}
+
 $summary = [ordered]@{
     generatedAt = $generatedAt
     sourceDirectory = $sourceRoot
@@ -392,10 +398,7 @@ $summary = [ordered]@{
     extraUseSourceCount = $extraUseCount
     minUseCount = [int](($useCounts | Measure-Object -Minimum).Minimum)
     maxUseCount = [int](($useCounts | Measure-Object -Maximum).Maximum)
-    sourceUseDistribution = [ordered]@{
-        twoUses = [int](($useCounts | Where-Object { $_ -eq 2 } | Measure-Object).Count)
-        threeUses = [int](($useCounts | Where-Object { $_ -eq 3 } | Measure-Object).Count)
-    }
+    sourceUseDistribution = $sourceUseDistribution
     elapsedSeconds = [Math]::Round(((Get-Date) - $startedAt).TotalSeconds, 3)
 }
 $summaryPath = Join-Path $batchDirectory "summary.json"
@@ -406,4 +409,7 @@ Write-Host "Batch directory: $batchDirectory"
 Write-Host "Manifest: $manifestPath"
 Write-Host "Allocation CSV: $allocationCsvPath"
 Write-Host "Summary: $summaryPath"
-Write-Host "Use distribution: $($summary.sourceUseDistribution.twoUses) source(s) used twice, $($summary.sourceUseDistribution.threeUses) source(s) used three times."
+$distributionText = @($summary.sourceUseDistribution.GetEnumerator() | ForEach-Object {
+    "$($_.Value) source(s) used $($_.Key) time(s)"
+}) -join ", "
+Write-Host "Use distribution: $distributionText."

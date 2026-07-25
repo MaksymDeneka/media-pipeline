@@ -68,7 +68,9 @@ Some of the most useful settings:
 | `PipelineRoot` | Where all the watcher's folders live | `D:\MediaPipeline` |
 | `DefaultPipelineAlternatingCopiesPerFile` / `DefaultPipelineMinCopiesPerFile` | How many output copies the **default** pipeline makes (these two alternate per file — set them equal for a fixed count) | `8` / `7` |
 | `ImageBulkCopiesPerFile` | Variants per image in the bulk-image pipeline | `20` |
-| `ImageBulkPngCompressionLevel` | PNG compression for bulk images (`1` = faster/larger, `6` = old behavior) | `1` |
+| `ImageBulkConvertPngToJpeg` | Convert photographic PNG/HEIC bulk inputs to practical-size JPEG outputs | `true` |
+| `ImageBulkConvertedJpegQuality` | FFmpeg JPEG quality for converted PNG/HEIC bulk inputs (lower = higher quality/larger) | `12` |
+| `ImageBulkPngCompressionLevel` | PNG compression when PNG-to-JPEG conversion is disabled | `6` |
 | `ImageCleanPngCompressionLevel` | PNG compression for image-clean outputs (`1` = faster/larger, `6` = old behavior) | `1` |
 | `SetCopiesPerFile` | Copies per file in the set pipeline | `10` |
 | `SetBatchCount` | How many complete sets the set-batch pipeline makes | `10` |
@@ -109,11 +111,26 @@ D:\MediaPipeline\
       output\
       original\
       failed\
+    PL\
+      input\
+      output\
+      original\
+      failed\
     general\
       input\
       output\
       original\
       failed\
+  videoclean\       <- one cleaned MP4 per source video
+    LC\
+      input\
+      output\
+      original\
+      failed\
+    MD\...
+    YL\...
+    PL\...
+    general\...
   logs\
   convert\
     LC\
@@ -125,6 +142,7 @@ D:\MediaPipeline\
       failed\
     MD\...
     YL\...
+    PL\...
     general\...
   long\
     LC\
@@ -135,6 +153,7 @@ D:\MediaPipeline\
       work\
     MD\...
     YL\...
+    PL\...
     general\...
   images\
     LC\
@@ -144,6 +163,7 @@ D:\MediaPipeline\
       failed\
     MD\...
     YL\...
+    PL\...
     general\...
   imageclean\
     LC\
@@ -153,6 +173,7 @@ D:\MediaPipeline\
       failed\
     MD\...
     YL\...
+    PL\...
     general\...
   sets\
     LC\
@@ -162,6 +183,7 @@ D:\MediaPipeline\
       failed\
     MD\...
     YL\...
+    PL\...
     general\...
   setbatch\
     LC\
@@ -171,6 +193,7 @@ D:\MediaPipeline\
       failed\
     MD\...
     YL\...
+    PL\...
     general\...
   assetstore\
     LC\
@@ -180,9 +203,11 @@ D:\MediaPipeline\
       failed\
     MD\...
     YL\...
+    PL\...
     general\...
   archive\          <- old outputs are moved here by pipeline and workspace
     default\<workspace>\output\
+    videoclean\<workspace>\output\
     images\<workspace>\output\
     imageclean\<workspace>\output\
     convert\<workspace>\output\
@@ -192,15 +217,15 @@ D:\MediaPipeline\
     assetstore\<workspace>\output\
 ```
 
-- Workspaces are `LC`, `MD`, `YL`, and `general`. The watcher scans each workspace independently.
-- `default\LC\input`: set your browser download folder here for LC assets. Use `default\MD\input`, `default\YL\input`, or `default\general\input` for those categories.
+- Workspaces are `LC`, `MD`, `YL`, `PL`, and `general`. The watcher scans each workspace independently.
+- `default\LC\input`: set your browser download folder here for LC assets. Use `default\MD\input`, `default\YL\input`, `default\PL\input`, or `default\general\input` for those categories.
 - `default\<workspace>\output`: processed variants are written here.
 - `default\<workspace>\original`: source files are moved here after all variants succeed.
 - `default\<workspace>\failed`: source files are moved here if processing fails.
 - `logs`: daily logs named like `media-pipeline-YYYYMMDD.log`.
-- Other pipelines use the same workspace level: `convert\<workspace>\input`, `long\<workspace>\input`, `images\<workspace>\input`, `imageclean\<workspace>\input`, `sets\<workspace>\input`, `setbatch\<workspace>\input`, and `assetstore\<workspace>\input`.
+- Other pipelines use the same workspace level: `videoclean\<workspace>\input`, `convert\<workspace>\input`, `long\<workspace>\input`, `images\<workspace>\input`, `imageclean\<workspace>\input`, `sets\<workspace>\input`, `setbatch\<workspace>\input`, and `assetstore\<workspace>\input`.
 - Archive output is grouped as `archive\<pipeline>\<workspace>\output`.
-- Retention deletes top-level entries from archive, `original\`, `failed\`, long `work\`, root/pipeline `sync\`, and `.sync-parts\` folders after `AssetRetentionDays`. The `images` pipeline is included; `imageclean` is excluded. Chunked uploads also delete their local and remote parts folders immediately after a successful reassembly.
+- Retention deletes top-level entries from archive, `original\`, `failed\`, long `work\`, root/pipeline `sync\`, and `.sync-parts\` folders after `AssetRetentionDays`. `archive\images\` and the `imageclean` pipeline are excluded. Retention still applies to the `images` pipeline's non-archive folders. Chunked uploads also delete their local and remote parts folders immediately after a successful reassembly.
 
 > Upgrading from an older version? Existing assets from the old non-workspace folders are moved into
 > the `LC` workspace, including every pipeline and archive folder.
@@ -286,6 +311,38 @@ Images in the default pipeline are copied into the configured number of random f
 original format where possible, then metadata is removed with ExifTool. `.heic` inputs are converted
 to `.png` because HEIC output is not used by this pipeline.
 
+## Video Cleanup Pipeline
+
+Use this lane when you want the default video processing with exactly one output per input. Put any
+supported source video here:
+
+```text
+D:\MediaPipeline\videoclean\LC\input
+```
+
+The watcher writes one cleaned MP4 per source video here:
+
+```text
+D:\MediaPipeline\videoclean\LC\output
+```
+
+Every output uses the same video treatment and configuration as the default pipeline:
+
+- H.264 video using the selected NVIDIA, AMD, or CPU encoder
+- AAC audio
+- `yuv420p` compatibility pixel format
+- `+faststart`
+- metadata removal with FFmpeg and ExifTool
+- width capped at `MaxWidth` without upscaling
+- tiny randomized end trim using `MinTrimMs` and `MaxTrimMs`
+- the default output size cap and fallback width
+- random iPhone-style `IMG_####.MP4` filename
+
+The copy count is permanently one for this lane and does not use either default-pipeline copy-count
+setting. Very short videos use the same safe trim reduction or trim skipping as the default pipeline.
+Successful sources move to `D:\MediaPipeline\videoclean\LC\original`; failures move to
+`D:\MediaPipeline\videoclean\LC\failed`.
+
 ## Bulk Image Pipeline
 
 Use this lane when you want many image variants from one source image.
@@ -318,12 +375,15 @@ Supported inputs are:
 Output format behavior:
 
 - `.jpg`, `.jpeg` -> `.jpg` / `.jpeg`
-- `.png` -> `.png`
+- `.png` -> `.jpg` by default (set `ImageBulkConvertPngToJpeg = false` to retain PNG)
 - `.webp` -> `.webp`
-- `.heic` -> `.png`
+- `.heic` -> `.jpg` by default
 
-Bulk PNG output uses `ImageBulkPngCompressionLevel` (default `1`) so PNG-heavy batches finish faster.
-Raise it toward `6` if you prefer smaller PNG files over speed.
+Full-resolution photographic PNGs compress poorly after pixel processing, so the bulk lane converts
+PNG and HEIC inputs to JPEG by default using `ImageBulkConvertedJpegQuality` (default `12`). This
+typically keeps 12 MP variants around 1-2 MB instead of 6-18 MB. Disable
+`ImageBulkConvertPngToJpeg` only when lossless PNG output or transparency is required; retained PNG
+outputs then use `ImageBulkPngCompressionLevel`.
 
 This makes outputs different at the file and pixel level while keeping them visually close to the
 original. It is not a guarantee that files are impossible to detect or compare.
@@ -351,17 +411,18 @@ D:\MediaPipeline\imageclean\LC\output
 
 Each output gets the same image cleanup treatment as the bulk image pipeline:
 
-- ordinary-looking random filename, with no date, pipeline code, variant number, set number, or source name
+- random iPhone-style `IMG_####` filename, with no date, pipeline code, variant number, set number, or source name
 - metadata removed with ExifTool
 - FFmpeg re-encode, not a byte-for-byte copy
 - tiny randomized crop and scale back to the original dimensions when the image is large enough
 
-Supported inputs and output format behavior match the bulk image pipeline:
+Supported input types match the bulk image pipeline, but image-clean keeps its
+own output-format behavior:
 
 - `.jpg`, `.jpeg` -> `.jpg` / `.jpeg`
 - `.png` -> `.png`
 - `.webp` -> `.webp`
-- `.heic` -> `.png`
+- `.heic` -> `.jpg`
 
 Image-clean PNG output uses `ImageCleanPngCompressionLevel` (default `1`) so PNG-heavy cleanup
 batches finish faster. Raise it toward `6` if you prefer smaller PNG files over speed.
@@ -631,26 +692,26 @@ Each segment variant then goes through the same final processing as normal video
 - metadata removal with FFmpeg and ExifTool
 - width capped at 1080px without upscaling
 - small randomized trim from the end
-- random neutral output filename
+- random iPhone-style `IMG_####` output filename
 
 Successful source files move to `D:\MediaPipeline\long\LC\original`. Failed source files move to
 `D:\MediaPipeline\long\LC\failed`.
 
 ## Output File Names
 
-Output media names are random and not based on the source filename. They use varied ordinary-looking
-word combinations with mixed separators, optional numbers, and variable number lengths. They do not
-include pipeline codes, dates, variant numbers, segment numbers, set numbers, or sequence counters.
-Batch folders and set folders use the same style.
+Output image and video names are random and not based on the source filename. They use the iPhone
+Camera naming style `IMG_####` with a random four-digit number and an uppercase output extension.
+They do not include pipeline codes, dates, variant numbers, segment numbers, set numbers, or sequence
+counters. Batch folders and set folders continue to use varied random word combinations.
 
 ```text
-Summer Trip Clip.mp4
-gallery_482.jpg
-fresh-phone-photo-9137.webp
-workshop update.png
+IMG_0274.MP4
+IMG_4821.JPG
+IMG_9137.WEBP
+IMG_0068.PNG
 archive_collection_73642\
   sunny upload\
-    coastal-frame-51980.mp4
+    IMG_5198.MP4
 ```
 
 ---
