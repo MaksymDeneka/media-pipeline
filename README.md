@@ -70,6 +70,7 @@ Some of the most useful settings:
 | `ImageBulkCopiesPerFile` | Variants per image in the bulk-image pipeline | `20` |
 | `ImageBulkConvertPngToJpeg` | Convert photographic PNG/HEIC bulk inputs to practical-size JPEG outputs | `true` |
 | `ImageBulkConvertedJpegQuality` | FFmpeg JPEG quality for converted PNG/HEIC bulk inputs (lower = higher quality/larger) | `12` |
+| `ImageBulkNativeJpegQuality` | FFmpeg JPEG quality for native JPG/JPEG bulk inputs | `4` |
 | `ImageBulkPngCompressionLevel` | PNG compression when PNG-to-JPEG conversion is disabled | `6` |
 | `ImageCleanPngCompressionLevel` | PNG compression for image-clean outputs (`1` = faster/larger, `6` = old behavior) | `1` |
 | `SetCopiesPerFile` | Copies per file in the set pipeline | `10` |

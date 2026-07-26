@@ -127,6 +127,9 @@ $ImageBulkConvertPngToJpeg = Get-Setting 'ImageBulkConvertPngToJpeg' $true
 $ImageBulkConvertedJpegQuality = Get-Setting 'ImageBulkConvertedJpegQuality' 12
 if ($ImageBulkConvertedJpegQuality -lt 2) { $ImageBulkConvertedJpegQuality = 2 }
 elseif ($ImageBulkConvertedJpegQuality -gt 31) { $ImageBulkConvertedJpegQuality = 31 }
+$ImageBulkNativeJpegQuality = Get-Setting 'ImageBulkNativeJpegQuality' 4
+if ($ImageBulkNativeJpegQuality -lt 2) { $ImageBulkNativeJpegQuality = 2 }
+elseif ($ImageBulkNativeJpegQuality -gt 31) { $ImageBulkNativeJpegQuality = 31 }
 $ImageBulkPngCompressionLevel = Get-Setting 'ImageBulkPngCompressionLevel' 6
 if ($ImageBulkPngCompressionLevel -lt 0) { $ImageBulkPngCompressionLevel = 0 }
 elseif ($ImageBulkPngCompressionLevel -gt 9) { $ImageBulkPngCompressionLevel = 9 }
@@ -2283,7 +2286,7 @@ function Convert-ImageBulkVariant {
             [string]$ImageBulkConvertedJpegQuality
         }
         else {
-            "2"
+            [string]$ImageBulkNativeJpegQuality
         }
         $arguments += @("-q:v", $jpegQuality)
     }
@@ -4207,7 +4210,7 @@ function Start-PollingWatcher {
     }
     Write-Log "Image bulk input: $ImageBulkInputDir"
     Write-Log "Image bulk output: $ImageBulkOutputDir"
-    Write-Log "Image bulk PNG/HEIC to JPEG: $ImageBulkConvertPngToJpeg (FFmpeg JPEG quality $ImageBulkConvertedJpegQuality)"
+    Write-Log "Image bulk JPEG quality: native q=$ImageBulkNativeJpegQuality; PNG/HEIC conversion enabled=$ImageBulkConvertPngToJpeg at q=$ImageBulkConvertedJpegQuality"
     Write-Log "Image clean input: $ImageCleanInputDir"
     Write-Log "Image clean output: $ImageCleanOutputDir"
     Write-Log "Set pipeline input: $SetInputDir"
