@@ -1843,20 +1843,42 @@ function Get-MediaDimensions {
     $arguments = @(
         "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "csv=s=x:p=0",
+        "-read_intervals", "%+#1",
+        "-show_frames",
+        "-show_entries", "frame=width,height:frame_side_data=rotation",
+        "-of", "json",
         $Path
     )
 
     $output = Invoke-ExternalTool -Command $script:FFprobePath -Arguments $arguments
-    $dimensionText = (($output | Out-String).Trim() -split "\s+")[0]
-    if ($dimensionText -notmatch "^(\d+)x(\d+)") {
+    $probe = (($output | Out-String).Trim() | ConvertFrom-Json)
+    $frame = @($probe.frames)[0]
+    if ($null -eq $frame -or [int]$frame.width -le 0 -or [int]$frame.height -le 0) {
         throw "Unable to read image dimensions from ffprobe for: $Path"
     }
 
+    $width = [int]$frame.width
+    $height = [int]$frame.height
+    $rotation = 0.0
+    foreach ($sideData in @($frame.side_data_list)) {
+        if ($null -ne $sideData -and $sideData.PSObject.Properties.Name -contains "rotation") {
+            $rotation = [double]$sideData.rotation
+            break
+        }
+    }
+
+    # FFmpeg auto-rotates image inputs before filters run. A quarter-turn stored
+    # in EXIF/display-matrix metadata therefore swaps the filter's input axes.
+    $normalizedRotation = (($rotation % 360.0) + 360.0) % 360.0
+    if ([Math]::Abs($normalizedRotation - 90.0) -lt 0.5 -or [Math]::Abs($normalizedRotation - 270.0) -lt 0.5) {
+        $temp = $width
+        $width = $height
+        $height = $temp
+    }
+
     return [pscustomobject]@{
-        Width = [int]$Matches[1]
-        Height = [int]$Matches[2]
+        Width = $width
+        Height = $height
     }
 }
 
