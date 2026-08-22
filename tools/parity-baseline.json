@@ -1,18 +1,28 @@
 {
-  "capturedAtUtc": "2026-08-22T08:22:46.7169910Z",
+  "capturedAtUtc": "2026-08-22T09:16:53.8593687Z",
   "scriptPath": "C:\\Users\\admin\\AppData\\Local\\Temp\\mp-parity\\app\\watch-media.ps1",
-  "scriptSha256": "797EFEBBC4A9E34A1BC700E2823EAFFD3EC75444D570986CB9E01A25E0E4394A",
+  "scriptSha256": "720B4A794F2D624E068B572BA0FF5784AB169041AFA2995AA473255E996E3308",
   "scenarios": {
     "default": {
       "error": null,
       "tree": {
-        "failed": {
+        "output": {
           "exists": true,
-          "fileCount": 0,
+          "fileCount": 8,
           "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
+          "extensions": {
+            ".jpg": 5,
+            ".mp4": 3
+          },
+          "fileDepths": {
+            "0": 8
+          },
+          "dirDepths": {},
+          "shapes": {
+            ".jpg|3024x4032|0": 2,
+            ".jpg|3024x4082|0": 3,
+            ".mp4|640x1138|11": 3
+          }
         },
         "original": {
           "exists": true,
@@ -28,24 +38,13 @@
           },
           "dirDepths": {}
         },
-        "output": {
+        "failed": {
           "exists": true,
-          "fileCount": 8,
+          "fileCount": 0,
           "dirCount": 0,
-          "extensions": {
-            ".jpg": 3,
-            ".mp4": 3,
-            ".png": 2
-          },
-          "fileDepths": {
-            "0": 8
-          },
-          "dirDepths": {},
-          "shapes": {
-            ".jpg|3024x4082|0": 3,
-            ".mp4|640x1138|11": 3,
-            ".png|3024x4032|na": 2
-          }
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
         },
         "inputRemaining": {
           "exists": true,
@@ -60,26 +59,6 @@
     "videoclean": {
       "error": null,
       "tree": {
-        "failed": {
-          "exists": true,
-          "fileCount": 0,
-          "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
-        },
-        "original": {
-          "exists": true,
-          "fileCount": 1,
-          "dirCount": 0,
-          "extensions": {
-            ".mp4": 1
-          },
-          "fileDepths": {
-            "0": 1
-          },
-          "dirDepths": {}
-        },
         "output": {
           "exists": true,
           "fileCount": 1,
@@ -95,6 +74,26 @@
             ".mp4|640x1138|11": 1
           }
         },
+        "original": {
+          "exists": true,
+          "fileCount": 1,
+          "dirCount": 0,
+          "extensions": {
+            ".mp4": 1
+          },
+          "fileDepths": {
+            "0": 1
+          },
+          "dirDepths": {}
+        },
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
         "inputRemaining": {
           "exists": true,
           "fileCount": 0,
@@ -108,28 +107,6 @@
     "images": {
       "error": null,
       "tree": {
-        "failed": {
-          "exists": true,
-          "fileCount": 0,
-          "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
-        },
-        "original": {
-          "exists": true,
-          "fileCount": 3,
-          "dirCount": 0,
-          "extensions": {
-            ".heic": 1,
-            ".jpg": 1,
-            ".png": 1
-          },
-          "fileDepths": {
-            "0": 3
-          },
-          "dirDepths": {}
-        },
         "output": {
           "exists": true,
           "fileCount": 9,
@@ -147,6 +124,28 @@
             ".jpg|3024x4082|0": 3
           }
         },
+        "original": {
+          "exists": true,
+          "fileCount": 3,
+          "dirCount": 0,
+          "extensions": {
+            ".heic": 1,
+            ".jpg": 1,
+            ".png": 1
+          },
+          "fileDepths": {
+            "0": 3
+          },
+          "dirDepths": {}
+        },
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
         "inputRemaining": {
           "exists": true,
           "fileCount": 0,
@@ -160,13 +159,22 @@
     "imageclean": {
       "error": null,
       "tree": {
-        "failed": {
+        "output": {
           "exists": true,
-          "fileCount": 0,
+          "fileCount": 3,
           "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
+          "extensions": {
+            ".jpg": 3
+          },
+          "fileDepths": {
+            "0": 3
+          },
+          "dirDepths": {},
+          "shapes": {
+            ".jpg|1442x2396|0": 1,
+            ".jpg|3024x4032|0": 1,
+            ".jpg|3024x4082|0": 1
+          }
         },
         "original": {
           "exists": true,
@@ -182,23 +190,13 @@
           },
           "dirDepths": {}
         },
-        "output": {
+        "failed": {
           "exists": true,
-          "fileCount": 3,
+          "fileCount": 0,
           "dirCount": 0,
-          "extensions": {
-            ".jpg": 2,
-            ".png": 1
-          },
-          "fileDepths": {
-            "0": 3
-          },
-          "dirDepths": {},
-          "shapes": {
-            ".jpg|3024x4032|0": 1,
-            ".jpg|3024x4082|0": 1,
-            ".png|1442x2396|na": 1
-          }
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
         },
         "inputRemaining": {
           "exists": true,
@@ -213,27 +211,6 @@
     "sets": {
       "error": null,
       "tree": {
-        "failed": {
-          "exists": true,
-          "fileCount": 0,
-          "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
-        },
-        "original": {
-          "exists": true,
-          "fileCount": 2,
-          "dirCount": 0,
-          "extensions": {
-            ".jpg": 1,
-            ".mp4": 1
-          },
-          "fileDepths": {
-            "0": 2
-          },
-          "dirDepths": {}
-        },
         "output": {
           "exists": true,
           "fileCount": 4,
@@ -253,6 +230,27 @@
             ".mp4|640x1138|11": 2
           }
         },
+        "original": {
+          "exists": true,
+          "fileCount": 2,
+          "dirCount": 0,
+          "extensions": {
+            ".jpg": 1,
+            ".mp4": 1
+          },
+          "fileDepths": {
+            "0": 2
+          },
+          "dirDepths": {}
+        },
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
         "inputRemaining": {
           "exists": true,
           "fileCount": 0,
@@ -266,27 +264,6 @@
     "setbatch": {
       "error": null,
       "tree": {
-        "failed": {
-          "exists": true,
-          "fileCount": 0,
-          "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
-        },
-        "original": {
-          "exists": true,
-          "fileCount": 4,
-          "dirCount": 0,
-          "extensions": {
-            ".jpg": 2,
-            ".mp4": 2
-          },
-          "fileDepths": {
-            "0": 4
-          },
-          "dirDepths": {}
-        },
         "output": {
           "exists": true,
           "fileCount": 8,
@@ -309,27 +286,6 @@
             ".mp4|640x1138|9": 2
           }
         },
-        "inputRemaining": {
-          "exists": true,
-          "fileCount": 0,
-          "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
-        }
-      }
-    },
-    "assetstore": {
-      "error": null,
-      "tree": {
-        "failed": {
-          "exists": true,
-          "fileCount": 0,
-          "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
-        },
         "original": {
           "exists": true,
           "fileCount": 4,
@@ -343,6 +299,27 @@
           },
           "dirDepths": {}
         },
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    },
+    "assetstore": {
+      "error": null,
+      "tree": {
         "output": {
           "exists": true,
           "fileCount": 9,
@@ -370,22 +347,31 @@
             {
               "schema": "heatup.assetStoreMediaManifest.v1",
               "importRoot": ".",
-              "variantCount": 8,
-              "variantFields": [
-                "familyKey",
-                "generatedAt",
-                "generationBatchKey",
-                "metadata",
-                "path",
-                "renditionSetKey",
-                "sizeBytes",
-                "sourceFamilyName",
-                "sourceOriginalName",
-                "transformProfile",
-                "variantKey"
-              ]
+              "variantCount": 0,
+              "variantFields": []
             }
           ]
+        },
+        "original": {
+          "exists": true,
+          "fileCount": 4,
+          "dirCount": 0,
+          "extensions": {
+            ".jpg": 2,
+            ".mp4": 2
+          },
+          "fileDepths": {
+            "0": 4
+          },
+          "dirDepths": {}
+        },
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
         },
         "inputRemaining": {
           "exists": true,
@@ -400,26 +386,6 @@
     "long": {
       "error": null,
       "tree": {
-        "failed": {
-          "exists": true,
-          "fileCount": 0,
-          "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
-        },
-        "original": {
-          "exists": true,
-          "fileCount": 1,
-          "dirCount": 0,
-          "extensions": {
-            ".mp4": 1
-          },
-          "fileDepths": {
-            "0": 1
-          },
-          "dirDepths": {}
-        },
         "output": {
           "exists": true,
           "fileCount": 6,
@@ -436,7 +402,19 @@
             ".mp4|640x1138|4": 4
           }
         },
-        "work": {
+        "original": {
+          "exists": true,
+          "fileCount": 1,
+          "dirCount": 0,
+          "extensions": {
+            ".mp4": 1
+          },
+          "fileDepths": {
+            "0": 1
+          },
+          "dirDepths": {}
+        },
+        "failed": {
           "exists": true,
           "fileCount": 0,
           "dirCount": 0,
@@ -454,30 +432,25 @@
         }
       }
     },
-    "convert": {
+    "mov-input": {
       "error": null,
       "tree": {
-        "failed": {
-          "exists": true,
-          "fileCount": 0,
-          "dirCount": 0,
-          "extensions": {},
-          "fileDepths": {},
-          "dirDepths": {}
-        },
-        "originalImages": {
+        "output": {
           "exists": true,
           "fileCount": 1,
           "dirCount": 0,
           "extensions": {
-            ".heic": 1
+            ".mp4": 1
           },
           "fileDepths": {
             "0": 1
           },
-          "dirDepths": {}
+          "dirDepths": {},
+          "shapes": {
+            ".mp4|640x1138|11.5": 1
+          }
         },
-        "originalVideos": {
+        "original": {
           "exists": true,
           "fileCount": 1,
           "dirCount": 0,
@@ -489,23 +462,13 @@
           },
           "dirDepths": {}
         },
-        "output": {
+        "failed": {
           "exists": true,
-          "fileCount": 3,
+          "fileCount": 0,
           "dirCount": 0,
-          "extensions": {
-            ".jpg": 2,
-            ".mp4": 1
-          },
-          "fileDepths": {
-            "0": 3
-          },
-          "dirDepths": {},
-          "shapes": {
-            ".jpg|3024x4032|0": 1,
-            ".jpg|3024x4082|0": 1,
-            ".mp4|1920x1080|11.5": 1
-          }
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
         },
         "inputRemaining": {
           "exists": true,

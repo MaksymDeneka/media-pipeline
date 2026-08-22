@@ -364,89 +364,20 @@ function Get-TreeFingerprint {
 
 # Each scenario stages files into one lane's input folder and invokes that lane's handler
 # exactly the way the poll loop does, then fingerprints output, original and failed.
+# Each scenario stages files into one preset's input folder and polls that preset exactly
+# the way the watcher loop does, then fingerprints output, original and failed.
 function Get-Scenarios {
     return @(
-        @{
-            Name      = 'default'
-            Workspace = 'LC'
-            Stage     = { @(Get-CorpusFiles -Kind 'mp4' -Count 1) + @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) }
-            InputDir  = { $script:InputDir }
-            Dirs      = { @{ output = $script:OutputDir; original = $script:OriginalDir; failed = $script:FailedDir } }
-            Invoke    = { foreach ($f in Get-CandidateInputFiles) { Process-OneSafely -Path $f.FullName } }
-        }
-        @{
-            Name      = 'videoclean'
-            Workspace = 'LC'
-            Stage     = { Get-CorpusFiles -Kind 'mp4' -Count 1 }
-            InputDir  = { $script:VideoCleanInputDir }
-            Dirs      = { @{ output = $script:VideoCleanOutputDir; original = $script:VideoCleanOriginalDir; failed = $script:VideoCleanFailedDir } }
-            Invoke    = { foreach ($f in Get-CandidateVideoCleanFiles) { Process-VideoCleanFileSafely -Path $f.FullName } }
-        }
-        @{
-            Name      = 'images'
-            Workspace = 'LC'
-            Stage     = { @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'png' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) }
-            InputDir  = { $script:ImageBulkInputDir }
-            Dirs      = { @{ output = $script:ImageBulkOutputDir; original = $script:ImageBulkOriginalDir; failed = $script:ImageBulkFailedDir } }
-            Invoke    = { foreach ($f in Get-CandidateImageBulkFiles) { Process-ImageBulkFileSafely -Path $f.FullName -VariantConcurrency 1 } }
-        }
-        @{
-            Name      = 'imageclean'
-            Workspace = 'LC'
-            Stage     = { @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'png' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) }
-            InputDir  = { $script:ImageCleanInputDir }
-            Dirs      = { @{ output = $script:ImageCleanOutputDir; original = $script:ImageCleanOriginalDir; failed = $script:ImageCleanFailedDir } }
-            Invoke    = { foreach ($f in Get-CandidateImageCleanFiles) { Process-ImageCleanFileSafely -Path $f.FullName } }
-        }
-        @{
-            Name      = 'sets'
-            Workspace = 'LC'
-            Stage     = { @(Get-CorpusFiles -Kind 'mp4' -Count 1) + @(Get-CorpusFiles -Kind 'jpg' -Count 1) }
-            InputDir  = { $script:SetInputDir }
-            Dirs      = { @{ output = $script:SetOutputDir; original = $script:SetOriginalDir; failed = $script:SetFailedDir } }
-            Invoke    = { foreach ($f in Get-CandidateSetMediaFiles) { Process-SetMediaFileSafely -Path $f.FullName } }
-        }
-        @{
-            Name      = 'setbatch'
-            Workspace = 'LC'
-            Stage     = { @(Get-CorpusFiles -Kind 'mp4' -Count 2) + @(Get-CorpusFiles -Kind 'jpg' -Count 2) }
-            InputDir  = { $script:SetBatchInputDir }
-            Dirs      = { @{ output = $script:SetBatchOutputDir; original = $script:SetBatchOriginalDir; failed = $script:SetBatchFailedDir } }
-            Invoke    = { $files = Get-CandidateSetBatchFiles; if ($files.Count -gt 0) { Process-SetBatchSafely -Files $files } }
-        }
-        @{
-            Name      = 'assetstore'
-            Workspace = 'LC'
-            Stage     = { @(Get-CorpusFiles -Kind 'mp4' -Count 2) + @(Get-CorpusFiles -Kind 'jpg' -Count 2) }
-            InputDir  = { $script:AssetStoreInputDir }
-            Dirs      = { @{ output = $script:AssetStoreOutputDir; original = $script:AssetStoreOriginalDir; failed = $script:AssetStoreFailedDir } }
-            Invoke    = { $files = Get-CandidateAssetStoreFiles; if ($files.Count -gt 0) { Process-AssetStoreBatchSafely -Files $files } }
-        }
-        @{
-            Name      = 'long'
-            Workspace = 'LC'
-            Stage     = { Get-CorpusFiles -Kind 'mp4' -Count 1 }
-            InputDir  = { $script:LongInputDir }
-            Dirs      = { @{ output = $script:LongOutputDir; original = $script:LongOriginalDir; failed = $script:LongFailedDir; work = $script:LongWorkDir } }
-            Invoke    = { foreach ($f in Get-CandidateLongFiles) { Process-LongFileSafely -Path $f.FullName } }
-        }
-        @{
-            Name      = 'convert'
-            Workspace = 'LC'
-            # .mov exercises the remux branch, .heic the image-convert branch, .jpg the
-            # pass-through branch that moves the source into output instead of original.
-            Stage     = { @(Get-CorpusFiles -Kind 'mov' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) + @(Get-CorpusFiles -Kind 'jpg' -Count 1) }
-            InputDir  = { $script:RemuxInputDir }
-            Dirs      = {
-                @{
-                    output          = $script:RemuxOutputDir
-                    originalVideos  = $script:RemuxOriginalVideosDir
-                    originalImages  = $script:RemuxOriginalImagesDir
-                    failed          = $script:RemuxFailedDir
-                }
-            }
-            Invoke    = { foreach ($f in Get-CandidateRemuxFiles) { Process-RemuxFileSafely -Path $f.FullName } }
-        }
+        @{ Name = 'default';    Preset = 'default';    Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 1) + @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) } }
+        @{ Name = 'videoclean'; Preset = 'videoclean'; Workspace = 'LC'; Stage = { Get-CorpusFiles -Kind 'mp4' -Count 1 } }
+        @{ Name = 'images';     Preset = 'images';     Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'png' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) } }
+        @{ Name = 'imageclean'; Preset = 'imageclean'; Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'png' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) } }
+        @{ Name = 'sets';       Preset = 'sets';       Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 1) + @(Get-CorpusFiles -Kind 'jpg' -Count 1) } }
+        @{ Name = 'setbatch';   Preset = 'setbatch';   Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 2) + @(Get-CorpusFiles -Kind 'jpg' -Count 2) } }
+        @{ Name = 'assetstore'; Preset = 'assetstore'; Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 2) + @(Get-CorpusFiles -Kind 'jpg' -Count 2) } }
+        @{ Name = 'long';       Preset = 'long';       Workspace = 'LC'; Stage = { Get-CorpusFiles -Kind 'mp4' -Count 1 } }
+        # A .mov no longer needs a lane of its own: any preset that takes video normalizes it.
+        @{ Name = 'mov-input';  Preset = 'videoclean'; Workspace = 'MD'; Stage = { Get-CorpusFiles -Kind 'mov' -Count 1 } }
     )
 }
 
@@ -490,16 +421,23 @@ foreach ($scenario in $scenarios) {
 
     Use-PipelineWorkspace -WorkspaceName $scenario.Workspace
 
+    $preset = Get-PipelinePreset -Name $scenario.Preset
+    $paths = Get-PresetWorkspacePaths -PresetName $scenario.Preset -WorkspaceName $scenario.Workspace
+
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $scenarioError = $null
 
     try {
-        $inputDir = & $scenario.InputDir
         foreach ($file in (& $scenario.Stage)) {
-            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $inputDir $file.Name) -Force
+            Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $paths.InputDir $file.Name) -Force
         }
 
-        & $scenario.Invoke
+        # A batch preset needs two polls to settle: the first records the signature, the
+        # second sees it unchanged and processes.
+        Invoke-PresetPoll -Preset $preset -WorkspaceName $scenario.Workspace
+        if ($preset.Batch -eq 'PerGroup') {
+            Invoke-PresetPoll -Preset $preset -WorkspaceName $scenario.Workspace
+        }
     }
     catch {
         $scenarioError = $_.Exception.Message
@@ -507,14 +445,12 @@ foreach ($scenario in $scenarios) {
 
     $stopwatch.Stop()
 
-    $fingerprint = [ordered]@{}
-    $dirMap = & $scenario.Dirs
-    foreach ($key in @($dirMap.Keys | Sort-Object)) {
-        $fingerprint[$key] = Get-TreeFingerprint -Root $dirMap[$key] -ProbeMedia:($key -like 'output*')
+    $fingerprint = [ordered]@{
+        output         = Get-TreeFingerprint -Root $paths.OutputDir -ProbeMedia
+        original       = Get-TreeFingerprint -Root $paths.OriginalDir
+        failed         = Get-TreeFingerprint -Root $paths.FailedDir
+        inputRemaining = Get-TreeFingerprint -Root $paths.InputDir
     }
-
-    # Anything left in input means the handler declined the file. That is a real signal.
-    $fingerprint['inputRemaining'] = Get-TreeFingerprint -Root (& $scenario.InputDir)
 
     $results[$scenario.Name] = [ordered]@{
         error = $scenarioError
