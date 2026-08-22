@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- NotifyIcon is the only supported way to put an icon in the Windows tray, and it
+         lives in WindowsForms. Nothing else from Forms is used. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>MediaPipelineTray</AssemblyName>
+    <RootNamespace>MediaPipelineTray</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WinForms and WPF both define Application, MessageBox and others. Only Tray\TrayIcon.cs
+         touches WinForms, and it has its own explicit using, so drop the global one rather
+         than fully qualifying every WPF type in the rest of the app. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+</Project>

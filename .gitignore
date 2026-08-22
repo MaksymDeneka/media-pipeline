@@ -1,2 +1,4 @@
 tools/parity-baseline.actual.json
 .parity/
+tray-app/bin/
+tray-app/obj/

@@ -1759,7 +1759,18 @@ function Get-MediaDimensions {
     )
 
     $output = Invoke-ExternalTool -Command $script:FFprobePath -Arguments $arguments
-    $probe = (($output | Out-String).Trim() | ConvertFrom-Json)
+    $raw = ($output | Out-String).Trim()
+
+    # A file that is not really media at all makes ffprobe print a diagnostic instead of JSON.
+    # Parsing that as JSON produces a baffling "unexpected character" error that says nothing
+    # about the actual problem, so name the real one.
+    try {
+        $probe = $raw | ConvertFrom-Json
+    }
+    catch {
+        throw "ffprobe could not read '$Path' as media. It may be corrupt, truncated, or not the format its extension claims."
+    }
+
     $frame = @($probe.frames)[0]
     if ($null -eq $frame -or [int]$frame.width -le 0 -or [int]$frame.height -le 0) {
         throw "Unable to read image dimensions from ffprobe for: $Path"
@@ -3453,7 +3464,9 @@ function Invoke-PresetGroupSafely {
         preset    = $Preset.Name
         workspace = $Paths.WorkspaceName
         files     = @($Files | ForEach-Object { $_.Name })
-        bytes     = (($Files | Measure-Object -Property Length -Sum).Sum)
+        # Cast to long: PowerShell sums to a double, which serializes as 20.0 and is not
+        # a valid integer token for strict JSON readers.
+        bytes     = [long](($Files | Measure-Object -Property Length -Sum).Sum)
     }
 
     try {

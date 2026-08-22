@@ -1,0 +1,398 @@
+<Window x:Class="MediaPipelineTray.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:MediaPipelineTray"
+        Title="Media Pipeline"
+        Height="720" Width="1000"
+        MinHeight="420" MinWidth="720"
+        Background="{DynamicResource BgBrush}"
+        TextOptions.TextFormattingMode="Display"
+        UseLayoutRounding="True"
+        FontFamily="Segoe UI Variable Text, Segoe UI"
+        FontSize="13">
+
+    <Window.Resources>
+
+        <local:ZeroToVisibleConverter x:Key="ZeroToVisible" />
+        <local:NonZeroToVisibleConverter x:Key="NonZeroToVisible" />
+        <local:FalseToVisibleConverter x:Key="FalseToVisible" />
+
+        <!-- A progress bar stripped to a track and a fill, with no gloss or animation. -->
+        <Style x:Key="FlatBar" TargetType="ProgressBar">
+            <Setter Property="Background" Value="{DynamicResource TrackBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ProgressBar">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="2">
+                            <Grid>
+                                <Rectangle Name="PART_Track" />
+                                <Rectangle Name="PART_Indicator"
+                                           HorizontalAlignment="Left"
+                                           Fill="{TemplateBinding Foreground}"
+                                           RadiusX="2" RadiusY="2" />
+                            </Grid>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- State is carried by shape and contrast. Colour appears only on Finished and
+             Failed, which is why there is no accent brush anywhere in this file. -->
+
+        <Style x:Key="Caption" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas" />
+            <Setter Property="FontSize" Value="10.5" />
+            <Setter Property="Foreground" Value="{DynamicResource FaintBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <Style x:Key="Mono" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas" />
+            <Setter Property="FontSize" Value="11.5" />
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+        </Style>
+
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="11,4" />
+            <Setter Property="Margin" Value="4,0,0,0" />
+            <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource LineBrush}" />
+            <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Chrome"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4">
+                            <ContentPresenter Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chrome" Property="Background"
+                                        Value="{DynamicResource SunkBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- A section heading plus a hairline that fills the remaining width. -->
+        <ControlTemplate x:Key="SectionHeadTemplate" TargetType="ContentControl">
+            <Grid Margin="16,16,16,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <ContentPresenter VerticalAlignment="Center" />
+                <Border Grid.Column="1" Height="1" Margin="10,0,0,0"
+                        VerticalAlignment="Center"
+                        Background="{DynamicResource LineSoftBrush}" />
+            </Grid>
+        </ControlTemplate>
+
+    </Window.Resources>
+
+    <DockPanel>
+
+        <!-- ===== status bar ===== -->
+        <Border DockPanel.Dock="Top"
+                Background="{DynamicResource Surface2Brush}"
+                BorderBrush="{DynamicResource LineBrush}"
+                BorderThickness="0,0,0,1"
+                Padding="16,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Ellipse x:Name="StatusDot" Width="7" Height="7" Margin="0,0,10,0"
+                         VerticalAlignment="Center"
+                         Fill="{DynamicResource InkBrush}" />
+
+                <TextBlock Grid.Column="1" Text="{Binding StatusText}"
+                           FontWeight="SemiBold" FontSize="12.5"
+                           Foreground="{DynamicResource InkBrush}"
+                           VerticalAlignment="Center" />
+
+                <TextBlock Grid.Column="2" Text="{Binding StatusMeta}"
+                           Style="{StaticResource Mono}"
+                           Margin="12,0,0,0"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis" />
+
+                <StackPanel Grid.Column="3" Orientation="Horizontal">
+                    <Button Content="{Binding PauseAllLabel}" Click="OnPauseAll" />
+                    <Button Content="Restart" Click="OnRestart" />
+                    <Button Content="Logs" Click="OnOpenLogs" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <StackPanel>
+
+                <!-- ===== failures ===== -->
+                <ItemsControl ItemsSource="{Binding Failures}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Margin="16,14,16,0"
+                                    Background="{DynamicResource FailBgBrush}"
+                                    BorderBrush="{DynamicResource FailBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="5"
+                                    Padding="13,10">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <Ellipse Width="7" Height="7" Margin="0,0,10,0"
+                                             VerticalAlignment="Center"
+                                             Fill="{DynamicResource FailBrush}" />
+
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding Lane}"
+                                               FontWeight="SemiBold" FontSize="12.5"
+                                               Foreground="{DynamicResource InkBrush}"
+                                               VerticalAlignment="Center" />
+
+                                    <TextBlock Grid.Column="2"
+                                               Text="{Binding Detail}"
+                                               Style="{StaticResource Mono}"
+                                               Margin="12,0,0,0"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" />
+
+                                    <StackPanel Grid.Column="3" Orientation="Horizontal">
+                                        <Button Content="Open folder" Click="OnOpenFailedFolder" />
+                                        <Button Content="Requeue" Click="OnRequeue" />
+                                        <Button Content="Dismiss" Click="OnDismissFailures" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- ===== running ===== -->
+                <ContentControl Template="{StaticResource SectionHeadTemplate}">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="RUNNING" Style="{StaticResource Caption}" />
+                        <TextBlock Text="{Binding Running.Count}" Style="{StaticResource Caption}"
+                                   Margin="10,0,0,0" Foreground="{DynamicResource MutedBrush}" />
+                    </StackPanel>
+                </ContentControl>
+
+                <ItemsControl ItemsSource="{Binding Running}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="{DynamicResource LineSoftBrush}"
+                                    BorderThickness="0,0,0,1"
+                                    Padding="16,12">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="190" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="120" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Lane}"
+                                                   FontWeight="SemiBold" FontSize="13"
+                                                   Foreground="{DynamicResource InkBrush}" />
+                                        <TextBlock Text="{Binding PresetSummary}"
+                                                   Style="{StaticResource Caption}"
+                                                   FontWeight="Normal" />
+                                    </StackPanel>
+
+                                    <StackPanel Grid.Column="1" Margin="16,0" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Subject}"
+                                                   FontFamily="Cascadia Mono, Consolas"
+                                                   FontSize="12"
+                                                   Foreground="{DynamicResource InkBrush}"
+                                                   TextTrimming="CharacterEllipsis" />
+
+                                        <!-- Full-contrast fill: running is emphatic, not coloured. -->
+                                        <ProgressBar Height="4" Margin="0,7"
+                                                     Minimum="0" Maximum="1"
+                                                     Value="{Binding Fraction, Mode=OneWay}"
+                                                     Style="{StaticResource FlatBar}" />
+
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Counts}" Style="{StaticResource Mono}" />
+                                            <TextBlock Text="{Binding Elapsed}" Style="{StaticResource Mono}"
+                                                       Margin="16,0,0,0" />
+                                        </StackPanel>
+                                    </StackPanel>
+
+                                    <StackPanel Grid.Column="2" VerticalAlignment="Center"
+                                                HorizontalAlignment="Right">
+                                        <TextBlock Text="{Binding Percent}"
+                                                   FontFamily="Cascadia Mono, Consolas"
+                                                   FontSize="18"
+                                                   Foreground="{DynamicResource InkBrush}"
+                                                   HorizontalAlignment="Right" />
+                                        <TextBlock Text="{Binding Remaining}"
+                                                   Style="{StaticResource Caption}"
+                                                   FontWeight="Normal"
+                                                   HorizontalAlignment="Right" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock Text="Nothing running."
+                           Style="{StaticResource Mono}"
+                           Margin="16,4,16,12"
+                           Visibility="{Binding Running.Count,
+                                        Converter={StaticResource ZeroToVisible}}" />
+
+                <!-- ===== queued ===== -->
+                <ContentControl Template="{StaticResource SectionHeadTemplate}">
+                    <TextBlock Text="QUEUED" Style="{StaticResource Caption}" />
+                </ContentControl>
+
+                <ItemsControl ItemsSource="{Binding Queued}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="{DynamicResource LineSoftBrush}"
+                                    BorderThickness="0,0,0,1"
+                                    Padding="16,8">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="190" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <Ellipse Width="7" Height="7" Margin="0,0,10,0"
+                                             VerticalAlignment="Center"
+                                             Fill="{DynamicResource FaintBrush}" />
+
+                                    <TextBlock Grid.Column="1" Text="{Binding Lane}"
+                                               FontSize="12.5"
+                                               Foreground="{DynamicResource InkBrush}"
+                                               VerticalAlignment="Center" />
+
+                                    <TextBlock Grid.Column="2" Text="{Binding Detail}"
+                                               Style="{StaticResource Mono}"
+                                               VerticalAlignment="Center" />
+
+                                    <Button Grid.Column="3" Content="Pause" Click="OnPauseLane" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock Text="Nothing queued."
+                           Style="{StaticResource Mono}"
+                           Margin="16,4,16,12"
+                           Visibility="{Binding Queued.Count,
+                                        Converter={StaticResource ZeroToVisible}}" />
+
+                <!-- ===== finished ===== -->
+                <ContentControl Template="{StaticResource SectionHeadTemplate}">
+                    <TextBlock Text="FINISHED" Style="{StaticResource Caption}" />
+                </ContentControl>
+
+                <ItemsControl ItemsSource="{Binding Finished}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="{DynamicResource LineSoftBrush}"
+                                    BorderThickness="0,0,0,1"
+                                    Padding="16,7">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="190" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- The one place green is spent. -->
+                                    <Ellipse Width="7" Height="7" Margin="0,0,10,0"
+                                             VerticalAlignment="Center"
+                                             Fill="{DynamicResource OkBrush}" />
+
+                                    <TextBlock Grid.Column="1" Text="{Binding Lane}"
+                                               FontSize="12.5"
+                                               Foreground="{DynamicResource InkBrush}"
+                                               VerticalAlignment="Center" />
+
+                                    <TextBlock Grid.Column="2" Text="{Binding Detail}"
+                                               Style="{StaticResource Mono}"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" />
+
+                                    <TextBlock Grid.Column="3" Text="{Binding Outputs}"
+                                               FontFamily="Cascadia Mono, Consolas"
+                                               FontSize="11" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource OkBrush}"
+                                               VerticalAlignment="Center"
+                                               Margin="12,0" />
+
+                                    <TextBlock Grid.Column="4" Text="{Binding When}"
+                                               Style="{StaticResource Caption}"
+                                               FontWeight="Normal"
+                                               VerticalAlignment="Center" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- ===== idle ===== -->
+                <ContentControl Template="{StaticResource SectionHeadTemplate}">
+                    <TextBlock Text="IDLE" Style="{StaticResource Caption}" />
+                </ContentControl>
+
+                <ItemsControl ItemsSource="{Binding Idle}" Margin="16,0,16,20">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Background="{DynamicResource SunkBrush}"
+                                    CornerRadius="3"
+                                    Padding="7,2" Margin="0,0,5,5">
+                                <TextBlock Text="{Binding Lane}"
+                                           FontFamily="Cascadia Mono, Consolas"
+                                           FontSize="10.5"
+                                           Foreground="{DynamicResource FaintBrush}" />
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>
