@@ -13,10 +13,17 @@ public sealed class ShellViewModel : IDisposable
         var events = new EventStreamReader(paths);
         var monitor = new PipelineMonitor(watcher, events);
 
-        Activity = new MainViewModel(monitor, watcher, paths);
+        Activity = new MainViewModel(monitor, watcher, paths, new ArchiveService(paths));
         Presets = new PresetsViewModel(paths, watcher);
         Settings = new SettingsViewModel(paths, watcher);
         Uploads = new UploadsViewModel(new UploadService(paths), paths);
+
+        // Zip-and-upload from Activity hands the finished archive straight to the queue.
+        Activity.QueueUpload = path =>
+        {
+            Uploads.Refresh();
+            Uploads.QueueByPath(path);
+        };
     }
 
     public PipelinePaths Paths { get; }

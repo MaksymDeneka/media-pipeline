@@ -192,6 +192,7 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
 
                                 <!-- The one place green is spent. -->
@@ -219,7 +220,17 @@
                                 <TextBlock Grid.Column="4" Text="{Binding When}"
                                            Style="{StaticResource Caption}"
                                            FontWeight="Normal"
-                                           VerticalAlignment="Center" />
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,10,0" />
+
+                                <!-- Collect this job's output, optionally sending it straight on. -->
+                                <StackPanel Grid.Column="5" Orientation="Horizontal"
+                                            Visibility="{Binding CanArchive, Converter={StaticResource TrueToVisible}}">
+                                    <Button Content="Zip" Padding="9,2" Click="OnZip"
+                                            ToolTip="Collect this job's output into a zip in the workspace sync folder" />
+                                    <Button Content="Zip and upload" Padding="9,2" Click="OnZipAndUpload"
+                                            ToolTip="Zip it, then queue the archive for upload to the remote" />
+                                </StackPanel>
                             </Grid>
                         </Border>
                     </DataTemplate>

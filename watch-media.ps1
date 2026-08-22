@@ -2708,6 +2708,19 @@ function Write-PresetVariantEvent {
         [Parameter(Mandatory = $true)][string]$OutputPath
     )
 
+    # The output is reported relative to the lane's output folder, not as a bare filename, so a
+    # grouped preset's set and batch folders survive. A reader needs that to find the file
+    # again, for example to collect a finished job's output into an archive.
+    $paths = Get-PresetWorkspacePaths -PresetName $Preset.Name -WorkspaceName $script:CurrentWorkspaceName
+    $outputRoot = $paths.OutputDir.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+
+    $relativeOutput = if ($OutputPath.StartsWith($outputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $OutputPath.Substring($outputRoot.Length)
+    }
+    else {
+        [System.IO.Path]::GetFileName($OutputPath)
+    }
+
     Write-PipelineEvent -Name "job.variant" -Data @{
         jobId     = $script:CurrentJobId
         preset    = $Preset.Name
@@ -2715,7 +2728,7 @@ function Write-PresetVariantEvent {
         file      = $File.Name
         n         = $Index
         total     = $Total
-        output    = [System.IO.Path]::GetFileName($OutputPath)
+        output    = $relativeOutput
     }
 }
 

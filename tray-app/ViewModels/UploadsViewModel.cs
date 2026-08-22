@@ -289,6 +289,39 @@ public sealed class UploadsViewModel : Observable
         _ = PumpAsync();
     }
 
+    /// <summary>Queues a file by path, used when something else just created it.</summary>
+    public void QueueByPath(string path)
+    {
+        var existing = Workspaces
+            .SelectMany(workspace => workspace.Files)
+            .FirstOrDefault(file => string.Equals(file.FullPath, path, StringComparison.OrdinalIgnoreCase));
+
+        if (existing is not null)
+        {
+            QueueFile(existing);
+            return;
+        }
+
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        // Not in the listing yet, so build a row for it directly.
+        var info = new FileInfo(path);
+        var workspaceName = Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(path)) ?? "") is { Length: > 0 } name
+            ? name
+            : "general";
+
+        QueueFile(new SyncFileRow
+        {
+            FullPath = info.FullName,
+            Name = info.Name,
+            Length = info.Length,
+            Workspace = workspaceName,
+        });
+    }
+
     public void QueueWorkspace(SyncWorkspaceRow workspace)
     {
         foreach (var file in workspace.Files.Where(f => !f.IsQueued).ToList())

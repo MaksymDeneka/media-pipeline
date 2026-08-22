@@ -107,6 +107,7 @@ public sealed record PipelineEvent
     [JsonPropertyName("n")] public int? Index { get; init; }
     [JsonPropertyName("total")] public int? Total { get; init; }
     [JsonPropertyName("outputs")] public int? Outputs { get; init; }
+    [JsonPropertyName("output")] public string? Output { get; init; }
     // Typed as double because PowerShell serializes sums with a decimal point, and a
     // strict integer binding would reject the whole line.
     [JsonPropertyName("bytes")] public double? Bytes { get; init; }
@@ -126,6 +127,13 @@ public sealed class JobProgress
     public required DateTimeOffset StartedUtc { get; init; }
 
     public IReadOnlyList<string> Files { get; set; } = [];
+
+    /// <summary>
+    /// Output paths relative to the lane's output folder, in the order they were produced.
+    /// Relative rather than bare filenames so a grouped preset's set folders are preserved,
+    /// which is what lets a finished job's output be collected exactly.
+    /// </summary>
+    public List<string> OutputPaths { get; } = [];
     public double Bytes { get; set; }
     public int VariantsDone { get; set; }
     public int VariantsTotal { get; set; }

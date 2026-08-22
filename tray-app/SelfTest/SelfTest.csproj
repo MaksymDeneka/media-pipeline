@@ -17,6 +17,11 @@
     <Compile Include="..\Services\UploadService.cs" Link="UploadService.cs" />
     <Compile Include="..\Services\PipelinePaths.cs" Link="PipelinePaths.cs" />
     <Compile Include="..\Services\IniFile.cs" Link="IniFile.cs" />
+    <Compile Include="..\Services\PipelineMonitor.cs" Link="PipelineMonitor.cs" />
+    <Compile Include="..\Services\EventStreamReader.cs" Link="EventStreamReader.cs" />
+    <Compile Include="..\Services\WatcherService.cs" Link="WatcherService.cs" />
+    <Compile Include="..\Models\PipelineModels.cs" Link="PipelineModels.cs" />
+    <Compile Include="..\Services\ArchiveService.cs" Link="ArchiveService.cs" />
   </ItemGroup>
 
 </Project>

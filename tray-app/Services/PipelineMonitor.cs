@@ -2,6 +2,52 @@ using MediaPipelineTray.Models;
 
 namespace MediaPipelineTray.Services;
 
+/// <summary>
+/// Several files being processed by one preset, shown as a single unit of work.
+///
+/// The watcher runs files concurrently within a lane, so three images in image-bulk are three
+/// jobs. Reporting them as three bars says less than one bar does: what matters is how far
+/// that pipeline has got, not how its work happens to be split up internally.
+/// </summary>
+public sealed class LaneProgress
+{
+    public required string Preset { get; init; }
+    public required string Workspace { get; init; }
+    public required IReadOnlyList<JobProgress> Jobs { get; init; }
+
+    public string Lane => $"{Preset} / {Workspace}";
+
+    public int VariantsDone => Jobs.Sum(job => job.VariantsDone);
+    public int VariantsTotal => Jobs.Sum(job => job.VariantsTotal);
+    public int FileCount => Jobs.Sum(job => Math.Max(1, job.Files.Count));
+
+    /// <summary>The filename while one file is in flight, a count once there are several.</summary>
+    public string Subject => Jobs.Count == 1
+        ? Jobs[0].Subject
+        : $"{FileCount} files";
+
+    public double Fraction => VariantsTotal > 0
+        ? Math.Clamp((double)VariantsDone / VariantsTotal, 0, 1)
+        : 0;
+
+    /// <summary>From when the earliest of these jobs started, so the bar reflects the batch.</summary>
+    public TimeSpan Elapsed => DateTimeOffset.UtcNow - Jobs.Min(job => job.StartedUtc);
+
+    public TimeSpan? Remaining
+    {
+        get
+        {
+            if (VariantsDone <= 0 || VariantsTotal <= 0)
+            {
+                return null;
+            }
+
+            var perVariant = Elapsed.TotalSeconds / VariantsDone;
+            return TimeSpan.FromSeconds((VariantsTotal - VariantsDone) * perVariant);
+        }
+    }
+}
+
 /// <summary>Everything the UI needs for one render, produced by a single tick.</summary>
 public sealed record PipelineSnapshot
 {
@@ -9,7 +55,7 @@ public sealed record PipelineSnapshot
     public bool PausedAll { get; init; }
     public WatcherStatus? Status { get; init; }
 
-    public IReadOnlyList<JobProgress> Running { get; init; } = [];
+    public IReadOnlyList<LaneProgress> Running { get; init; } = [];
     public IReadOnlyList<JobProgress> Finished { get; init; } = [];
     public IReadOnlyList<JobProgress> Failed { get; init; } = [];
     public IReadOnlyList<LaneInfo> Queued { get; init; } = [];
@@ -114,7 +160,19 @@ public sealed class PipelineMonitor
             WatcherRunning = running,
             PausedAll = _watcher.IsPausedAll,
             Status = _lastStatus,
-            Running = [.. _active.Values.OrderBy(job => job.StartedUtc)],
+            // One entry per lane, not per file.
+            Running =
+            [
+                .. _active.Values
+                    .GroupBy(job => (job.Preset, job.Workspace))
+                    .Select(group => new LaneProgress
+                    {
+                        Preset = group.Key.Preset,
+                        Workspace = group.Key.Workspace,
+                        Jobs = [.. group.OrderBy(job => job.StartedUtc)],
+                    })
+                    .OrderBy(lane => lane.Jobs.Min(job => job.StartedUtc))
+            ],
             Finished = [.. _finished],
             Failed = [.. _failed.Values.OrderByDescending(job => job.EndedUtc)],
             Queued = [.. lanes.Where(lane => lane.Queued > 0).OrderByDescending(lane => lane.Queued)],
@@ -212,6 +270,11 @@ public sealed class PipelineMonitor
 
         job.VariantsDone = pipelineEvent.Index ?? job.VariantsDone;
         job.VariantsTotal = pipelineEvent.Total ?? job.VariantsTotal;
+
+        if (pipelineEvent.Output is { Length: > 0 } output)
+        {
+            job.OutputPaths.Add(output);
+        }
 
         if (job.Files.Count == 0 && pipelineEvent.File is not null)
         {

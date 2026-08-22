@@ -28,12 +28,16 @@ public abstract class Observable : INotifyPropertyChanged
     }
 }
 
-/// <summary>One row in the Running list.</summary>
+/// <summary>
+/// One row in the Running list, covering a whole lane rather than a single file. A preset
+/// working through several files shows one bar, because that is the unit of work a person
+/// cares about.
+/// </summary>
 public sealed class JobRow : Observable
 {
-    public JobRow(JobProgress job) => Update(job);
+    public JobRow(LaneProgress lane) => Update(lane);
 
-    public string JobId { get; private set; } = "";
+    public string Key { get; private set; } = "";
     public string Lane { get; private set; } = "";
     public string PresetSummary { get; private set; } = "";
     public string Subject { get; private set; } = "";
@@ -43,30 +47,30 @@ public sealed class JobRow : Observable
     public string Percent { get; private set; } = "";
     public double Fraction { get; private set; }
 
-    public void Update(JobProgress job, string? presetSummary = null)
+    public void Update(LaneProgress lane, string? presetSummary = null)
     {
-        JobId = job.JobId;
-        Lane = job.Lane;
-        Subject = job.Subject;
-        Fraction = job.Fraction;
+        Key = lane.Lane;
+        Lane = lane.Lane;
+        Subject = lane.Subject;
+        Fraction = lane.Fraction;
 
         if (presetSummary is not null)
         {
             PresetSummary = presetSummary;
         }
 
-        Counts = job.VariantsTotal > 0
-            ? $"{job.VariantsDone} / {job.VariantsTotal}"
+        Counts = lane.VariantsTotal > 0
+            ? $"{lane.VariantsDone} / {lane.VariantsTotal}"
             : "starting";
 
-        Percent = job.VariantsTotal > 0
-            ? (job.Fraction * 100).ToString("0", CultureInfo.InvariantCulture) + "%"
+        Percent = lane.VariantsTotal > 0
+            ? (lane.Fraction * 100).ToString("0", CultureInfo.InvariantCulture) + "%"
             : "";
 
-        Elapsed = Format(job.Elapsed) + " elapsed";
-        Remaining = job.Remaining is { } left ? Format(left) + " left" : "";
+        Elapsed = Format(lane.Elapsed) + " elapsed";
+        Remaining = lane.Remaining is { } left ? Format(left) + " left" : "";
 
-        Raise(nameof(JobId));
+        Raise(nameof(Key));
         Raise(nameof(Lane));
         Raise(nameof(PresetSummary));
         Raise(nameof(Subject));
@@ -91,12 +95,37 @@ public sealed class LaneRow
     public bool Paused { get; init; }
 }
 
-public sealed class FinishedRow
+public sealed class FinishedRow : Observable
 {
+    private bool _isBusy;
+
+    public required string JobId { get; init; }
     public required string Lane { get; init; }
     public required string Detail { get; init; }
     public required string Outputs { get; init; }
     public required string When { get; init; }
+
+    public required string Preset { get; init; }
+    public required string Workspace { get; init; }
+    public required string NameHint { get; init; }
+
+    /// <summary>Output paths relative to the lane's output folder.</summary>
+    public required IReadOnlyList<string> OutputPaths { get; init; }
+
+    /// <summary>Zipping is only offered while the output is still recorded.</summary>
+    public bool CanArchive => OutputPaths.Count > 0 && !IsBusy;
+
+    public bool IsBusy
+    {
+        get => _isBusy;
+        set
+        {
+            if (Set(ref _isBusy, value))
+            {
+                Raise(nameof(CanArchive));
+            }
+        }
+    }
 }
 
 public sealed class FailureRow
@@ -117,6 +146,7 @@ public sealed class MainViewModel : Observable, IDisposable
     private readonly PipelineMonitor _monitor;
     private readonly WatcherService _watcher;
     private readonly PipelinePaths _paths;
+    private readonly ArchiveService _archives;
     private readonly DispatcherTimer _timer;
 
     private string _statusText = "Checking";
@@ -125,11 +155,16 @@ public sealed class MainViewModel : Observable, IDisposable
     private bool _pausedAll;
     private ActivityState _trayState = ActivityState.Idle;
 
-    public MainViewModel(PipelineMonitor monitor, WatcherService watcher, PipelinePaths paths)
+    public MainViewModel(
+        PipelineMonitor monitor,
+        WatcherService watcher,
+        PipelinePaths paths,
+        ArchiveService archives)
     {
         _monitor = monitor;
         _watcher = watcher;
         _paths = paths;
+        _archives = archives;
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _timer.Tick += (_, _) => Refresh();
@@ -205,6 +240,37 @@ public sealed class MainViewModel : Observable, IDisposable
 
     public void OpenLogsFolder() => WatcherService.OpenInExplorer(_paths.LogsDirectory);
 
+    /// <summary>
+    /// Hands a finished zip to the upload queue. Set by the shell, because Activity should not
+    /// need to know how uploading works.
+    /// </summary>
+    public Action<string>? QueueUpload { get; set; }
+
+    /// <summary>
+    /// Collects a finished job's output into a zip staged in that workspace's sync folder, and
+    /// optionally queues it for upload straight away.
+    /// </summary>
+    public ArchiveResult ArchiveFinished(FinishedRow row, bool thenUpload)
+    {
+        row.IsBusy = true;
+
+        try
+        {
+            var result = _archives.Create(row.Preset, row.Workspace, row.OutputPaths, row.NameHint);
+
+            if (thenUpload)
+            {
+                QueueUpload?.Invoke(result.Path);
+            }
+
+            return result;
+        }
+        finally
+        {
+            row.IsBusy = false;
+        }
+    }
+
     private void Refresh()
     {
         var snapshot = _monitor.Tick();
@@ -269,25 +335,25 @@ public sealed class MainViewModel : Observable, IDisposable
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var job in snapshot.Running)
+        foreach (var lane in snapshot.Running)
         {
-            seen.Add(job.JobId);
-            var existing = Running.FirstOrDefault(row => row.JobId == job.JobId);
+            seen.Add(lane.Lane);
+            var existing = Running.FirstOrDefault(row => row.Key == lane.Lane);
 
             if (existing is null)
             {
-                Running.Add(new JobRow(job) { });
-                Running[^1].Update(job, SummaryFor(snapshot, job.Preset));
+                Running.Add(new JobRow(lane));
+                Running[^1].Update(lane, SummaryFor(snapshot, lane.Preset));
             }
             else
             {
-                existing.Update(job, SummaryFor(snapshot, job.Preset));
+                existing.Update(lane, SummaryFor(snapshot, lane.Preset));
             }
         }
 
         for (var i = Running.Count - 1; i >= 0; i--)
         {
-            if (!seen.Contains(Running[i].JobId))
+            if (!seen.Contains(Running[i].Key))
             {
                 Running.RemoveAt(i);
             }
@@ -314,19 +380,46 @@ public sealed class MainViewModel : Observable, IDisposable
         }
     }
 
+    /// <summary>
+    /// Rebuilds only what changed. A row must survive a tick, or clicking Zip would lose its
+    /// in-progress state a second later when the list refreshed underneath it.
+    /// </summary>
     private void SyncFinished(PipelineSnapshot snapshot)
     {
-        Finished.Clear();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var job in snapshot.Finished)
         {
-            Finished.Add(new FinishedRow
+            seen.Add(job.JobId);
+
+            if (Finished.Any(row => row.JobId == job.JobId))
             {
+                continue;
+            }
+
+            var row = new FinishedRow
+            {
+                JobId = job.JobId,
                 Lane = job.Lane,
                 Detail = job.Subject,
                 Outputs = job.Outputs == 1 ? "1 output" : $"{job.Outputs} outputs",
                 When = (job.EndedUtc ?? job.StartedUtc).ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture),
-            });
+                Preset = job.Preset,
+                Workspace = job.Workspace,
+                NameHint = job.Files.Count == 1 ? job.Files[0] : "",
+                OutputPaths = [.. job.OutputPaths],
+            };
+
+            // Newest first, matching the order the monitor keeps them in.
+            Finished.Insert(0, row);
+        }
+
+        for (var i = Finished.Count - 1; i >= 0; i--)
+        {
+            if (!seen.Contains(Finished[i].JobId))
+            {
+                Finished.RemoveAt(i);
+            }
         }
     }
 

@@ -45,6 +45,8 @@ internal static class Program
             await AssemblyLeavesNoTempFileOnFailure(root);
             ConfigEditingPreservesTheFile(root);
             ConfigAddsAndRemoves(root);
+            _failures += await LaneAggregationTest.RunAsync();
+            _failures += ArchiveTest.Run();
         }
         finally
         {
