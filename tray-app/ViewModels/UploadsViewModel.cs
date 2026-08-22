@@ -146,8 +146,8 @@ public sealed class UploadsViewModel : Observable
 
     public string Status { get => _status; private set => Set(ref _status, value); }
 
-    /// <summary>The folder uploads are picked from, which is what the sync scripts also use.</summary>
-    public string SyncFolder => Path.Combine(_paths.PipelineRoot, "sync");
+    /// <summary>The staging root. Files live in a workspace folder beneath it.</summary>
+    public string SyncFolder => _paths.SyncRoot;
 
     private void OnProgress(object? sender, UploadJob job)
     {
@@ -179,8 +179,9 @@ public sealed class UploadsViewModel : Observable
 
         return
         [
+            // Candidates live one level down, in their workspace folder.
             .. new DirectoryInfo(SyncFolder)
-                .GetFiles()
+                .GetFiles("*", SearchOption.AllDirectories)
                 .Where(f => f.Length > 0)
                 .Where(f => !f.Name.EndsWith(".chunked.tmp", StringComparison.OrdinalIgnoreCase))
                 .Where(f => !f.Name.EndsWith(".rclone-partial", StringComparison.OrdinalIgnoreCase))

@@ -353,13 +353,13 @@ function New-PipelinePreset {
 # that every preset runs, rather than a destination of its own.
 function Get-BuiltInPresetOverrides {
     return [ordered]@{
-        'default'    = @{ VideoCopies = '8';   ImageCopies = '8'; CopiesAlternate = '7' }
-        'videoclean' = @{ VideoCopies = '1';   ImageCopies = '0' }
-        'imageclean' = @{ VideoCopies = '0';   ImageCopies = '1' }
-        'images'     = @{ VideoCopies = '0';   ImageCopies = '20' }
+        'bulk'    = @{ VideoCopies = '8';   ImageCopies = '8'; CopiesAlternate = '7' }
+        'video-clean' = @{ VideoCopies = '1';   ImageCopies = '0' }
+        'image-clean' = @{ VideoCopies = '0';   ImageCopies = '1' }
+        'image-bulk'     = @{ VideoCopies = '0';   ImageCopies = '20' }
         'sets'       = @{ VideoCopies = '10';  ImageCopies = '10'; Grouping = 'PerSource'; SizeCapMB = '0' }
-        'setbatch'   = @{ VideoCopies = '1';   ImageCopies = '1';  Grouping = 'PerSet'; SetCount = '10'; Batch = 'PerGroup'; SizeCapMB = '0' }
-        'assetstore' = @{ VideoCopies = '1';   ImageCopies = '1';  Grouping = 'PerSet'; SetCount = '15'; Batch = 'PerGroup'; SizeCapMB = '0'; Manifest = 'true'; MinTrimMs = '10'; MaxTrimMs = '40' }
+        'sets-batch'   = @{ VideoCopies = '1';   ImageCopies = '1';  Grouping = 'PerSet'; SetCount = '10'; Batch = 'PerGroup'; SizeCapMB = '0' }
+        'asset-store' = @{ VideoCopies = '1';   ImageCopies = '1';  Grouping = 'PerSet'; SetCount = '15'; Batch = 'PerGroup'; SizeCapMB = '0'; Manifest = 'true'; MinTrimMs = '10'; MaxTrimMs = '40' }
         'long'       = @{ VideoCopies = '3';   ImageCopies = '0';  Segment = 'true'; NvencCq = '28'; AmfQp = '26' }
     }
 }
@@ -403,18 +403,23 @@ function Get-PresetWorkspacePaths {
         [Parameter(Mandatory = $true)][string]$WorkspaceName
     )
 
-    $presetRoot = Join-Path (Join-Path $PipelineRoot $PresetName) $WorkspaceName
-    $archiveRoot = Join-Path (Join-Path $ArchiveRootDir $PresetName) $WorkspaceName
+    # Workspace first, then preset: everything belonging to one client sits together, which is
+    # also how the remote is laid out, so both ends share one mental model.
+    #
+    # Archive lives inside the lane rather than in a parallel tree, so a lane is self-contained
+    # and moving or deleting one takes its history with it.
+    $laneRoot = Join-Path (Join-Path $PipelineRoot $WorkspaceName) $PresetName
 
     return [pscustomobject]@{
         PresetName    = $PresetName
         WorkspaceName = $WorkspaceName
-        InputDir      = Join-Path $presetRoot "input"
-        OutputDir     = Join-Path $presetRoot "output"
-        OriginalDir   = Join-Path $presetRoot "original"
-        FailedDir     = Join-Path $presetRoot "failed"
-        WorkDir       = Join-Path $presetRoot "work"
-        ArchiveDir    = Join-Path $archiveRoot "output"
+        LaneRoot      = $laneRoot
+        InputDir      = Join-Path $laneRoot "input"
+        OutputDir     = Join-Path $laneRoot "output"
+        OriginalDir   = Join-Path $laneRoot "original"
+        FailedDir     = Join-Path $laneRoot "failed"
+        WorkDir       = Join-Path $laneRoot "work"
+        ArchiveDir    = Join-Path $laneRoot "archive"
     }
 }
 
@@ -428,7 +433,6 @@ $ImageCleanRootDir = Join-Path $PipelineRoot "imageclean"
 $SetRootDir = Join-Path $PipelineRoot "sets"
 $SetBatchRootDir = Join-Path $PipelineRoot "setbatch"
 $AssetStoreRootDir = Join-Path $PipelineRoot "assetstore"
-$ArchiveRootDir = Join-Path $PipelineRoot "archive"
 
 
 
@@ -509,8 +513,6 @@ function Initialize-Folders {
     if (-not (Test-Path -LiteralPath $LogsDir)) {
         New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
     }
-
-    Move-LegacyPipelineAssetsToDefaultWorkspace
 
     # Each preset owns one folder tree per workspace. A preset that takes no video or no
     # images still gets the full tree, because its copy counts can change at any time.
@@ -1165,112 +1167,7 @@ function Get-UniqueDestinationPath {
     return $destination
 }
 
-function Move-LegacyDirectoryContents {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$SourceDirectory,
 
-        [Parameter(Mandatory = $true)]
-        [string]$DestinationDirectory,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Label
-    )
-
-    if (-not (Test-Path -LiteralPath $SourceDirectory)) {
-        return 0
-    }
-
-    $sourceFullPath = [System.IO.Path]::GetFullPath($SourceDirectory).TrimEnd('\')
-    $destinationFullPath = [System.IO.Path]::GetFullPath($DestinationDirectory).TrimEnd('\')
-    if ($sourceFullPath.Equals($destinationFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        return 0
-    }
-
-    $items = @(Get-ChildItem -LiteralPath $SourceDirectory -Force -ErrorAction SilentlyContinue)
-    if ($items.Count -eq 0) {
-        return 0
-    }
-
-    if (-not (Test-Path -LiteralPath $DestinationDirectory)) {
-        New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
-    }
-
-    $moved = 0
-    foreach ($item in $items) {
-        if ($item.PSIsContainer -and ($WorkspaceNames -contains $item.Name)) {
-            continue
-        }
-
-        $itemFullPath = [System.IO.Path]::GetFullPath($item.FullName).TrimEnd('\')
-        if ($itemFullPath.Equals($destinationFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-            continue
-        }
-        if ($destinationFullPath.StartsWith($itemFullPath + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-            continue
-        }
-
-        try {
-            $destination = Get-UniqueDestinationPath -Directory $DestinationDirectory -OriginalFileName $item.Name
-            Move-Item -LiteralPath $item.FullName -Destination $destination -Force
-            $moved++
-        }
-        catch {
-            Write-Log "Could not migrate legacy $Label item '$($item.FullName)': $($_.Exception.Message)" "WARN"
-        }
-    }
-
-    if ($moved -gt 0) {
-        Write-Log "Migrated $moved legacy $Label item(s) to $DestinationDirectory."
-    }
-
-    return $moved
-}
-
-# Upgrade path from installs that predate workspaces, where a lane's folders sat directly
-# under <root>\<lane>\ instead of <root>\<lane>\<workspace>\. Everything found is moved into
-# the default workspace. Also handles the oldest layout, where the default lane's folders sat
-# at the pipeline root.
-function Move-LegacyPipelineAssetsToDefaultWorkspace {
-    $pairs = New-Object System.Collections.Generic.List[object]
-
-    $rootPaths = Get-PresetWorkspacePaths -PresetName "default" -WorkspaceName $DefaultWorkspaceName
-    $pairs.Add(@{ Label = "root default input";    Old = (Join-Path $PipelineRoot "input");    New = $rootPaths.InputDir }) | Out-Null
-    $pairs.Add(@{ Label = "root default output";   Old = (Join-Path $PipelineRoot "output");   New = $rootPaths.OutputDir }) | Out-Null
-    $pairs.Add(@{ Label = "root default original"; Old = (Join-Path $PipelineRoot "original"); New = $rootPaths.OriginalDir }) | Out-Null
-    $pairs.Add(@{ Label = "root default failed";   Old = (Join-Path $PipelineRoot "failed");   New = $rootPaths.FailedDir }) | Out-Null
-
-    foreach ($preset in Get-PipelinePresets) {
-        $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $DefaultWorkspaceName
-        $presetRoot = Join-Path $PipelineRoot $preset.Name
-
-        $pairs.Add(@{ Label = "$($preset.Name) input";    Old = (Join-Path $presetRoot "input");    New = $paths.InputDir }) | Out-Null
-        $pairs.Add(@{ Label = "$($preset.Name) output";   Old = (Join-Path $presetRoot "output");   New = $paths.OutputDir }) | Out-Null
-        $pairs.Add(@{ Label = "$($preset.Name) original"; Old = (Join-Path $presetRoot "original"); New = $paths.OriginalDir }) | Out-Null
-        $pairs.Add(@{ Label = "$($preset.Name) failed";   Old = (Join-Path $presetRoot "failed");   New = $paths.FailedDir }) | Out-Null
-
-        $pairs.Add(@{
-            Label = "archive $($preset.Name)"
-            Old   = (Join-Path $ArchiveRootDir $preset.Name)
-            New   = $paths.ArchiveDir
-        }) | Out-Null
-    }
-
-    $pairs.Add(@{
-        Label = "legacy archive output"
-        Old   = (Join-Path $ArchiveRootDir "output")
-        New   = $rootPaths.ArchiveDir
-    }) | Out-Null
-
-    $totalMoved = 0
-    foreach ($pair in $pairs) {
-        $totalMoved += Move-LegacyDirectoryContents -SourceDirectory $pair.Old -DestinationDirectory $pair.New -Label $pair.Label
-    }
-
-    if ($totalMoved -gt 0) {
-        Write-Log "Legacy workspace migration complete: $totalMoved item(s) moved into $DefaultWorkspaceName."
-    }
-}
 
 function Get-OutputArchiveCutoffTime {
     return (Get-Date).AddHours(-1 * $ArchiveAgeHours)
@@ -1421,7 +1318,7 @@ function Get-ArchiveRetentionTargets {
     $targets = New-Object System.Collections.Generic.List[object]
 
     foreach ($preset in Get-PipelinePresets) {
-        if ($preset.Name -eq "images") { continue }
+        if ($preset.Name -eq "image-bulk") { continue }
 
         $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $script:CurrentWorkspaceName
         $targets.Add([pscustomobject]@{
@@ -1433,50 +1330,6 @@ function Get-ArchiveRetentionTargets {
     return $targets.ToArray()
 }
 
-function Get-LegacyArchiveRetentionTargets {
-    return @(
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $ArchiveRootDir "output"
-            Label = "legacy archive output"
-            ExcludedNames = @()
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $ArchiveRootDir "default"
-            Label = "legacy archive default"
-            ExcludedNames = $WorkspaceNames
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $ArchiveRootDir "videoclean"
-            Label = "legacy archive videoclean"
-            ExcludedNames = $WorkspaceNames
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $ArchiveRootDir "convert"
-            Label = "legacy archive convert"
-            ExcludedNames = $WorkspaceNames
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $ArchiveRootDir "long"
-            Label = "legacy archive long"
-            ExcludedNames = $WorkspaceNames
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $ArchiveRootDir "sets"
-            Label = "legacy archive sets"
-            ExcludedNames = $WorkspaceNames
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $ArchiveRootDir "setbatch"
-            Label = "legacy archive setbatch"
-            ExcludedNames = $WorkspaceNames
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $ArchiveRootDir "assetstore"
-            Label = "legacy archive assetstore"
-            ExcludedNames = $WorkspaceNames
-        }
-    )
-}
 
 # Retention sweeps the original, failed and work folders of every preset in the current
 # workspace. The images preset keeps its assets, matching the archive rule above.
@@ -1484,7 +1337,7 @@ function Get-PipelineAssetRetentionTargets {
     $targets = New-Object System.Collections.Generic.List[object]
 
     foreach ($preset in Get-PipelinePresets) {
-        if ($preset.Name -eq "images") { continue }
+        if ($preset.Name -eq "image-bulk") { continue }
 
         $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $script:CurrentWorkspaceName
 
@@ -1501,18 +1354,15 @@ function Get-PipelineAssetRetentionTargets {
 
 # Sync folders sit above the workspace level: <root>\sync and <root>\<preset>\sync. They are
 # written by the upload scripts rather than the watcher, which only ages them out.
+# Uploads stage under <root>\sync\<workspace>, mirroring the remote layout. The watcher does
+# not write these; it only ages them out.
 function Get-SyncRetentionTargets {
     $targets = New-Object System.Collections.Generic.List[object]
 
-    $targets.Add([pscustomobject]@{
-        TargetDirectory = Join-Path $PipelineRoot "sync"
-        Label = "root sync"
-    }) | Out-Null
-
-    foreach ($preset in Get-PipelinePresets) {
+    foreach ($workspaceName in $WorkspaceNames) {
         $targets.Add([pscustomobject]@{
-            TargetDirectory = Join-Path (Join-Path $PipelineRoot $preset.Name) "sync"
-            Label = "$($preset.Name) sync"
+            TargetDirectory = Join-Path (Join-Path $PipelineRoot "sync") $workspaceName
+            Label = "$workspaceName sync"
         }) | Out-Null
     }
 
@@ -1541,10 +1391,6 @@ function Invoke-AssetRetentionCleanup {
     }
 
     if ($script:CurrentWorkspaceName -eq $DefaultWorkspaceName) {
-        foreach ($target in Get-LegacyArchiveRetentionTargets) {
-            [void](Invoke-RetentionCleanup -TargetDirectory $target.TargetDirectory -Label $target.Label -CutoffTime $cutoffTime -ExcludedNames $target.ExcludedNames)
-        }
-
         foreach ($target in Get-SyncRetentionTargets) {
             [void](Invoke-RetentionCleanup -TargetDirectory $target.TargetDirectory -Label $target.Label -CutoffTime $cutoffTime)
         }

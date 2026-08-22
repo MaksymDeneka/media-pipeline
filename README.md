@@ -12,8 +12,8 @@ from its siblings, so no two outputs are byte-identical.
 
 1. Double-click **`Install.bat`** and approve the prompts. It installs FFmpeg, ExifTool and
    PowerShell 7, creates the folders, and starts the watcher at login.
-2. Drop a video or photo into `D:\MediaPipeline\default\LC\input`.
-3. Processed copies appear in `D:\MediaPipeline\default\LC\output` a moment later, and the file
+2. Drop a video or photo into `D:\MediaPipeline\LCulk\input`.
+3. Processed copies appear in `D:\MediaPipeline\LCulk\output` a moment later, and the file
    you dropped moves to `original`.
 
 That is the whole loop. Everything below is about changing what comes out.
@@ -37,7 +37,7 @@ A **preset** is a named recipe with its own drop folder. It decides how many cop
 produces and how they are arranged.
 
 ```text
-D:\MediaPipeline\<preset>\<workspace>\input
+D:\MediaPipeline\<workspace>\<preset>\input
 ```
 
 Copy counts are **separate for video and images**, so one folder can take a mixed batch of clips
@@ -47,14 +47,14 @@ The shipped presets:
 
 | Preset | What it does |
 | --- | --- |
-| `default` | 20 differentiated copies of whatever you drop in |
-| `videoclean` | One cleaned copy per video, images ignored |
-| `imageclean` | One cleaned copy per image, video ignored |
-| `images` | 100 variants from a single photo |
+| `bulk` | 20 differentiated copies of whatever you drop in |
+| `video-clean` | One cleaned copy per video, images ignored |
+| `image-clean` | One cleaned copy per image, video ignored |
+| `image-bulk` | 100 variants from a single photo |
 | `sets` | Every source file gets its own output folder holding its copies |
-| `setbatch` | Treats the whole folder as one batch, produces 10 complete sets |
-| `assetstore` | Like `setbatch`, plus a `manifest.json` describing every file |
-| `long` | Splits long videos into segments, then makes copies of each |
+| `sets-batch` | Treats the whole folder as one batch, produces 10 complete sets |
+| `asset-store` | Like `sets-batch`, plus a `manifest.json` describing every file |
+| `video-long` | Splits long videos into segments, then makes copies of each |
 
 **Delete any preset you do not use.** Add one by copying a block in `config.ini` and renaming it;
 its folders are created on the next restart. If you only ever want "clean this up" and "make me a
@@ -65,7 +65,7 @@ lot of copies", two presets is a perfectly good setup.
 Most of the time this is a one-line edit in `config.ini`:
 
 ```ini
-[preset images]
+[preset image-bulk]
 VideoCopies = 0
 ImageCopies = 100     ; <- change this
 ```
@@ -88,10 +88,10 @@ ImageCopies = 100     ; <- change this
 | `Enabled` | `false` switches a preset off without deleting it. |
 
 Any setting from the `[Video]` or `[Images]` sections can also be set on a preset, and overrides
-the default for that preset only. That is how `long` uses a lower quality than everything else:
+the default for that preset only. That is how `video-long` uses a lower quality than everything else:
 
 ```ini
-[preset long]
+[preset video-long]
 Segment = true
 NvencCq = 28
 ```
@@ -103,7 +103,7 @@ NvencCq = 28
 Workspaces keep different clients or projects apart. Each preset has one folder per workspace:
 
 ```text
-D:\MediaPipeline\default\LC\input
+D:\MediaPipeline\LCulk\input
 D:\MediaPipeline\default\MD\input
 D:\MediaPipeline\default\YL\input
 ```
@@ -115,29 +115,42 @@ mix output.
 
 ## Folder Structure
 
+Workspace first, then preset, so everything belonging to one client sits together. The remote
+is laid out the same way.
+
 ```text
-D:\MediaPipeline\
-  <preset>\
-    <workspace>\
-      input\        <- drop files here
-      output\       <- processed copies appear here
-      original\     <- sources move here after success
-      failed\       <- sources move here if processing fails
-      work\         <- temporary files, segmenting only
-  archive\
-    <preset>\<workspace>\output\
-  logs\
-    media-pipeline-YYYYMMDD.log     <- human-readable log
+D:\MediaPipeline  LC\                      <- workspace
+    video-clean      input\               <- drop files here
+      output\              <- processed copies appear here
+      original\            <- sources move here after success
+      failed\              <- sources move here if processing fails
+      archive\             <- old output is moved here
+      work\                <- temporary files, segmenting only
+    image-bulk\...
+    sets\...
+  MD\...
+  YL\...
+  PL\...
+  general\...
+  sync    LC\                    <- files staged for upload, per workspace
+    MD\...
+  logs    media-pipeline-YYYYMMDD.log     <- human-readable log
     events-YYYYMMDD.jsonl           <- machine-readable event stream
-  status\
-    watcher.json                    <- current state
+  status    watcher.json                    <- current state
   control\                          <- pause and stop flags
 ```
 
-Retention deletes entries from `archive`, `original`, `failed`, `work`, `sync` and `.sync-parts`
-after `AssetRetentionDays`. The `images` preset is excluded, so its assets are kept.
+Retention deletes entries from `archive`, `original`, `failed`, `work`, `sync` and
+`.sync-parts` after `AssetRetentionDays`. The `image-bulk` preset is excluded, so its assets
+are kept.
 
----
+Upgrading from the older preset-first layout:
+
+```bash
+pwsh -File tools\Migrate-FolderLayout.ps1 -WhatIf
+```
+
+It prints exactly what it would move and changes nothing. Re-run without `-WhatIf` to apply.
 
 ## Supported Files
 

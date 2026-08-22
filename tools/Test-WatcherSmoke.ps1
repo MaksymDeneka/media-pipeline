@@ -91,8 +91,8 @@ $watcher = Start-Process -FilePath 'C:\Tools\pwsh\pwsh.exe' `
 Write-Host "   pid $($watcher.Id)"
 
 try {
-    $inputDir = Join-Path $pipelineRoot 'quick\LC\input'
-    $outputDir = Join-Path $pipelineRoot 'quick\LC\output'
+    $inputDir = Join-Path $pipelineRoot 'LC\quick\input'
+    $outputDir = Join-Path $pipelineRoot 'LC\quick\output'
     $statusFile = Join-Path $pipelineRoot 'status\watcher.json'
 
     $deadline = (Get-Date).AddSeconds(30)
@@ -148,7 +148,7 @@ try {
     $produced = @(Get-ChildItem -LiteralPath $outputDir -File -ErrorAction SilentlyContinue)
     Assert-That "produces the expected outputs" ($produced.Count -eq $expected) "got $($produced.Count), wanted $expected"
     Assert-That "image outputs are .jpg" (@($produced | Where-Object { $_.Extension -eq '.JPG' }).Count -eq 2) "extensions: $(($produced.Extension | Sort-Object -Unique) -join ',')"
-    Assert-That "sources moved to original" (@(Get-ChildItem -LiteralPath (Join-Path $pipelineRoot 'quick\LC\original') -File -ErrorAction SilentlyContinue).Count -eq 2) "original is not 2"
+    Assert-That "sources moved to original" (@(Get-ChildItem -LiteralPath (Join-Path $pipelineRoot 'LC\quick\original') -File -ErrorAction SilentlyContinue).Count -eq 2) "original is not 2"
     Assert-That "input drained" (@(Get-ChildItem -LiteralPath $inputDir -File).Count -eq 0) "input not empty"
 
     Write-Step "Event stream"

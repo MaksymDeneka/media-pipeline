@@ -36,14 +36,27 @@ public sealed class PipelinePaths
     public string LogFileFor(DateTimeOffset day) =>
         Path.Combine(LogsDirectory, $"media-pipeline-{day.ToLocalTime():yyyyMMdd}.log");
 
+    /// <summary>
+    /// Workspace first, then preset, matching watch-media.ps1's Get-PresetWorkspacePaths and
+    /// the layout on the remote. Everything for one client sits together.
+    /// </summary>
+    public string LaneDirectory(string preset, string workspace) =>
+        Path.Combine(PipelineRoot, workspace, preset);
+
     public string InputDirectory(string preset, string workspace) =>
-        Path.Combine(PipelineRoot, preset, workspace, "input");
+        Path.Combine(LaneDirectory(preset, workspace), "input");
 
     public string OutputDirectory(string preset, string workspace) =>
-        Path.Combine(PipelineRoot, preset, workspace, "output");
+        Path.Combine(LaneDirectory(preset, workspace), "output");
 
     public string FailedDirectory(string preset, string workspace) =>
-        Path.Combine(PipelineRoot, preset, workspace, "failed");
+        Path.Combine(LaneDirectory(preset, workspace), "failed");
+
+    /// <summary>Uploads stage per workspace, mirroring the remote.</summary>
+    public string SyncDirectory(string workspace) =>
+        Path.Combine(PipelineRoot, "sync", workspace);
+
+    public string SyncRoot => Path.Combine(PipelineRoot, "sync");
 
     /// <summary>
     /// The watcher's single-instance mutex for this root. Opening it is the cheapest possible

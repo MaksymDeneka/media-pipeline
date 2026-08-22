@@ -302,7 +302,9 @@ public sealed class PresetsViewModel : ConfigEditorViewModel
             {
                 Name = name,
                 Groups = groups,
-                FolderPath = Path.Combine(Paths.PipelineRoot, name),
+                // A preset now spans every workspace, so there is no single folder to name.
+                // Show the pattern rather than a path that does not exist.
+                FolderPath = Path.Combine(Paths.PipelineRoot, "<workspace>", name),
             });
         }
 

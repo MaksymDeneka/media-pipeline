@@ -1,7 +1,7 @@
 {
-  "capturedAtUtc": "2026-08-22T09:16:53.8593687Z",
+  "capturedAtUtc": "2026-08-22T12:31:01.1053825Z",
   "scriptPath": "C:\\Users\\admin\\AppData\\Local\\Temp\\mp-parity\\app\\watch-media.ps1",
-  "scriptSha256": "720B4A794F2D624E068B572BA0FF5784AB169041AFA2995AA473255E996E3308",
+  "scriptSha256": "E8FCADC906AA10363E7F422A5A39B208AAE975573B40B54296975A6D3D5FA7C1",
   "scenarios": {
     "default": {
       "error": null,

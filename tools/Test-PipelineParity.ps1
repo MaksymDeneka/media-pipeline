@@ -190,20 +190,20 @@ AssetRetentionDays = 0
 
 ; Small copy counts keep a full run to a couple of minutes while still exercising every
 ; loop. The default preset keeps two different counts so its alternation stays observable.
-[preset default]
+[preset bulk]
 VideoCopies = 2
 ImageCopies = 2
 CopiesAlternate = 3
 
-[preset videoclean]
+[preset video-clean]
 VideoCopies = 1
 ImageCopies = 0
 
-[preset imageclean]
+[preset image-clean]
 VideoCopies = 0
 ImageCopies = 1
 
-[preset images]
+[preset image-bulk]
 VideoCopies = 0
 ImageCopies = 3
 
@@ -213,7 +213,7 @@ ImageCopies = 2
 Grouping = PerSource
 SizeCapMB = 0
 
-[preset setbatch]
+[preset sets-batch]
 VideoCopies = 1
 ImageCopies = 1
 Grouping = PerSet
@@ -221,7 +221,7 @@ SetCount = 2
 Batch = PerGroup
 SizeCapMB = 0
 
-[preset assetstore]
+[preset asset-store]
 VideoCopies = 1
 ImageCopies = 1
 Grouping = PerSet
@@ -232,7 +232,7 @@ Manifest = true
 MinTrimMs = 10
 MaxTrimMs = 40
 
-[preset long]
+[preset video-long]
 VideoCopies = 2
 ImageCopies = 0
 Segment = true
@@ -395,16 +395,16 @@ function Get-TreeFingerprint {
 # the way the watcher loop does, then fingerprints output, original and failed.
 function Get-Scenarios {
     return @(
-        @{ Name = 'default';    Preset = 'default';    Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 1) + @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) } }
-        @{ Name = 'videoclean'; Preset = 'videoclean'; Workspace = 'LC'; Stage = { Get-CorpusFiles -Kind 'mp4' -Count 1 } }
-        @{ Name = 'images';     Preset = 'images';     Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'png' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) } }
-        @{ Name = 'imageclean'; Preset = 'imageclean'; Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'png' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) } }
+        @{ Name = 'default';    Preset = 'bulk';    Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 1) + @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) } }
+        @{ Name = 'videoclean'; Preset = 'video-clean'; Workspace = 'LC'; Stage = { Get-CorpusFiles -Kind 'mp4' -Count 1 } }
+        @{ Name = 'images';     Preset = 'image-bulk';     Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'png' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) } }
+        @{ Name = 'imageclean'; Preset = 'image-clean'; Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'jpg' -Count 1) + @(Get-CorpusFiles -Kind 'png' -Count 1) + @(Get-CorpusFiles -Kind 'heic' -Count 1) } }
         @{ Name = 'sets';       Preset = 'sets';       Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 1) + @(Get-CorpusFiles -Kind 'jpg' -Count 1) } }
-        @{ Name = 'setbatch';   Preset = 'setbatch';   Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 2) + @(Get-CorpusFiles -Kind 'jpg' -Count 2) } }
-        @{ Name = 'assetstore'; Preset = 'assetstore'; Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 2) + @(Get-CorpusFiles -Kind 'jpg' -Count 2) } }
-        @{ Name = 'long';       Preset = 'long';       Workspace = 'LC'; Stage = { Get-CorpusFiles -Kind 'mp4' -Count 1 } }
+        @{ Name = 'setbatch';   Preset = 'sets-batch';   Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 2) + @(Get-CorpusFiles -Kind 'jpg' -Count 2) } }
+        @{ Name = 'assetstore'; Preset = 'asset-store'; Workspace = 'LC'; Stage = { @(Get-CorpusFiles -Kind 'mp4' -Count 2) + @(Get-CorpusFiles -Kind 'jpg' -Count 2) } }
+        @{ Name = 'long';       Preset = 'video-long';       Workspace = 'LC'; Stage = { Get-CorpusFiles -Kind 'mp4' -Count 1 } }
         # A .mov no longer needs a lane of its own: any preset that takes video normalizes it.
-        @{ Name = 'mov-input';  Preset = 'videoclean'; Workspace = 'MD'; Stage = { Get-CorpusFiles -Kind 'mov' -Count 1 } }
+        @{ Name = 'mov-input';  Preset = 'video-clean'; Workspace = 'MD'; Stage = { Get-CorpusFiles -Kind 'mov' -Count 1 } }
     )
 }
 

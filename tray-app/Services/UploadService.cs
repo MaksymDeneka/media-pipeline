@@ -83,6 +83,18 @@ public sealed class UploadJob
     public required UploadTarget Target { get; init; }
 
     public string FileName => Path.GetFileName(SourcePath);
+
+    /// <summary>
+    /// Taken from the staging folder: a file in sync\LC belongs to LC. The remote is split by
+    /// workspace and not by preset, so this is the only routing an upload needs.
+    /// </summary>
+    public string Workspace => Path.GetFileName(Path.GetDirectoryName(SourcePath) ?? "") is { Length: > 0 } name
+        ? name
+        : "general";
+
+    /// <summary>Where this file lands on the remote, inside its workspace folder.</summary>
+    public string RemoteWorkspaceDirectory =>
+        Path.Combine(Target.RemoteDirectory, Workspace);
     public long TotalBytes { get; set; }
     public List<ChunkProgress> Chunks { get; } = [];
     public UploadPhase Phase { get; set; } = UploadPhase.Queued;
@@ -210,7 +222,7 @@ public sealed class UploadService
             fileName = job.FileName,
             expectedLength = job.TotalBytes,
             chunkCount = job.Chunks.Count,
-            remoteDirectory = job.Target.RemoteDirectory,
+            remoteDirectory = job.RemoteWorkspaceDirectory,
             remotePartsDirectory = Path.Combine(job.Target.RemotePartsRoot, job.FileName + ".parts"),
             parts = job.Chunks.Select(c => new { name = c.FileName, length = c.Length, sha256 = c.Sha256 }),
         };
