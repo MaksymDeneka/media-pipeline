@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>UploadSelfTest</AssemblyName>
+    <RootNamespace>MediaPipelineTray.SelfTest</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Link the chunking and assembly source rather than referencing the WPF executable, so
+         the test needs no desktop stack and can run headless. -->
+    <Compile Include="..\Services\FileChunker.cs" Link="FileChunker.cs" />
+    <Compile Include="..\Services\UploadService.cs" Link="UploadService.cs" />
+    <Compile Include="..\Services\PipelinePaths.cs" Link="PipelinePaths.cs" />
+    <Compile Include="..\Services\IniFile.cs" Link="IniFile.cs" />
+  </ItemGroup>
+
+</Project>

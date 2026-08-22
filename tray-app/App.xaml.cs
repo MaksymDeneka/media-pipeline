@@ -9,6 +9,7 @@ namespace MediaPipelineTray;
 public partial class App : Application
 {
     private TrayIcon? _tray;
+    private ShellViewModel? _shell;
     private MainWindow? _window;
     private MainViewModel? _viewModel;
     private WatcherService? _watcher;
@@ -23,20 +24,18 @@ public partial class App : Application
         var paths = PipelinePaths.Discover();
         _watcher = new WatcherService(paths);
 
-        var events = new EventStreamReader(paths);
-        var monitor = new PipelineMonitor(_watcher, events);
-
-        _viewModel = new MainViewModel(monitor, _watcher, paths);
+        _shell = new ShellViewModel(paths, _watcher);
+        _viewModel = _shell.Activity;
         _viewModel.TrayStateChanged += OnTrayStateChanged;
 
-        _window = new MainWindow(_viewModel, _watcher);
+        _window = new MainWindow(_shell);
 
         _tray = new TrayIcon();
         _tray.OpenRequested += (_, _) => ShowWindow();
         _tray.PauseRequested += (_, _) => _viewModel.TogglePauseAll();
         _tray.QuitRequested += (_, _) => Quit();
 
-        _viewModel.Start();
+        _shell.Start();
         RefreshTray();
 
         // Launching straight to the tray would leave a first-time user with no idea the app
@@ -117,7 +116,7 @@ public partial class App : Application
             _window.Close();
         }
 
-        _viewModel?.Dispose();
+        _shell?.Dispose();
         _tray?.Dispose();
 
         Shutdown();
@@ -125,7 +124,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        _viewModel?.Dispose();
+        _shell?.Dispose();
         _tray?.Dispose();
         base.OnExit(e);
     }

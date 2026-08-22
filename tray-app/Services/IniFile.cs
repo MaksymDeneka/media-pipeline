@@ -210,6 +210,99 @@ public sealed class IniFile
         }
     }
 
+    /// <summary>
+    /// Removes a key from one preset, which makes that option inherit the global default again.
+    /// Any comment lines directly above it go too, since they described the removed setting.
+    /// </summary>
+    public void RemoveKey(string key, string preset)
+    {
+        var inTargetSection = false;
+
+        for (var i = 0; i < _lines.Count; i++)
+        {
+            if (TryReadHeader(_lines[i], out var name))
+            {
+                inTargetSection = string.Equals(name, preset, StringComparison.OrdinalIgnoreCase);
+                continue;
+            }
+
+            if (!inTargetSection)
+            {
+                continue;
+            }
+
+            if (TryReadPair(_lines[i], out var existingKey, out _) &&
+                existingKey.Equals(key, StringComparison.OrdinalIgnoreCase))
+            {
+                var first = i;
+                while (first > 0 && _lines[first - 1].TrimStart().StartsWith(';'))
+                {
+                    first--;
+                }
+
+                _lines.RemoveRange(first, i - first + 1);
+                return;
+            }
+        }
+    }
+
+    /// <summary>Removes an entire preset section, including its heading and comments.</summary>
+    public void RemovePreset(string preset)
+    {
+        var start = -1;
+        var end = _lines.Count;
+
+        for (var i = 0; i < _lines.Count; i++)
+        {
+            if (!TryReadHeader(_lines[i], out var name))
+            {
+                continue;
+            }
+
+            if (start >= 0)
+            {
+                end = i;
+                break;
+            }
+
+            if (string.Equals(name, preset, StringComparison.OrdinalIgnoreCase))
+            {
+                start = i;
+
+                // Take the comment block introducing the section with it.
+                while (start > 0 && _lines[start - 1].TrimStart().StartsWith(';'))
+                {
+                    start--;
+                }
+            }
+        }
+
+        if (start < 0)
+        {
+            return;
+        }
+
+        _lines.RemoveRange(start, end - start);
+    }
+
+    public bool HasPreset(string preset) => ReadPresets().ContainsKey(preset);
+
+    /// <summary>Appends a new preset section. Callers then Set its options.</summary>
+    public void AddPreset(string preset)
+    {
+        if (HasPreset(preset))
+        {
+            return;
+        }
+
+        if (_lines.Count > 0 && _lines[^1].Trim().Length > 0)
+        {
+            _lines.Add("");
+        }
+
+        _lines.Add($"[preset {preset}]");
+    }
+
     /// <summary>Replaces the value on an existing line, keeping indentation and any comment.</summary>
     private static string RewriteValue(string line, string value)
     {
