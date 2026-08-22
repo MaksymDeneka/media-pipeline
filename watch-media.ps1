@@ -2633,6 +2633,35 @@ function Start-OutputRecompressBatch {
 $script:WatcherStartedUtc = (Get-Date).ToUniversalTime().ToString('o')
 $script:LaneSnapshot = New-Object 'System.Collections.Specialized.OrderedDictionary'
 
+# The name of the single-instance mutex for a given pipeline root.
+#
+# The default root keeps the original unqualified name, so an existing installation and any
+# tooling that probes for it are unaffected. Any other root gets a name derived from its
+# path, which lets a second root run alongside without the two fighting over one lock.
+#
+# A UI can use this to answer "is the watcher running" for free, with Mutex.OpenExisting,
+# instead of scanning the process list.
+function Get-WatcherMutexName {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $normalized = $Root.TrimEnd('\', '/').ToLowerInvariant()
+    if ($normalized -eq 'd:\mediapipeline') {
+        return "Global\MediaPipelineWatcher"
+    }
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($normalized)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+
+    try {
+        $hash = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').Substring(0, 16)
+    }
+    finally {
+        $sha.Dispose()
+    }
+
+    return "Global\MediaPipelineWatcher_$hash"
+}
+
 function Get-ControlDirectory {
     return (Join-Path $PipelineRoot "control")
 }
@@ -3651,7 +3680,11 @@ if ($AsLibrary) { return }
 
 try {
     $createdNew = $false
-    $script:InstanceMutex = New-Object System.Threading.Mutex($true, "Global\MediaPipelineWatcher", [ref]$createdNew)
+    # The single-instance lock is scoped to the pipeline root, so one watcher per root rather
+    # than one per machine. Two roots can then run side by side, which is what makes it
+    # possible to exercise a sandbox watcher without stopping the real one.
+    $script:InstanceMutexName = Get-WatcherMutexName -Root $PipelineRoot
+    $script:InstanceMutex = New-Object System.Threading.Mutex($true, $script:InstanceMutexName, [ref]$createdNew)
     if (-not $createdNew) {
         Initialize-Folders
         Write-Log "Another watcher instance is already running. Exiting this duplicate process." "WARN"
