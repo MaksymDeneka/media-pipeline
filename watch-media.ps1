@@ -17,19 +17,42 @@ $ErrorActionPreference = "Stop"
 # Reads a simple key=value INI file (lines starting with # or ; are comments,
 # [section] headers are ignored). Returns a case-insensitive hashtable of raw
 # string values. Returns an empty table if the file is missing or unreadable.
-function Read-IniSettings {
+# Parses config.ini into global settings plus any [preset <name>] sections.
+#
+# Ordinary section headers stay decorative: their keys land in the flat global table, which
+# is how every setting behaved before presets existed. A [preset <name>] header instead
+# collects the keys that follow it under that preset, so a preset can override any global.
+function Read-IniDocument {
     param([string]$Path)
 
-    $settings = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
+    $globals = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
+    $presets = New-Object 'System.Collections.Specialized.OrderedDictionary' ([System.StringComparer]::OrdinalIgnoreCase)
+
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
-        return $settings
+        return [pscustomobject]@{ Globals = $globals; Presets = $presets }
     }
 
     try {
+        $currentPreset = $null
+
         foreach ($rawLine in (Get-Content -LiteralPath $Path -ErrorAction Stop)) {
             $line = $rawLine.Trim()
             if ($line.Length -eq 0) { continue }
-            if ($line.StartsWith('#') -or $line.StartsWith(';') -or $line.StartsWith('[')) { continue }
+            if ($line.StartsWith('#') -or $line.StartsWith(';')) { continue }
+
+            if ($line.StartsWith('[')) {
+                $header = $line.TrimStart('[').TrimEnd(']').Trim()
+                if ($header -match '^preset\s+(.+)$') {
+                    $currentPreset = $matches[1].Trim()
+                    if (-not $presets.Contains($currentPreset)) {
+                        $presets[$currentPreset] = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
+                    }
+                }
+                else {
+                    $currentPreset = $null
+                }
+                continue
+            }
 
             $eq = $line.IndexOf('=')
             if ($eq -lt 1) { continue }
@@ -45,17 +68,57 @@ function Read-IniSettings {
                 # followed by ; or #, e.g.  Crf = 20   ; default: 24
                 $value = ($value -replace '\s+[;#].*$', '').Trim()
             }
-            if ($key.Length -gt 0) { $settings[$key] = $value }
+
+            if ($key.Length -eq 0) { continue }
+
+            if ($currentPreset) {
+                $presets[$currentPreset][$key] = $value
+            }
+            else {
+                $globals[$key] = $value
+            }
         }
     }
     catch {
         # A malformed config file must never stop the watcher; fall back to defaults.
     }
 
-    return $settings
+    return [pscustomobject]@{ Globals = $globals; Presets = $presets }
 }
 
-# Returns the config.ini value for $Key coerced to the type of $Default, or
+# Coerces a raw config string to the type of $Default, returning $Default when the value is
+# missing, blank, or cannot be parsed.
+function ConvertTo-SettingValue {
+    param(
+        [string]$Raw,
+        [Parameter(Mandatory = $true)]$Default
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return $Default }
+    $trimmed = $Raw.Trim()
+
+    try {
+        if ($Default -is [bool]) {
+            if ($trimmed -match '^(true|1|yes|on)$') { return $true }
+            if ($trimmed -match '^(false|0|no|off)$') { return $false }
+            return $Default
+        }
+        elseif ($Default -is [int]) {
+            return [int]::Parse($trimmed, [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        elseif ($Default -is [double]) {
+            return [double]::Parse($trimmed, [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        else {
+            return $trimmed
+        }
+    }
+    catch {
+        return $Default
+    }
+}
+
+# Returns the config.ini global value for $Key coerced to the type of $Default, or
 # $Default when the key is missing, blank, or cannot be parsed.
 function Get-Setting {
     param(
@@ -64,29 +127,7 @@ function Get-Setting {
     )
 
     if (-not $script:ConfigSettings.ContainsKey($Key)) { return $Default }
-    $raw = [string]$script:ConfigSettings[$Key]
-    if ([string]::IsNullOrWhiteSpace($raw)) { return $Default }
-    $raw = $raw.Trim()
-
-    try {
-        if ($Default -is [bool]) {
-            if ($raw -match '^(true|1|yes|on)$') { return $true }
-            if ($raw -match '^(false|0|no|off)$') { return $false }
-            return $Default
-        }
-        elseif ($Default -is [int]) {
-            return [int]::Parse($raw, [System.Globalization.CultureInfo]::InvariantCulture)
-        }
-        elseif ($Default -is [double]) {
-            return [double]::Parse($raw, [System.Globalization.CultureInfo]::InvariantCulture)
-        }
-        else {
-            return $raw
-        }
-    }
-    catch {
-        return $Default
-    }
+    return ConvertTo-SettingValue -Raw ([string]$script:ConfigSettings[$Key]) -Default $Default
 }
 
 # Locate config.ini next to this script (works both when run with -File and when
@@ -98,7 +139,9 @@ if ($PSScriptRoot) {
 elseif ($PSCommandPath) {
     $script:ConfigPath = Join-Path (Split-Path -Parent $PSCommandPath) "config.ini"
 }
-$script:ConfigSettings = Read-IniSettings -Path $script:ConfigPath
+$script:ConfigDocument = Read-IniDocument -Path $script:ConfigPath
+$script:ConfigSettings = $script:ConfigDocument.Globals
+$script:ConfigPresetSections = $script:ConfigDocument.Presets
 
 # --- Tunable scalar settings (loaded from config.ini, with built-in defaults) ---
 $PipelineRoot = Get-Setting 'PipelineRoot' 'D:\MediaPipeline'
@@ -180,6 +223,245 @@ $AssetStoreManifestSchema = Get-Setting 'AssetStoreManifestSchema' 'heatup.asset
 # Existing pre-workspace assets are migrated into LC.
 $WorkspaceNames = @("LC", "MD", "YL", "PL", "general")
 $DefaultWorkspaceName = "LC"
+
+# ---------------------------------------------------------------------------
+# Presets
+# ---------------------------------------------------------------------------
+#
+# A preset is a named bundle of processing options, and it owns one folder tree per
+# workspace: <PipelineRoot>\<preset>\<workspace>\{input,output,original,failed}.
+#
+# The nine hardcoded pipelines this replaces were one pipeline with different orchestration.
+# What actually varied between them is exactly the option set below: how many copies per
+# media type, how output is grouped, whether a whole folder is treated as one batch, whether
+# long videos are split, and whether a manifest is written.
+#
+# Every option falls back to the matching global setting, so a preset section usually needs
+# only the two or three values that differ.
+
+$script:PresetGroupingValues = @('Flat', 'PerSource', 'PerSet')
+$script:PresetBatchValues = @('PerFile', 'PerGroup')
+$script:PresetFailureValues = @('PreservePartial', 'DeleteFiles', 'DeleteContainer')
+$script:PresetParallelValues = @('OverFiles', 'OverVariants', 'Sequential')
+
+# Returns a preset's override for $Key coerced to the type of $GlobalValue, or $GlobalValue
+# when the preset does not override it. Passing the already-resolved global as the fallback
+# keeps preset defaults from drifting away from the global defaults.
+function Get-PresetValue {
+    param(
+        [hashtable]$Overrides,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)]$GlobalValue
+    )
+
+    if ($Overrides -and $Overrides.ContainsKey($Key)) {
+        return ConvertTo-SettingValue -Raw ([string]$Overrides[$Key]) -Default $GlobalValue
+    }
+
+    return $GlobalValue
+}
+
+# Same as Get-PresetValue for options that accept only a fixed set of words. An unrecognized
+# value logs a warning and falls back rather than failing the whole watcher.
+function Get-PresetChoice {
+    param(
+        [hashtable]$Overrides,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][string]$Default,
+        [Parameter(Mandatory = $true)][string[]]$Allowed,
+        [Parameter(Mandatory = $true)][string]$PresetName
+    )
+
+    if (-not $Overrides -or -not $Overrides.ContainsKey($Key)) { return $Default }
+
+    $raw = ([string]$Overrides[$Key]).Trim()
+    $match = @($Allowed | Where-Object { $_ -eq $raw })[0]
+    if ($match) { return $match }
+
+    Write-Log "Preset '$PresetName': '$Key = $raw' is not one of $($Allowed -join ', '). Using $Default." "WARN"
+    return $Default
+}
+
+function New-PipelinePreset {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [hashtable]$Overrides
+    )
+
+    $grouping = Get-PresetChoice -Overrides $Overrides -Key 'Grouping' -Default 'Flat' -Allowed $script:PresetGroupingValues -PresetName $Name
+    $batch = Get-PresetChoice -Overrides $Overrides -Key 'Batch' -Default 'PerFile' -Allowed $script:PresetBatchValues -PresetName $Name
+
+    # A grouped preset owns its output folder and can safely delete it after a failure.
+    # A flat preset shares one folder with every other file, so it keeps what it produced.
+    $defaultFailure = if ($grouping -eq 'Flat') { 'PreservePartial' } else { 'DeleteContainer' }
+
+    return [pscustomobject]@{
+        Name                    = $Name
+        Enabled                 = Get-PresetValue -Overrides $Overrides -Key 'Enabled' -GlobalValue $true
+
+        # Copy counts are per media type, which is what lets one inbox take a mixed folder
+        # of videos and photos. Zero disables that media type for this preset.
+        VideoCopies             = Get-PresetValue -Overrides $Overrides -Key 'VideoCopies' -GlobalValue 1
+        ImageCopies             = Get-PresetValue -Overrides $Overrides -Key 'ImageCopies' -GlobalValue 1
+        # When set, consecutive files alternate between the copy count above and this one,
+        # so a run of files does not all produce the same number of outputs.
+        CopiesAlternate         = Get-PresetValue -Overrides $Overrides -Key 'CopiesAlternate' -GlobalValue 0
+
+        Grouping                = $grouping
+        SetCount                = Get-PresetValue -Overrides $Overrides -Key 'SetCount' -GlobalValue 1
+        Batch                   = $batch
+
+        Segment                 = Get-PresetValue -Overrides $Overrides -Key 'Segment' -GlobalValue $false
+        SegmentTargetSeconds    = Get-PresetValue -Overrides $Overrides -Key 'SegmentTargetSeconds' -GlobalValue $LongSegmentTargetSeconds
+        SegmentMinSeconds       = Get-PresetValue -Overrides $Overrides -Key 'SegmentMinSeconds' -GlobalValue $LongSegmentMinSeconds
+
+        Manifest                = Get-PresetValue -Overrides $Overrides -Key 'Manifest' -GlobalValue $false
+        ManifestSchema          = Get-PresetValue -Overrides $Overrides -Key 'ManifestSchema' -GlobalValue $AssetStoreManifestSchema
+
+        # Converts .mov and .heic sources to workable formats before processing.
+        Normalize               = Get-PresetValue -Overrides $Overrides -Key 'Normalize' -GlobalValue $true
+
+        OnFailure               = Get-PresetChoice -Overrides $Overrides -Key 'OnFailure' -Default $defaultFailure -Allowed $script:PresetFailureValues -PresetName $Name
+        Parallel                = Get-PresetChoice -Overrides $Overrides -Key 'Parallel' -Default 'OverFiles' -Allowed $script:PresetParallelValues -PresetName $Name
+
+        MaxWidth                = Get-PresetValue -Overrides $Overrides -Key 'MaxWidth' -GlobalValue $MaxWidth
+        AudioBitrate            = Get-PresetValue -Overrides $Overrides -Key 'AudioBitrate' -GlobalValue $AudioBitrate
+        # Zero means no bitrate ceiling on the first encode and no size-cap retry pass.
+        SizeCapMB               = Get-PresetValue -Overrides $Overrides -Key 'SizeCapMB' -GlobalValue $DefaultMaxOutputSizeMB
+        SizeCapFallbackMaxWidth = Get-PresetValue -Overrides $Overrides -Key 'SizeCapFallbackMaxWidth' -GlobalValue $DefaultSizeCapFallbackMaxWidth
+        MaxrateScale            = Get-PresetValue -Overrides $Overrides -Key 'MaxrateScale' -GlobalValue $DefaultNvencPrimaryMaxrateScale
+        NvencCq                 = Get-PresetValue -Overrides $Overrides -Key 'NvencCq' -GlobalValue $NvencCq
+        AmfQp                   = Get-PresetValue -Overrides $Overrides -Key 'AmfQp' -GlobalValue $AmfQp
+        Crf                     = Get-PresetValue -Overrides $Overrides -Key 'Crf' -GlobalValue $Crf
+
+        MinTrimMs               = Get-PresetValue -Overrides $Overrides -Key 'MinTrimMs' -GlobalValue $MinTrimMs
+        MaxTrimMs               = Get-PresetValue -Overrides $Overrides -Key 'MaxTrimMs' -GlobalValue $MaxTrimMs
+
+        CropMinPermille         = Get-PresetValue -Overrides $Overrides -Key 'CropMinPermille' -GlobalValue $ImageBulkCropMinPermille
+        CropMaxPermille         = Get-PresetValue -Overrides $Overrides -Key 'CropMaxPermille' -GlobalValue $ImageBulkCropMaxPermille
+        JpegQuality             = Get-PresetValue -Overrides $Overrides -Key 'JpegQuality' -GlobalValue $ImageBulkNativeJpegQuality
+        ConvertedJpegQuality    = Get-PresetValue -Overrides $Overrides -Key 'ConvertedJpegQuality' -GlobalValue $ImageBulkConvertedJpegQuality
+        PngCompressionLevel     = Get-PresetValue -Overrides $Overrides -Key 'PngCompressionLevel' -GlobalValue $ImageBulkPngCompressionLevel
+    }
+}
+
+# The lane layout that shipped before presets existed, expressed as preset overrides. When
+# config.ini declares no [preset ...] sections these are synthesized, so an existing install
+# keeps working and its folders keep their meaning.
+#
+# The old "convert" lane is deliberately absent: format conversion is now the Normalize stage
+# that every preset runs, rather than a destination of its own.
+function Get-BuiltInPresetOverrides {
+    return [ordered]@{
+        'default' = @{
+            VideoCopies     = [string]$DefaultPipelineMinCopiesPerFile
+            ImageCopies     = [string]$DefaultPipelineMinCopiesPerFile
+            CopiesAlternate = [string]$DefaultPipelineAlternatingCopiesPerFile
+        }
+        'videoclean' = @{
+            VideoCopies = '1'
+            ImageCopies = '0'
+        }
+        'imageclean' = @{
+            VideoCopies         = '0'
+            ImageCopies         = '1'
+            PngCompressionLevel = [string]$ImageCleanPngCompressionLevel
+        }
+        'images' = @{
+            VideoCopies = '0'
+            ImageCopies = [string]$ImageBulkCopiesPerFile
+        }
+        'sets' = @{
+            VideoCopies = [string]$SetCopiesPerFile
+            ImageCopies = [string]$SetCopiesPerFile
+            Grouping    = 'PerSource'
+            SizeCapMB   = '0'
+        }
+        'setbatch' = @{
+            VideoCopies = '1'
+            ImageCopies = '1'
+            Grouping    = 'PerSet'
+            SetCount    = [string]$SetBatchCount
+            Batch       = 'PerGroup'
+            SizeCapMB   = '0'
+        }
+        'assetstore' = @{
+            VideoCopies = '1'
+            ImageCopies = '1'
+            Grouping    = 'PerSet'
+            SetCount    = [string]$AssetStoreSetCount
+            Batch       = 'PerGroup'
+            SizeCapMB   = '0'
+            Manifest    = 'true'
+            MinTrimMs   = [string]$AssetStoreMinTrimMs
+            MaxTrimMs   = [string]$AssetStoreMaxTrimMs
+        }
+        'long' = @{
+            VideoCopies             = [string]$LongCopiesPerSegment
+            ImageCopies             = '0'
+            Segment                 = 'true'
+            SizeCapMB               = [string]$LongMaxOutputSizeMB
+            SizeCapFallbackMaxWidth = [string]$LongSizeCapFallbackMaxWidth
+            MaxrateScale            = [string]$LongNvencPrimaryMaxrateScale
+            NvencCq                 = [string]$LongNvencCq
+            AmfQp                   = [string]$LongAmfQp
+        }
+    }
+}
+
+# All enabled presets, built once per process (and once per parallel worker runspace, which
+# re-loads this script).
+function Get-PipelinePresets {
+    if ($script:PipelinePresets) { return $script:PipelinePresets }
+
+    $sections = $script:ConfigPresetSections
+    if ($sections -and $sections.Count -gt 0) {
+        $overrides = $sections
+    }
+    else {
+        $overrides = Get-BuiltInPresetOverrides
+    }
+
+    $presets = New-Object System.Collections.Generic.List[object]
+    foreach ($name in @($overrides.Keys)) {
+        $preset = New-PipelinePreset -Name $name -Overrides $overrides[$name]
+        if ($preset.Enabled) {
+            $presets.Add($preset) | Out-Null
+        }
+    }
+
+    $script:PipelinePresets = $presets.ToArray()
+    return $script:PipelinePresets
+}
+
+function Get-PipelinePreset {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return @(Get-PipelinePresets | Where-Object { $_.Name -eq $Name })[0]
+}
+
+# Every preset owns the same folder shape under its own name. This replaces the fifty
+# hardcoded per-lane path properties the nine pipelines needed.
+function Get-PresetWorkspacePaths {
+    param(
+        [Parameter(Mandatory = $true)][string]$PresetName,
+        [Parameter(Mandatory = $true)][string]$WorkspaceName
+    )
+
+    $presetRoot = Join-Path (Join-Path $PipelineRoot $PresetName) $WorkspaceName
+    $archiveRoot = Join-Path (Join-Path $ArchiveRootDir $PresetName) $WorkspaceName
+
+    return [pscustomobject]@{
+        PresetName    = $PresetName
+        WorkspaceName = $WorkspaceName
+        InputDir      = Join-Path $presetRoot "input"
+        OutputDir     = Join-Path $presetRoot "output"
+        OriginalDir   = Join-Path $presetRoot "original"
+        FailedDir     = Join-Path $presetRoot "failed"
+        WorkDir       = Join-Path $presetRoot "work"
+        ArchiveDir    = Join-Path $archiveRoot "output"
+    }
+}
 
 $DefaultRootDir = Join-Path $PipelineRoot "default"
 $VideoCleanRootDir = Join-Path $PipelineRoot "videoclean"
