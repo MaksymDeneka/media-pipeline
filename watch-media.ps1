@@ -2635,6 +2635,181 @@ function Start-LongOutputRecompressBatch {
 
 
 # ---------------------------------------------------------------------------
+# Event stream, control surface, and status
+# ---------------------------------------------------------------------------
+#
+# The daily text log is written for people and cannot be parsed reliably: the preset and
+# workspace appear only inside English prose, and with parallel runspaces the per-variant
+# lines of different files interleave with nothing tying them back to a source file.
+#
+# These three surfaces exist so a monitoring UI does not have to guess:
+#
+#   logs\events-YYYYMMDD.jsonl   append-only event stream, one JSON object per line
+#   status\watcher.json          current state, rewritten each sweep
+#   control\                     flag files the poll loop checks each tick
+
+$script:WatcherStartedUtc = (Get-Date).ToUniversalTime().ToString('o')
+$script:LaneSnapshot = New-Object 'System.Collections.Specialized.OrderedDictionary'
+
+function Get-ControlDirectory {
+    return (Join-Path $PipelineRoot "control")
+}
+
+function Get-StatusDirectory {
+    return (Join-Path $PipelineRoot "status")
+}
+
+# Appends one event to the daily JSONL stream. Serialized through its own named mutex so
+# parallel worker runspaces cannot interleave partial lines, the same way Write-Log is.
+#
+# JobId is what makes parallel progress attributable: every event from one group carries the
+# same id, so a reader can reassemble "file X is on variant 12 of 20" from an interleaved
+# stream.
+function Write-PipelineEvent {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [hashtable]$Data
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $LogsDir)) {
+            New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
+        }
+
+        $record = [ordered]@{
+            ts = (Get-Date).ToUniversalTime().ToString('o')
+            ev = $Name
+        }
+
+        if ($Data) {
+            foreach ($key in $Data.Keys) {
+                $record[$key] = $Data[$key]
+            }
+        }
+
+        $line = $record | ConvertTo-Json -Depth 6 -Compress
+        $eventFile = Join-Path $LogsDir ("events-{0}.jsonl" -f (Get-Date -Format "yyyyMMdd"))
+
+        $mutex = New-Object System.Threading.Mutex($false, "Local\MediaPipelineEventMutex")
+        $acquired = $false
+
+        try {
+            try { $acquired = $mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+            Add-Content -LiteralPath $eventFile -Value $line -Encoding UTF8
+        }
+        finally {
+            if ($acquired) { $mutex.ReleaseMutex() }
+            $mutex.Dispose()
+        }
+    }
+    catch {
+        # Losing an event must never stop media processing.
+    }
+}
+
+function Test-ControlFlag {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return (Test-Path -LiteralPath (Join-Path (Get-ControlDirectory) $Name))
+}
+
+# Pausing is checked from the most specific flag outwards, so a single lane can be paused
+# without touching the rest.
+function Test-PresetPaused {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][string]$WorkspaceName
+    )
+
+    if (Test-ControlFlag -Name "pause") { return $true }
+    if (Test-ControlFlag -Name "pause.$($Preset.Name)") { return $true }
+    if (Test-ControlFlag -Name "pause.$($Preset.Name).$WorkspaceName") { return $true }
+
+    return $false
+}
+
+function Test-StopRequested {
+    return (Test-ControlFlag -Name "stop")
+}
+
+function Clear-StopRequest {
+    $stopFile = Join-Path (Get-ControlDirectory) "stop"
+    if (Test-Path -LiteralPath $stopFile) {
+        Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Set-LaneSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$PresetName,
+        [Parameter(Mandatory = $true)][string]$WorkspaceName,
+        [int]$Queued,
+        [bool]$Paused
+    )
+
+    $key = "$PresetName/$WorkspaceName"
+    $script:LaneSnapshot[$key] = [ordered]@{
+        preset    = $PresetName
+        workspace = $WorkspaceName
+        queued    = $Queued
+        paused    = $Paused
+    }
+}
+
+# Rewrites status\watcher.json after each full sweep. A UI reads this instead of guessing
+# at process state, and it is cheap because the queue counts were already gathered by the
+# poll that just ran.
+function Write-WatcherStatus {
+    try {
+        $statusDir = Get-StatusDirectory
+        if (-not (Test-Path -LiteralPath $statusDir)) {
+            New-Item -ItemType Directory -Path $statusDir -Force | Out-Null
+        }
+
+        $presetSummaries = New-Object System.Collections.Generic.List[object]
+        foreach ($preset in Get-PipelinePresets) {
+            $presetSummaries.Add([ordered]@{
+                name        = $preset.Name
+                videoCopies = $preset.VideoCopies
+                imageCopies = $preset.ImageCopies
+                grouping    = $preset.Grouping
+                setCount    = $preset.SetCount
+                batch       = $preset.Batch
+                segment     = $preset.Segment
+                manifest    = $preset.Manifest
+                sizeCapMB   = $preset.SizeCapMB
+            }) | Out-Null
+        }
+
+        $status = [ordered]@{
+            schema       = "mediaPipeline.status.v1"
+            pid          = $PID
+            startedUtc   = $script:WatcherStartedUtc
+            updatedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+            pipelineRoot = $PipelineRoot
+            encoder      = Get-VideoEncoderName
+            pollSeconds  = $PollSeconds
+            pausedAll    = (Test-ControlFlag -Name "pause")
+            workspaces   = $WorkspaceNames
+            presets      = $presetSummaries.ToArray()
+            lanes        = @($script:LaneSnapshot.Values)
+        }
+
+        $json = $status | ConvertTo-Json -Depth 8
+        $statusPath = Join-Path $statusDir "watcher.json"
+        $tempPath = "$statusPath.tmp"
+
+        # Write then move, so a reader never sees a half-written file.
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tempPath, $json, $utf8NoBom)
+        Move-Item -LiteralPath $tempPath -Destination $statusPath -Force
+    }
+    catch {
+        # Status is a convenience for the UI, never a reason to stop processing.
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Unified processing core
 # ---------------------------------------------------------------------------
 #
@@ -2647,6 +2822,29 @@ function Start-LongOutputRecompressBatch {
 #
 # Media type is detected per file, and the preset carries a separate copy count for video and
 # for images, so a single inbox can take a mixed folder without choosing a lane.
+
+# Emits one progress event per finished variant. The n-of-total pair is what a UI needs for
+# a real progress bar, and the old text log could not provide it: the total was only ever
+# logged for one lane, and parallel per-variant lines were unattributable.
+function Write-PresetVariantEvent {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][System.IO.FileInfo]$File,
+        [Parameter(Mandatory = $true)][int]$Index,
+        [Parameter(Mandatory = $true)][int]$Total,
+        [Parameter(Mandatory = $true)][string]$OutputPath
+    )
+
+    Write-PipelineEvent -Name "job.variant" -Data @{
+        jobId     = $script:CurrentJobId
+        preset    = $Preset.Name
+        workspace = $script:CurrentWorkspaceName
+        file      = $File.Name
+        n         = $Index
+        total     = $Total
+        output    = [System.IO.Path]::GetFileName($OutputPath)
+    }
+}
 
 function Get-MediaKind {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -2848,6 +3046,7 @@ function Invoke-PresetFileVariants {
 
             $outputPath = New-ImageVariant @variantArgs
             $created.Add($outputPath) | Out-Null
+            Write-PresetVariantEvent -Preset $Preset -File $File -Index ($index + 1) -Total $targets.Count -OutputPath $outputPath
 
             if ($Records -ne $null) {
                 $Records.Add((New-PresetManifestRecord -Preset $Preset -File $File -OutputPath $outputPath -SetName $SetNames[[int]($index / $copyCount)] -BatchKey $BatchKey -FamilyKey $FamilyKey -Kind $Kind -Dimensions $dimensions)) | Out-Null
@@ -2866,6 +3065,11 @@ function Invoke-PresetFileVariants {
     if ($Preset.Segment) {
         $segments = @(Invoke-PresetSegmentExtract -Preset $Preset -Paths $Paths -Source $Source -DurationSeconds $duration -TempPaths $segmentTemps)
     }
+
+    # Progress is reported across every segment, so a segmented job reads as one bar rather
+    # than restarting at zero for each segment.
+    $totalVariants = $targets.Count * $segments.Count
+    $variantsDone = 0
 
     try {
         foreach ($segment in $segments) {
@@ -2903,6 +3107,8 @@ function Invoke-PresetFileVariants {
 
                 $outputPath = New-VideoVariant @variantArgs
                 $created.Add($outputPath) | Out-Null
+                $variantsDone++
+                Write-PresetVariantEvent -Preset $Preset -File $File -Index $variantsDone -Total $totalVariants -OutputPath $outputPath
 
                 if ($Records -ne $null) {
                     $Records.Add((New-PresetManifestRecord -Preset $Preset -File $File -OutputPath $outputPath -SetName $SetNames[[int]($index / $copyCount)] -BatchKey $BatchKey -FamilyKey $FamilyKey -Kind $Kind -TrimMs $trimMs -DurationSeconds $segment.DurationSeconds)) | Out-Null
@@ -3216,15 +3422,45 @@ function Invoke-PresetGroupSafely {
     )
 
     $names = ($Files | ForEach-Object { $_.Name }) -join ", "
+    $jobId = [Guid]::NewGuid().ToString("n").Substring(0, 8)
+
+    # Every variant produced under this group carries the same job id, which is how a reader
+    # attributes interleaved progress from parallel runspaces back to one source.
+    $script:CurrentJobId = $jobId
+    $script:CurrentJobTotal = 0
+    $script:CurrentJobDone = 0
+
     Write-Log "Preset '$($Preset.Name)' [$($Paths.WorkspaceName)] processing $($Files.Count) file(s): $names"
+    Write-PipelineEvent -Name "job.start" -Data @{
+        jobId     = $jobId
+        preset    = $Preset.Name
+        workspace = $Paths.WorkspaceName
+        files     = @($Files | ForEach-Object { $_.Name })
+        bytes     = (($Files | Measure-Object -Property Length -Sum).Sum)
+    }
 
     try {
         $outputs = @(Invoke-PresetGroup -Preset $Preset -Paths $Paths -Files $Files)
         Write-Log "Preset '$($Preset.Name)' [$($Paths.WorkspaceName)] created $($outputs.Count) output(s)."
+        Write-PipelineEvent -Name "job.done" -Data @{
+            jobId     = $jobId
+            preset    = $Preset.Name
+            workspace = $Paths.WorkspaceName
+            outputs   = $outputs.Count
+        }
     }
     catch {
         $origin = if ($_.InvocationInfo) { " at $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())" } else { "" }
         Write-Log "Preset '$($Preset.Name)' [$($Paths.WorkspaceName)] failed: $($_.Exception.Message)$origin" "ERROR"
+        Write-PipelineEvent -Name "job.failed" -Data @{
+            jobId     = $jobId
+            preset    = $Preset.Name
+            workspace = $Paths.WorkspaceName
+            error     = $_.Exception.Message
+        }
+    }
+    finally {
+        $script:CurrentJobId = $null
     }
 }
 
@@ -3266,6 +3502,12 @@ function Invoke-PresetPoll {
 
     $paths = Get-PresetWorkspacePaths -PresetName $Preset.Name -WorkspaceName $WorkspaceName
     $files = @(Get-PresetCandidateFiles -Preset $Preset -Paths $paths)
+    $paused = Test-PresetPaused -Preset $Preset -WorkspaceName $WorkspaceName
+
+    Set-LaneSnapshot -PresetName $Preset.Name -WorkspaceName $WorkspaceName -Queued $files.Count -Paused $paused
+
+    # A paused lane keeps its queue and stops picking work up. Nothing is discarded.
+    if ($paused) { return }
 
     if ($files.Count -eq 0) {
         Set-PresetBatchSignature -PresetName $Preset.Name -Signature $null
@@ -3282,6 +3524,44 @@ function Invoke-PresetPoll {
     }
 
     # A per-file preset is the same transaction with a group of one.
+    #
+    # Files are processed concurrently when the preset allows it. Alternating copy counts are
+    # excluded because the alternation counter lives in script scope, and each worker runspace
+    # loads its own copy, which would make the alternation arbitrary.
+    $canParallelize = (
+        $script:SupportsParallel -and
+        $Preset.Parallel -eq "OverFiles" -and
+        $Preset.CopiesAlternate -le 0 -and
+        $files.Count -gt 1 -and
+        $ImageProcessingConcurrency -gt 1
+    )
+
+    if ($canParallelize) {
+        Write-Log "Preset '$($Preset.Name)' [$WorkspaceName] processing $($files.Count) file(s) with concurrency $ImageProcessingConcurrency."
+
+        $libPath = $script:ScriptPath
+        $ffPath = $script:FFmpegPath
+        $fpPath = $script:FFprobePath
+        $exPath = $script:ExifToolPath
+        $presetName = $Preset.Name
+
+        $files | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
+            . $using:libPath -AsLibrary
+
+            $script:FFmpegPath = $using:ffPath
+            $script:FFprobePath = $using:fpPath
+            $script:ExifToolPath = $using:exPath
+            $script:CurrentWorkspaceName = $using:WorkspaceName
+
+            $workerPreset = Get-PipelinePreset -Name $using:presetName
+            $workerPaths = Get-PresetWorkspacePaths -PresetName $using:presetName -WorkspaceName $using:WorkspaceName
+
+            Invoke-PresetGroupSafely -Preset $workerPreset -Paths $workerPaths -Files @($_)
+        }
+
+        return
+    }
+
     foreach ($file in $files) {
         Invoke-PresetGroupSafely -Preset $Preset -Paths $paths -Files @($file)
     }
@@ -3323,14 +3603,34 @@ function Write-WatcherStartupBanner {
 function Start-PollingWatcher {
     Write-WatcherStartupBanner
 
-    while ($true) {
+    if (-not (Test-Path -LiteralPath (Get-ControlDirectory))) {
+        New-Item -ItemType Directory -Path (Get-ControlDirectory) -Force | Out-Null
+    }
+
+    # A stop flag left over from a previous run would exit immediately.
+    Clear-StopRequest
+
+    Write-PipelineEvent -Name "watcher.start" -Data @{
+        pid          = $PID
+        pipelineRoot = $PipelineRoot
+        encoder      = Get-VideoEncoderName
+        presets      = @(Get-PipelinePresets | ForEach-Object { $_.Name })
+        workspaces   = $WorkspaceNames
+    }
+
+    $stopping = $false
+
+    while (-not $stopping) {
         foreach ($workspaceName in $WorkspaceNames) {
+            if (Test-StopRequested) { $stopping = $true; break }
+
             Use-PipelineWorkspace -WorkspaceName $workspaceName
 
             try {
                 Invoke-OutputArchiveIfDue
 
                 foreach ($preset in Get-PipelinePresets) {
+                    if (Test-StopRequested) { $stopping = $true; break }
                     Invoke-PresetPoll -Preset $preset -WorkspaceName $workspaceName
                 }
             }
@@ -3342,8 +3642,19 @@ function Start-PollingWatcher {
             }
         }
 
+        Write-WatcherStatus
+
+        if ($stopping) { break }
+
         Start-Sleep -Seconds $PollSeconds
     }
+
+    # Reaching here means a stop was requested rather than the process being killed, so the
+    # current file finished cleanly and the mutex is about to be released properly.
+    Write-Log "Stop requested. Watcher shutting down cleanly."
+    Write-PipelineEvent -Name "watcher.stop" -Data @{ pid = $PID; reason = "control" }
+    Clear-StopRequest
+    Write-WatcherStatus
 }
 
 # When dot-sourced by a parallel worker runspace, only load functions/config and return —
