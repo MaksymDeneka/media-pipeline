@@ -1,0 +1,58 @@
+<UserControl x:Class="MediaPipelineTray.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource BgBrush}">
+
+    <DockPanel>
+
+        <Border DockPanel.Dock="Bottom"
+                Background="{DynamicResource SunkBrush}"
+                BorderBrush="{DynamicResource LineBrush}"
+                BorderThickness="0,1,0,0"
+                Padding="16,10"
+                Visibility="{Binding IsDirty, Converter={StaticResource TrueToVisible}}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Text="{Binding DirtyNote}" Style="{StaticResource Body}"
+                           VerticalAlignment="Center" />
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button Content="Discard" Click="OnDiscard" />
+                    <Button Content="Save and restart" Style="{StaticResource StrongButton}"
+                            Click="OnSave" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="20,16,20,20">
+
+                <TextBlock Text="Defaults" FontSize="20" FontWeight="SemiBold"
+                           Foreground="{DynamicResource InkBrush}" />
+                <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,0" MaxWidth="620"
+                           HorizontalAlignment="Left"
+                           Text="These are the defaults every preset inherits. A preset only needs to list the values it wants to differ, which is why most presets are two or three lines." />
+
+                <TextBlock Text="{Binding ConfigPath}" Style="{StaticResource Mono}" Margin="0,10,0,0" />
+
+                <ItemsControl ItemsSource="{Binding Groups}" Margin="0,14,0,0">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="0,0,0,18">
+                                <TextBlock Text="{Binding Name}" Style="{StaticResource Caption}"
+                                           Margin="0,0,0,2" />
+                                <ItemsControl ItemsSource="{Binding Rows}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+            </StackPanel>
+        </ScrollViewer>
+
+    </DockPanel>
+</UserControl>

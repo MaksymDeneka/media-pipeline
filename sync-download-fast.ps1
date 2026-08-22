@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('root', 'default', 'videoclean', 'convert', 'images', 'imageclean', 'long', 'sets', 'setbatch', 'assetstore')]
+    [ValidateSet('root', 'default', 'videoclean', 'images', 'imageclean', 'long', 'sets', 'setbatch', 'assetstore')]
     [string]$Lane = 'root',
 
     [string]$LocalPath,

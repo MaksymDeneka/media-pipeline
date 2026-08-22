@@ -1,6 +1,6 @@
 param(
     [switch]$CheckOnly,
-    [switch]$RecompressLongOutputs,
+    [switch]$RecompressOutputs,
     [switch]$AsLibrary
 )
 
@@ -17,19 +17,42 @@ $ErrorActionPreference = "Stop"
 # Reads a simple key=value INI file (lines starting with # or ; are comments,
 # [section] headers are ignored). Returns a case-insensitive hashtable of raw
 # string values. Returns an empty table if the file is missing or unreadable.
-function Read-IniSettings {
+# Parses config.ini into global settings plus any [preset <name>] sections.
+#
+# Ordinary section headers stay decorative: their keys land in the flat global table, which
+# is how every setting behaved before presets existed. A [preset <name>] header instead
+# collects the keys that follow it under that preset, so a preset can override any global.
+function Read-IniDocument {
     param([string]$Path)
 
-    $settings = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
+    $globals = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
+    $presets = New-Object 'System.Collections.Specialized.OrderedDictionary' ([System.StringComparer]::OrdinalIgnoreCase)
+
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
-        return $settings
+        return [pscustomobject]@{ Globals = $globals; Presets = $presets }
     }
 
     try {
+        $currentPreset = $null
+
         foreach ($rawLine in (Get-Content -LiteralPath $Path -ErrorAction Stop)) {
             $line = $rawLine.Trim()
             if ($line.Length -eq 0) { continue }
-            if ($line.StartsWith('#') -or $line.StartsWith(';') -or $line.StartsWith('[')) { continue }
+            if ($line.StartsWith('#') -or $line.StartsWith(';')) { continue }
+
+            if ($line.StartsWith('[')) {
+                $header = $line.TrimStart('[').TrimEnd(']').Trim()
+                if ($header -match '^preset\s+(.+)$') {
+                    $currentPreset = $matches[1].Trim()
+                    if (-not $presets.Contains($currentPreset)) {
+                        $presets[$currentPreset] = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
+                    }
+                }
+                else {
+                    $currentPreset = $null
+                }
+                continue
+            }
 
             $eq = $line.IndexOf('=')
             if ($eq -lt 1) { continue }
@@ -45,17 +68,57 @@ function Read-IniSettings {
                 # followed by ; or #, e.g.  Crf = 20   ; default: 24
                 $value = ($value -replace '\s+[;#].*$', '').Trim()
             }
-            if ($key.Length -gt 0) { $settings[$key] = $value }
+
+            if ($key.Length -eq 0) { continue }
+
+            if ($currentPreset) {
+                $presets[$currentPreset][$key] = $value
+            }
+            else {
+                $globals[$key] = $value
+            }
         }
     }
     catch {
         # A malformed config file must never stop the watcher; fall back to defaults.
     }
 
-    return $settings
+    return [pscustomobject]@{ Globals = $globals; Presets = $presets }
 }
 
-# Returns the config.ini value for $Key coerced to the type of $Default, or
+# Coerces a raw config string to the type of $Default, returning $Default when the value is
+# missing, blank, or cannot be parsed.
+function ConvertTo-SettingValue {
+    param(
+        [string]$Raw,
+        [Parameter(Mandatory = $true)]$Default
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return $Default }
+    $trimmed = $Raw.Trim()
+
+    try {
+        if ($Default -is [bool]) {
+            if ($trimmed -match '^(true|1|yes|on)$') { return $true }
+            if ($trimmed -match '^(false|0|no|off)$') { return $false }
+            return $Default
+        }
+        elseif ($Default -is [int]) {
+            return [int]::Parse($trimmed, [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        elseif ($Default -is [double]) {
+            return [double]::Parse($trimmed, [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        else {
+            return $trimmed
+        }
+    }
+    catch {
+        return $Default
+    }
+}
+
+# Returns the config.ini global value for $Key coerced to the type of $Default, or
 # $Default when the key is missing, blank, or cannot be parsed.
 function Get-Setting {
     param(
@@ -64,29 +127,7 @@ function Get-Setting {
     )
 
     if (-not $script:ConfigSettings.ContainsKey($Key)) { return $Default }
-    $raw = [string]$script:ConfigSettings[$Key]
-    if ([string]::IsNullOrWhiteSpace($raw)) { return $Default }
-    $raw = $raw.Trim()
-
-    try {
-        if ($Default -is [bool]) {
-            if ($raw -match '^(true|1|yes|on)$') { return $true }
-            if ($raw -match '^(false|0|no|off)$') { return $false }
-            return $Default
-        }
-        elseif ($Default -is [int]) {
-            return [int]::Parse($raw, [System.Globalization.CultureInfo]::InvariantCulture)
-        }
-        elseif ($Default -is [double]) {
-            return [double]::Parse($raw, [System.Globalization.CultureInfo]::InvariantCulture)
-        }
-        else {
-            return $raw
-        }
-    }
-    catch {
-        return $Default
-    }
+    return ConvertTo-SettingValue -Raw ([string]$script:ConfigSettings[$Key]) -Default $Default
 }
 
 # Locate config.ini next to this script (works both when run with -File and when
@@ -98,20 +139,21 @@ if ($PSScriptRoot) {
 elseif ($PSCommandPath) {
     $script:ConfigPath = Join-Path (Split-Path -Parent $PSCommandPath) "config.ini"
 }
-$script:ConfigSettings = Read-IniSettings -Path $script:ConfigPath
+$script:ConfigDocument = Read-IniDocument -Path $script:ConfigPath
+$script:ConfigSettings = $script:ConfigDocument.Globals
+$script:ConfigPresetSections = $script:ConfigDocument.Presets
 
-# --- Tunable scalar settings (loaded from config.ini, with built-in defaults) ---
+# --- Global settings (loaded from config.ini, with built-in defaults) ---
+#
+# Every key here that has a matching preset option is simply the default for that option:
+# a preset inherits it unless its own [preset <name>] section overrides it. The script
+# variables are prefixed Default so a preset object passed around as $Preset can never
+# shadow them, which PowerShell's scope resolution would otherwise allow.
+
 $PipelineRoot = Get-Setting 'PipelineRoot' 'D:\MediaPipeline'
 
-$DefaultPipelineMinCopiesPerFile = Get-Setting 'DefaultPipelineMinCopiesPerFile' 7
-$DefaultPipelineAlternatingCopiesPerFile = Get-Setting 'DefaultPipelineAlternatingCopiesPerFile' 8
-$LongCopiesPerSegment = Get-Setting 'LongCopiesPerSegment' 3
-$ImageBulkCopiesPerFile = Get-Setting 'ImageBulkCopiesPerFile' 20
-$SetCopiesPerFile = Get-Setting 'SetCopiesPerFile' 10
-$SetBatchCount = Get-Setting 'SetBatchCount' 10
-
-# How many image conversions run at once (convert pipeline files; bulk pipeline
-# variants). Requires PowerShell 7. "auto" (or blank) = min(6, CPU count).
+# How many files are processed at once. Requires PowerShell 7.
+# "auto" (or blank) = min(6, CPU count).
 $ImageProcessingConcurrencyRaw = Get-Setting 'ImageProcessingConcurrency' 'auto'
 $ImageProcessingConcurrencyParsed = 0
 if ([int]::TryParse([string]$ImageProcessingConcurrencyRaw, [ref]$ImageProcessingConcurrencyParsed) -and $ImageProcessingConcurrencyParsed -ge 1) {
@@ -121,65 +163,260 @@ else {
     $ImageProcessingConcurrency = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
 }
 
-$ImageBulkCropMinPermille = Get-Setting 'ImageBulkCropMinPermille' 5
-$ImageBulkCropMaxPermille = Get-Setting 'ImageBulkCropMaxPermille' 20
-$ImageBulkConvertPngToJpeg = Get-Setting 'ImageBulkConvertPngToJpeg' $true
-$ImageBulkConvertedJpegQuality = Get-Setting 'ImageBulkConvertedJpegQuality' 12
-if ($ImageBulkConvertedJpegQuality -lt 2) { $ImageBulkConvertedJpegQuality = 2 }
-elseif ($ImageBulkConvertedJpegQuality -gt 31) { $ImageBulkConvertedJpegQuality = 31 }
-$ImageBulkNativeJpegQuality = Get-Setting 'ImageBulkNativeJpegQuality' 4
-if ($ImageBulkNativeJpegQuality -lt 2) { $ImageBulkNativeJpegQuality = 2 }
-elseif ($ImageBulkNativeJpegQuality -gt 31) { $ImageBulkNativeJpegQuality = 31 }
-$ImageBulkPngCompressionLevel = Get-Setting 'ImageBulkPngCompressionLevel' 6
-if ($ImageBulkPngCompressionLevel -lt 0) { $ImageBulkPngCompressionLevel = 0 }
-elseif ($ImageBulkPngCompressionLevel -gt 9) { $ImageBulkPngCompressionLevel = 9 }
-$ImageCleanPngCompressionLevel = Get-Setting 'ImageCleanPngCompressionLevel' 1
-if ($ImageCleanPngCompressionLevel -lt 0) { $ImageCleanPngCompressionLevel = 0 }
-elseif ($ImageCleanPngCompressionLevel -gt 9) { $ImageCleanPngCompressionLevel = 9 }
-$MinTrimMs = Get-Setting 'MinTrimMs' 15
-$MaxTrimMs = Get-Setting 'MaxTrimMs' 95
+# Image defaults
+$DefaultCropMinPermille = Get-Setting 'CropMinPermille' 5
+$DefaultCropMaxPermille = Get-Setting 'CropMaxPermille' 20
+
+$DefaultJpegQuality = Get-Setting 'JpegQuality' 4
+if ($DefaultJpegQuality -lt 2) { $DefaultJpegQuality = 2 }
+elseif ($DefaultJpegQuality -gt 31) { $DefaultJpegQuality = 31 }
+
+# Sources that had to be decoded first (HEIC) are already a re-encode, so they get a little
+# more headroom than an untouched JPEG.
+$DefaultConvertedJpegQuality = Get-Setting 'ConvertedJpegQuality' 12
+if ($DefaultConvertedJpegQuality -lt 2) { $DefaultConvertedJpegQuality = 2 }
+elseif ($DefaultConvertedJpegQuality -gt 31) { $DefaultConvertedJpegQuality = 31 }
+
+$DefaultPngCompressionLevel = Get-Setting 'PngCompressionLevel' 6
+if ($DefaultPngCompressionLevel -lt 0) { $DefaultPngCompressionLevel = 0 }
+elseif ($DefaultPngCompressionLevel -gt 9) { $DefaultPngCompressionLevel = 9 }
+
+# Video defaults
+$DefaultMinTrimMs = Get-Setting 'MinTrimMs' 15
+$DefaultMaxTrimMs = Get-Setting 'MaxTrimMs' 95
 $PreferNvenc = Get-Setting 'PreferNvenc' $true
 $PreferAmf = Get-Setting 'PreferAmf' $true
-$Crf = Get-Setting 'Crf' 24
-$Preset = Get-Setting 'Preset' 'medium'
+$DefaultCrf = Get-Setting 'Crf' 24
+
+# Named X264Preset rather than Preset so it cannot be shadowed by the pipeline preset object
+# the processing functions pass around.
+$X264Preset = Get-Setting 'X264Preset' 'medium'
 $NvencPreset = Get-Setting 'NvencPreset' 'p4'
-$NvencCq = Get-Setting 'NvencCq' 26
-$LongNvencCq = Get-Setting 'LongNvencCq' 28
 $AmfQuality = Get-Setting 'AmfQuality' 'balanced'
-$AmfQp = Get-Setting 'AmfQp' 24
-$LongAmfQp = Get-Setting 'LongAmfQp' 26
-$LongNvencPrimaryMaxrateScale = Get-Setting 'LongNvencPrimaryMaxrateScale' 0.92
-$AudioBitrate = Get-Setting 'AudioBitrate' '128k'
-$MaxWidth = Get-Setting 'MaxWidth' 1080
-$DefaultMaxOutputSizeMB = Get-Setting 'DefaultMaxOutputSizeMB' 8
-$DefaultSizeCapFallbackMaxWidth = Get-Setting 'DefaultSizeCapFallbackMaxWidth' 720
-$DefaultNvencPrimaryMaxrateScale = Get-Setting 'DefaultNvencPrimaryMaxrateScale' 0.92
+$DefaultNvencCq = Get-Setting 'NvencCq' 26
+$DefaultAmfQp = Get-Setting 'AmfQp' 24
+$DefaultAudioBitrate = Get-Setting 'AudioBitrate' '128k'
+$DefaultMaxWidth = Get-Setting 'MaxWidth' 1080
+
+# Size cap defaults. Zero disables both the first-encode bitrate ceiling and the retry pass.
+$DefaultSizeCapMB = Get-Setting 'SizeCapMB' 8
+$DefaultSizeCapFallbackMaxWidth = Get-Setting 'SizeCapFallbackMaxWidth' 720
+$DefaultMaxrateScale = Get-Setting 'MaxrateScale' 0.92
+
+# Segmenting defaults, used by presets with Segment = true.
+$DefaultSegmentTargetSeconds = Get-Setting 'SegmentTargetSeconds' 15
+$DefaultSegmentMinSeconds = Get-Setting 'SegmentMinSeconds' 11
+
+# Manifest schema, used by presets with Manifest = true.
+$DefaultManifestSchema = Get-Setting 'ManifestSchema' 'heatup.assetStoreMediaManifest.v1'
+
+# Timing
 $StableSeconds = Get-Setting 'StableSeconds' 3
 $TimeoutSeconds = Get-Setting 'TimeoutSeconds' 600
 $PollSeconds = Get-Setting 'PollSeconds' 2
-$LongSegmentTargetSeconds = Get-Setting 'LongSegmentTargetSeconds' 15
-$LongSegmentMinSeconds = Get-Setting 'LongSegmentMinSeconds' 11
-$LongMaxOutputSizeMB = Get-Setting 'LongMaxOutputSizeMB' 8
-$LongSizeCapFallbackMaxWidth = Get-Setting 'LongSizeCapFallbackMaxWidth' 720
+
+# Archive and retention
 $ArchiveEnabled = Get-Setting 'ArchiveEnabled' $true
 $ArchiveAgeHours = Get-Setting 'ArchiveAgeHours' 15
 $ArchiveCheckIntervalMinutes = Get-Setting 'ArchiveCheckIntervalMinutes' 30
 $AssetRetentionDays = Get-Setting 'AssetRetentionDays' 5
 
-# Asset store pipeline: like set-batch (one processed copy of every source file
-# per set), but it also writes a heatup.assetStoreMediaManifest.v1 JSON next to
-# the generated sets and uses a deliberately tiny end-trim (tens of ms at most)
-# so each rendition differs without noticeably changing its length.
-$AssetStoreSetCount = Get-Setting 'AssetStoreSetCount' 15
-$AssetStoreMinTrimMs = Get-Setting 'AssetStoreMinTrimMs' 10
-$AssetStoreMaxTrimMs = Get-Setting 'AssetStoreMaxTrimMs' 40
-$AssetStoreManifestSchema = Get-Setting 'AssetStoreManifestSchema' 'heatup.assetStoreMediaManifest.v1'
-
-# --- Derived directory paths (computed from $PipelineRoot above) ---
-# Each pipeline is divided into workspaces so assets can stay categorized.
-# Existing pre-workspace assets are migrated into LC.
 $WorkspaceNames = @("LC", "MD", "YL", "PL", "general")
 $DefaultWorkspaceName = "LC"
+
+# ---------------------------------------------------------------------------
+# Presets
+# ---------------------------------------------------------------------------
+#
+# A preset is a named bundle of processing options, and it owns one folder tree per
+# workspace: <PipelineRoot>\<preset>\<workspace>\{input,output,original,failed}.
+#
+# The nine hardcoded pipelines this replaces were one pipeline with different orchestration.
+# What actually varied between them is exactly the option set below: how many copies per
+# media type, how output is grouped, whether a whole folder is treated as one batch, whether
+# long videos are split, and whether a manifest is written.
+#
+# Every option falls back to the matching global setting, so a preset section usually needs
+# only the two or three values that differ.
+
+$script:PresetGroupingValues = @('Flat', 'PerSource', 'PerSet')
+$script:PresetBatchValues = @('PerFile', 'PerGroup')
+$script:PresetFailureValues = @('PreservePartial', 'DeleteFiles', 'DeleteContainer')
+$script:PresetParallelValues = @('OverFiles', 'OverVariants', 'Sequential')
+
+# Returns a preset's override for $Key coerced to the type of $GlobalValue, or $GlobalValue
+# when the preset does not override it. Passing the already-resolved global as the fallback
+# keeps preset defaults from drifting away from the global defaults.
+function Get-PresetValue {
+    param(
+        [hashtable]$Overrides,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)]$GlobalValue
+    )
+
+    if ($Overrides -and $Overrides.ContainsKey($Key)) {
+        return ConvertTo-SettingValue -Raw ([string]$Overrides[$Key]) -Default $GlobalValue
+    }
+
+    return $GlobalValue
+}
+
+# Same as Get-PresetValue for options that accept only a fixed set of words. An unrecognized
+# value logs a warning and falls back rather than failing the whole watcher.
+function Get-PresetChoice {
+    param(
+        [hashtable]$Overrides,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][string]$Default,
+        [Parameter(Mandatory = $true)][string[]]$Allowed,
+        [Parameter(Mandatory = $true)][string]$PresetName
+    )
+
+    if (-not $Overrides -or -not $Overrides.ContainsKey($Key)) { return $Default }
+
+    $raw = ([string]$Overrides[$Key]).Trim()
+    $match = @($Allowed | Where-Object { $_ -eq $raw })[0]
+    if ($match) { return $match }
+
+    Write-Log "Preset '$PresetName': '$Key = $raw' is not one of $($Allowed -join ', '). Using $Default." "WARN"
+    return $Default
+}
+
+function New-PipelinePreset {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [hashtable]$Overrides
+    )
+
+    $grouping = Get-PresetChoice -Overrides $Overrides -Key 'Grouping' -Default 'Flat' -Allowed $script:PresetGroupingValues -PresetName $Name
+    $batch = Get-PresetChoice -Overrides $Overrides -Key 'Batch' -Default 'PerFile' -Allowed $script:PresetBatchValues -PresetName $Name
+
+    # A grouped preset owns its output folder and can safely delete it after a failure.
+    # A flat preset shares one folder with every other file, so it keeps what it produced.
+    $defaultFailure = if ($grouping -eq 'Flat') { 'PreservePartial' } else { 'DeleteContainer' }
+
+    return [pscustomobject]@{
+        Name                    = $Name
+        Enabled                 = Get-PresetValue -Overrides $Overrides -Key 'Enabled' -GlobalValue $true
+
+        # Copy counts are per media type, which is what lets one inbox take a mixed folder
+        # of videos and photos. Zero disables that media type for this preset.
+        VideoCopies             = Get-PresetValue -Overrides $Overrides -Key 'VideoCopies' -GlobalValue 1
+        ImageCopies             = Get-PresetValue -Overrides $Overrides -Key 'ImageCopies' -GlobalValue 1
+        # When set, consecutive files alternate between the copy count above and this one,
+        # so a run of files does not all produce the same number of outputs.
+        CopiesAlternate         = Get-PresetValue -Overrides $Overrides -Key 'CopiesAlternate' -GlobalValue 0
+
+        Grouping                = $grouping
+        SetCount                = Get-PresetValue -Overrides $Overrides -Key 'SetCount' -GlobalValue 1
+        Batch                   = $batch
+
+        Segment                 = Get-PresetValue -Overrides $Overrides -Key 'Segment' -GlobalValue $false
+        SegmentTargetSeconds    = Get-PresetValue -Overrides $Overrides -Key 'SegmentTargetSeconds' -GlobalValue $DefaultSegmentTargetSeconds
+        SegmentMinSeconds       = Get-PresetValue -Overrides $Overrides -Key 'SegmentMinSeconds' -GlobalValue $DefaultSegmentMinSeconds
+
+        Manifest                = Get-PresetValue -Overrides $Overrides -Key 'Manifest' -GlobalValue $false
+        ManifestSchema          = Get-PresetValue -Overrides $Overrides -Key 'ManifestSchema' -GlobalValue $DefaultManifestSchema
+
+        # Converts .mov and .heic sources to workable formats before processing.
+        Normalize               = Get-PresetValue -Overrides $Overrides -Key 'Normalize' -GlobalValue $true
+
+        OnFailure               = Get-PresetChoice -Overrides $Overrides -Key 'OnFailure' -Default $defaultFailure -Allowed $script:PresetFailureValues -PresetName $Name
+        Parallel                = Get-PresetChoice -Overrides $Overrides -Key 'Parallel' -Default 'OverFiles' -Allowed $script:PresetParallelValues -PresetName $Name
+
+        MaxWidth                = Get-PresetValue -Overrides $Overrides -Key 'MaxWidth' -GlobalValue $DefaultMaxWidth
+        AudioBitrate            = Get-PresetValue -Overrides $Overrides -Key 'AudioBitrate' -GlobalValue $DefaultAudioBitrate
+        # Zero means no bitrate ceiling on the first encode and no size-cap retry pass.
+        SizeCapMB               = Get-PresetValue -Overrides $Overrides -Key 'SizeCapMB' -GlobalValue $DefaultSizeCapMB
+        SizeCapFallbackMaxWidth = Get-PresetValue -Overrides $Overrides -Key 'SizeCapFallbackMaxWidth' -GlobalValue $DefaultSizeCapFallbackMaxWidth
+        MaxrateScale            = Get-PresetValue -Overrides $Overrides -Key 'MaxrateScale' -GlobalValue $DefaultMaxrateScale
+        NvencCq                 = Get-PresetValue -Overrides $Overrides -Key 'NvencCq' -GlobalValue $DefaultNvencCq
+        AmfQp                   = Get-PresetValue -Overrides $Overrides -Key 'AmfQp' -GlobalValue $DefaultAmfQp
+        Crf                     = Get-PresetValue -Overrides $Overrides -Key 'Crf' -GlobalValue $DefaultCrf
+
+        MinTrimMs               = Get-PresetValue -Overrides $Overrides -Key 'MinTrimMs' -GlobalValue $DefaultMinTrimMs
+        MaxTrimMs               = Get-PresetValue -Overrides $Overrides -Key 'MaxTrimMs' -GlobalValue $DefaultMaxTrimMs
+
+        CropMinPermille         = Get-PresetValue -Overrides $Overrides -Key 'CropMinPermille' -GlobalValue $DefaultCropMinPermille
+        CropMaxPermille         = Get-PresetValue -Overrides $Overrides -Key 'CropMaxPermille' -GlobalValue $DefaultCropMaxPermille
+        JpegQuality             = Get-PresetValue -Overrides $Overrides -Key 'JpegQuality' -GlobalValue $DefaultJpegQuality
+        ConvertedJpegQuality    = Get-PresetValue -Overrides $Overrides -Key 'ConvertedJpegQuality' -GlobalValue $DefaultConvertedJpegQuality
+        PngCompressionLevel     = Get-PresetValue -Overrides $Overrides -Key 'PngCompressionLevel' -GlobalValue $DefaultPngCompressionLevel
+    }
+}
+
+# The lane layout that shipped before presets existed, expressed as preset overrides. When
+# config.ini declares no [preset ...] sections these are synthesized, so an existing install
+# keeps working and its folders keep their meaning.
+#
+# The old "convert" lane is deliberately absent: format conversion is now the Normalize stage
+# that every preset runs, rather than a destination of its own.
+function Get-BuiltInPresetOverrides {
+    return [ordered]@{
+        'default'    = @{ VideoCopies = '8';   ImageCopies = '8'; CopiesAlternate = '7' }
+        'videoclean' = @{ VideoCopies = '1';   ImageCopies = '0' }
+        'imageclean' = @{ VideoCopies = '0';   ImageCopies = '1' }
+        'images'     = @{ VideoCopies = '0';   ImageCopies = '20' }
+        'sets'       = @{ VideoCopies = '10';  ImageCopies = '10'; Grouping = 'PerSource'; SizeCapMB = '0' }
+        'setbatch'   = @{ VideoCopies = '1';   ImageCopies = '1';  Grouping = 'PerSet'; SetCount = '10'; Batch = 'PerGroup'; SizeCapMB = '0' }
+        'assetstore' = @{ VideoCopies = '1';   ImageCopies = '1';  Grouping = 'PerSet'; SetCount = '15'; Batch = 'PerGroup'; SizeCapMB = '0'; Manifest = 'true'; MinTrimMs = '10'; MaxTrimMs = '40' }
+        'long'       = @{ VideoCopies = '3';   ImageCopies = '0';  Segment = 'true'; NvencCq = '28'; AmfQp = '26' }
+    }
+}
+
+# All enabled presets, built once per process (and once per parallel worker runspace, which
+# re-loads this script).
+function Get-PipelinePresets {
+    if ($script:PipelinePresets) { return $script:PipelinePresets }
+
+    $sections = $script:ConfigPresetSections
+    if ($sections -and $sections.Count -gt 0) {
+        $overrides = $sections
+    }
+    else {
+        $overrides = Get-BuiltInPresetOverrides
+    }
+
+    $presets = New-Object System.Collections.Generic.List[object]
+    foreach ($name in @($overrides.Keys)) {
+        $preset = New-PipelinePreset -Name $name -Overrides $overrides[$name]
+        if ($preset.Enabled) {
+            $presets.Add($preset) | Out-Null
+        }
+    }
+
+    $script:PipelinePresets = $presets.ToArray()
+    return $script:PipelinePresets
+}
+
+function Get-PipelinePreset {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return @(Get-PipelinePresets | Where-Object { $_.Name -eq $Name })[0]
+}
+
+# Every preset owns the same folder shape under its own name. This replaces the fifty
+# hardcoded per-lane path properties the nine pipelines needed.
+function Get-PresetWorkspacePaths {
+    param(
+        [Parameter(Mandatory = $true)][string]$PresetName,
+        [Parameter(Mandatory = $true)][string]$WorkspaceName
+    )
+
+    $presetRoot = Join-Path (Join-Path $PipelineRoot $PresetName) $WorkspaceName
+    $archiveRoot = Join-Path (Join-Path $ArchiveRootDir $PresetName) $WorkspaceName
+
+    return [pscustomobject]@{
+        PresetName    = $PresetName
+        WorkspaceName = $WorkspaceName
+        InputDir      = Join-Path $presetRoot "input"
+        OutputDir     = Join-Path $presetRoot "output"
+        OriginalDir   = Join-Path $presetRoot "original"
+        FailedDir     = Join-Path $presetRoot "failed"
+        WorkDir       = Join-Path $presetRoot "work"
+        ArchiveDir    = Join-Path $archiveRoot "output"
+    }
+}
 
 $DefaultRootDir = Join-Path $PipelineRoot "default"
 $VideoCleanRootDir = Join-Path $PipelineRoot "videoclean"
@@ -193,144 +430,10 @@ $SetBatchRootDir = Join-Path $PipelineRoot "setbatch"
 $AssetStoreRootDir = Join-Path $PipelineRoot "assetstore"
 $ArchiveRootDir = Join-Path $PipelineRoot "archive"
 
-function Get-WorkspacePathSet {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspaceName
-    )
 
-    $defaultWorkspaceRoot = Join-Path $DefaultRootDir $WorkspaceName
-    $videoCleanWorkspaceRoot = Join-Path $VideoCleanRootDir $WorkspaceName
-    $remuxWorkspaceRoot = Join-Path $RemuxRootDir $WorkspaceName
-    $longWorkspaceRoot = Join-Path $LongRootDir $WorkspaceName
-    $imageBulkWorkspaceRoot = Join-Path $ImageBulkRootDir $WorkspaceName
-    $imageCleanWorkspaceRoot = Join-Path $ImageCleanRootDir $WorkspaceName
-    $setWorkspaceRoot = Join-Path $SetRootDir $WorkspaceName
-    $setBatchWorkspaceRoot = Join-Path $SetBatchRootDir $WorkspaceName
-    $assetStoreWorkspaceRoot = Join-Path $AssetStoreRootDir $WorkspaceName
 
-    $archiveDefaultWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "default") $WorkspaceName
-    $archiveVideoCleanWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "videoclean") $WorkspaceName
-    $archiveImageBulkWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "images") $WorkspaceName
-    $archiveImageCleanWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "imageclean") $WorkspaceName
-    $archiveRemuxWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "convert") $WorkspaceName
-    $archiveLongWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "long") $WorkspaceName
-    $archiveSetWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "sets") $WorkspaceName
-    $archiveSetBatchWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "setbatch") $WorkspaceName
-    $archiveAssetStoreWorkspaceRoot = Join-Path (Join-Path $ArchiveRootDir "assetstore") $WorkspaceName
 
-    return [pscustomobject]@{
-        CurrentWorkspaceName = $WorkspaceName
-        InputDir = Join-Path $defaultWorkspaceRoot "input"
-        OutputDir = Join-Path $defaultWorkspaceRoot "output"
-        OriginalDir = Join-Path $defaultWorkspaceRoot "original"
-        FailedDir = Join-Path $defaultWorkspaceRoot "failed"
-        VideoCleanInputDir = Join-Path $videoCleanWorkspaceRoot "input"
-        VideoCleanOutputDir = Join-Path $videoCleanWorkspaceRoot "output"
-        VideoCleanOriginalDir = Join-Path $videoCleanWorkspaceRoot "original"
-        VideoCleanFailedDir = Join-Path $videoCleanWorkspaceRoot "failed"
-        RemuxInputDir = Join-Path $remuxWorkspaceRoot "input"
-        RemuxOutputDir = Join-Path $remuxWorkspaceRoot "output"
-        RemuxOriginalDir = Join-Path $remuxWorkspaceRoot "original"
-        RemuxOriginalVideosDir = Join-Path (Join-Path $remuxWorkspaceRoot "original") "videos"
-        RemuxOriginalImagesDir = Join-Path (Join-Path $remuxWorkspaceRoot "original") "images"
-        RemuxFailedDir = Join-Path $remuxWorkspaceRoot "failed"
-        LongInputDir = Join-Path $longWorkspaceRoot "input"
-        LongOutputDir = Join-Path $longWorkspaceRoot "output"
-        LongOriginalDir = Join-Path $longWorkspaceRoot "original"
-        LongFailedDir = Join-Path $longWorkspaceRoot "failed"
-        LongWorkDir = Join-Path $longWorkspaceRoot "work"
-        ImageBulkInputDir = Join-Path $imageBulkWorkspaceRoot "input"
-        ImageBulkOutputDir = Join-Path $imageBulkWorkspaceRoot "output"
-        ImageBulkOriginalDir = Join-Path $imageBulkWorkspaceRoot "original"
-        ImageBulkFailedDir = Join-Path $imageBulkWorkspaceRoot "failed"
-        ImageCleanInputDir = Join-Path $imageCleanWorkspaceRoot "input"
-        ImageCleanOutputDir = Join-Path $imageCleanWorkspaceRoot "output"
-        ImageCleanOriginalDir = Join-Path $imageCleanWorkspaceRoot "original"
-        ImageCleanFailedDir = Join-Path $imageCleanWorkspaceRoot "failed"
-        SetInputDir = Join-Path $setWorkspaceRoot "input"
-        SetOutputDir = Join-Path $setWorkspaceRoot "output"
-        SetOriginalDir = Join-Path $setWorkspaceRoot "original"
-        SetFailedDir = Join-Path $setWorkspaceRoot "failed"
-        SetBatchInputDir = Join-Path $setBatchWorkspaceRoot "input"
-        SetBatchOutputDir = Join-Path $setBatchWorkspaceRoot "output"
-        SetBatchOriginalDir = Join-Path $setBatchWorkspaceRoot "original"
-        SetBatchFailedDir = Join-Path $setBatchWorkspaceRoot "failed"
-        AssetStoreInputDir = Join-Path $assetStoreWorkspaceRoot "input"
-        AssetStoreOutputDir = Join-Path $assetStoreWorkspaceRoot "output"
-        AssetStoreOriginalDir = Join-Path $assetStoreWorkspaceRoot "original"
-        AssetStoreFailedDir = Join-Path $assetStoreWorkspaceRoot "failed"
-        ArchiveDefaultOutputDir = Join-Path $archiveDefaultWorkspaceRoot "output"
-        ArchiveVideoCleanOutputDir = Join-Path $archiveVideoCleanWorkspaceRoot "output"
-        ArchiveImageBulkOutputDir = Join-Path $archiveImageBulkWorkspaceRoot "output"
-        ArchiveImageCleanOutputDir = Join-Path $archiveImageCleanWorkspaceRoot "output"
-        ArchiveRemuxOutputDir = Join-Path $archiveRemuxWorkspaceRoot "output"
-        ArchiveLongOutputDir = Join-Path $archiveLongWorkspaceRoot "output"
-        ArchiveSetOutputDir = Join-Path $archiveSetWorkspaceRoot "output"
-        ArchiveSetBatchOutputDir = Join-Path $archiveSetBatchWorkspaceRoot "output"
-        ArchiveAssetStoreOutputDir = Join-Path $archiveAssetStoreWorkspaceRoot "output"
-    }
-}
 
-function Set-PipelineWorkspacePaths {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$WorkspaceName
-    )
-
-    $paths = Get-WorkspacePathSet -WorkspaceName $WorkspaceName
-    foreach ($property in $paths.PSObject.Properties) {
-        Set-Variable -Name $property.Name -Value $property.Value -Scope Script
-    }
-}
-
-Set-PipelineWorkspacePaths -WorkspaceName $DefaultWorkspaceName
-
-function Get-WorkspaceNameFromInputPath {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    foreach ($workspaceName in $WorkspaceNames) {
-        $paths = Get-WorkspacePathSet -WorkspaceName $workspaceName
-        $inputDirectories = @(
-            $paths.InputDir,
-            $paths.VideoCleanInputDir,
-            $paths.RemuxInputDir,
-            $paths.LongInputDir,
-            $paths.ImageBulkInputDir,
-            $paths.ImageCleanInputDir,
-            $paths.SetInputDir,
-            $paths.SetBatchInputDir,
-            $paths.AssetStoreInputDir
-        )
-
-        foreach ($inputDirectory in $inputDirectories) {
-            $prefix = [System.IO.Path]::GetFullPath($inputDirectory).TrimEnd('\') + '\'
-            if ($fullPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-                return $workspaceName
-            }
-        }
-    }
-
-    return $null
-}
-
-function Set-PipelineWorkspaceFromInputPath {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $workspaceName = Get-WorkspaceNameFromInputPath -Path $Path
-    if ($workspaceName) {
-        Set-PipelineWorkspacePaths -WorkspaceName $workspaceName
-    }
-
-    return $workspaceName
-}
 
 $VideoExtensions = @(".mp4", ".mov", ".mkv", ".webm", ".avi")
 $ImageExtensions = @(".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif")
@@ -353,6 +456,7 @@ $script:LogMutex = $null
 $script:ScriptPath = $PSCommandPath
 $script:SupportsParallel = ($PSVersionTable.PSVersion.Major -ge 7)
 $script:DefaultPipelineEntryCount = 0
+$script:PresetEntryCount = 0
 $script:LastSetBatchSignature = $null
 $script:LastAssetStoreSignature = $null
 $script:WorkspaceRuntimeState = @{}
@@ -363,20 +467,24 @@ function Use-PipelineWorkspace {
         [string]$WorkspaceName
     )
 
-    Set-PipelineWorkspacePaths -WorkspaceName $WorkspaceName
+    $script:CurrentWorkspaceName = $WorkspaceName
 
     if (-not $script:WorkspaceRuntimeState.ContainsKey($WorkspaceName)) {
         $script:WorkspaceRuntimeState[$WorkspaceName] = @{
             LastArchiveCheck = $null
-            LastSetBatchSignature = $null
-            LastAssetStoreSignature = $null
+            BatchSignatures = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
         }
     }
 
     $state = $script:WorkspaceRuntimeState[$WorkspaceName]
     $script:LastArchiveCheck = $state.LastArchiveCheck
-    $script:LastSetBatchSignature = $state.LastSetBatchSignature
-    $script:LastAssetStoreSignature = $state.LastAssetStoreSignature
+
+    # One settle signature per batch preset, so two batch presets in the same workspace
+    # cannot clobber each other's debounce state the way the old two fixed slots could.
+    if (-not $state.BatchSignatures) {
+        $state.BatchSignatures = New-Object 'System.Collections.Hashtable' ([System.StringComparer]::OrdinalIgnoreCase)
+    }
+    $script:BatchSignatures = $state.BatchSignatures
 }
 
 function Save-PipelineWorkspaceState {
@@ -390,18 +498,9 @@ function Save-PipelineWorkspaceState {
 
     $state = $script:WorkspaceRuntimeState[$script:CurrentWorkspaceName]
     $state.LastArchiveCheck = $script:LastArchiveCheck
-    $state.LastSetBatchSignature = $script:LastSetBatchSignature
-    $state.LastAssetStoreSignature = $script:LastAssetStoreSignature
+    $state.BatchSignatures = $script:BatchSignatures
 }
 
-function Get-DefaultPipelineCopyCount {
-    $script:DefaultPipelineEntryCount++
-    if (($script:DefaultPipelineEntryCount % 2) -eq 1) {
-        return $DefaultPipelineAlternatingCopiesPerFile
-    }
-
-    return $DefaultPipelineMinCopiesPerFile
-}
 
 function Initialize-Folders {
     $directories = New-Object System.Collections.Generic.List[string]
@@ -413,13 +512,15 @@ function Initialize-Folders {
 
     Move-LegacyPipelineAssetsToDefaultWorkspace
 
-    foreach ($workspaceName in $WorkspaceNames) {
-        $paths = Get-WorkspacePathSet -WorkspaceName $workspaceName
-        foreach ($property in $paths.PSObject.Properties) {
-            if ($property.Name -eq "CurrentWorkspaceName") { continue }
-            if ($property.Name.EndsWith("Dir")) {
-                $directories.Add([string]$property.Value) | Out-Null
-            }
+    # Each preset owns one folder tree per workspace. A preset that takes no video or no
+    # images still gets the full tree, because its copy counts can change at any time.
+    foreach ($preset in Get-PipelinePresets) {
+        foreach ($workspaceName in $WorkspaceNames) {
+            $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $workspaceName
+            $directories.Add($paths.InputDir) | Out-Null
+            $directories.Add($paths.OutputDir) | Out-Null
+            $directories.Add($paths.OriginalDir) | Out-Null
+            $directories.Add($paths.FailedDir) | Out-Null
         }
     }
 
@@ -575,13 +676,13 @@ function Initialize-VideoEncoder {
     # encoder but cannot run it cleanly falls through to the next option.
     if ($PreferNvenc -and (Test-NvencEncoderAvailable)) {
         $script:UseNvenc = $true
-        Write-Log "Video encoder: h264_nvenc (NVIDIA GPU, preset $NvencPreset, CQ $NvencCq, long CQ $LongNvencCq)"
+        Write-Log "Video encoder: h264_nvenc (NVIDIA GPU, preset $NvencPreset, CQ $DefaultNvencCq)"
         return
     }
 
     if ($PreferAmf -and (Test-AmfEncoderAvailable)) {
         $script:UseAmf = $true
-        Write-Log "Video encoder: h264_amf (AMD GPU, quality $AmfQuality, QP $AmfQp, long QP $LongAmfQp)"
+        Write-Log "Video encoder: h264_amf (AMD GPU, quality $AmfQuality, QP $DefaultAmfQp)"
         return
     }
 
@@ -589,7 +690,7 @@ function Initialize-VideoEncoder {
         Write-Log "No usable GPU encoder (NVENC/AMF) found in FFmpeg; falling back to libx264 (CPU)." "WARN"
     }
 
-    Write-Log "Video encoder: libx264 (CPU, preset $Preset, CRF $Crf)"
+    Write-Log "Video encoder: libx264 (CPU, preset $X264Preset, CRF $DefaultCrf)"
 }
 
 function Get-VideoEncoderName {
@@ -672,7 +773,7 @@ function New-VideoEncoderArguments {
         $arguments = @(
             "-c:v", "libx264",
             "-crf", [string]$QualityValue,
-            "-preset", $Preset,
+            "-preset", $script:X264Preset,
             "-vf", (Get-VideoScaleFilter -MaxWidthValue $MaxWidthValue),
             "-pix_fmt", "yuv420p"
         )
@@ -716,8 +817,8 @@ function Get-OutputSizeCapQualityProfiles {
 
     if ($script:UseNvenc) {
         return @(
-            @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
-            @{ Quality = 32; MaxWidth = $MaxWidth; Bitrate = 0 },
+            @{ Quality = 30; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
+            @{ Quality = 32; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
             @{ Quality = 34; MaxWidth = $FallbackMaxWidth; Bitrate = 0 },
             @{ Quality = 36; MaxWidth = $FallbackMaxWidth; Bitrate = 0 }
         )
@@ -725,16 +826,16 @@ function Get-OutputSizeCapQualityProfiles {
 
     if ($script:UseAmf) {
         return @(
-            @{ Quality = 28; MaxWidth = $MaxWidth; Bitrate = 0 },
-            @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
+            @{ Quality = 28; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
+            @{ Quality = 30; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
             @{ Quality = 32; MaxWidth = $FallbackMaxWidth; Bitrate = 0 },
             @{ Quality = 34; MaxWidth = $FallbackMaxWidth; Bitrate = 0 }
         )
     }
 
     return @(
-        @{ Quality = 28; MaxWidth = $MaxWidth; Bitrate = 0 },
-        @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
+        @{ Quality = 28; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
+        @{ Quality = 30; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
         @{ Quality = 32; MaxWidth = $FallbackMaxWidth; Bitrate = 0 },
         @{ Quality = 32; MaxWidth = $FallbackMaxWidth; Bitrate = 0 }
     )
@@ -796,25 +897,7 @@ function Test-IsTemporaryDownload {
     return $TempExtensions -contains $extension
 }
 
-function Test-IsSupportedMedia {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
 
-    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
-    return (($VideoExtensions -contains $extension) -or ($ImageExtensions -contains $extension))
-}
-
-function Test-IsVideo {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
-    return ($VideoExtensions -contains $extension)
-}
 
 function Test-FileUnlocked {
     param(
@@ -1056,9 +1139,6 @@ function New-RegularRandomDirectory {
     return $path
 }
 
-function New-ImageBulkBatchId {
-    return (New-RegularRandomName)
-}
 
 function Get-UniqueDestinationPath {
     param(
@@ -1147,71 +1227,40 @@ function Move-LegacyDirectoryContents {
     return $moved
 }
 
+# Upgrade path from installs that predate workspaces, where a lane's folders sat directly
+# under <root>\<lane>\ instead of <root>\<lane>\<workspace>\. Everything found is moved into
+# the default workspace. Also handles the oldest layout, where the default lane's folders sat
+# at the pipeline root.
 function Move-LegacyPipelineAssetsToDefaultWorkspace {
-    $paths = Get-WorkspacePathSet -WorkspaceName $DefaultWorkspaceName
-    $pairs = @(
-        @{ Label = "root default input"; Old = (Join-Path $PipelineRoot "input"); New = $paths.InputDir },
-        @{ Label = "root default output"; Old = (Join-Path $PipelineRoot "output"); New = $paths.OutputDir },
-        @{ Label = "root default original"; Old = (Join-Path $PipelineRoot "original"); New = $paths.OriginalDir },
-        @{ Label = "root default failed"; Old = (Join-Path $PipelineRoot "failed"); New = $paths.FailedDir },
+    $pairs = New-Object System.Collections.Generic.List[object]
 
-        @{ Label = "default input"; Old = (Join-Path $DefaultRootDir "input"); New = $paths.InputDir },
-        @{ Label = "default output"; Old = (Join-Path $DefaultRootDir "output"); New = $paths.OutputDir },
-        @{ Label = "default original"; Old = (Join-Path $DefaultRootDir "original"); New = $paths.OriginalDir },
-        @{ Label = "default failed"; Old = (Join-Path $DefaultRootDir "failed"); New = $paths.FailedDir },
+    $rootPaths = Get-PresetWorkspacePaths -PresetName "default" -WorkspaceName $DefaultWorkspaceName
+    $pairs.Add(@{ Label = "root default input";    Old = (Join-Path $PipelineRoot "input");    New = $rootPaths.InputDir }) | Out-Null
+    $pairs.Add(@{ Label = "root default output";   Old = (Join-Path $PipelineRoot "output");   New = $rootPaths.OutputDir }) | Out-Null
+    $pairs.Add(@{ Label = "root default original"; Old = (Join-Path $PipelineRoot "original"); New = $rootPaths.OriginalDir }) | Out-Null
+    $pairs.Add(@{ Label = "root default failed";   Old = (Join-Path $PipelineRoot "failed");   New = $rootPaths.FailedDir }) | Out-Null
 
-        @{ Label = "videoclean input"; Old = (Join-Path $VideoCleanRootDir "input"); New = $paths.VideoCleanInputDir },
-        @{ Label = "videoclean output"; Old = (Join-Path $VideoCleanRootDir "output"); New = $paths.VideoCleanOutputDir },
-        @{ Label = "videoclean original"; Old = (Join-Path $VideoCleanRootDir "original"); New = $paths.VideoCleanOriginalDir },
-        @{ Label = "videoclean failed"; Old = (Join-Path $VideoCleanRootDir "failed"); New = $paths.VideoCleanFailedDir },
+    foreach ($preset in Get-PipelinePresets) {
+        $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $DefaultWorkspaceName
+        $presetRoot = Join-Path $PipelineRoot $preset.Name
 
-        @{ Label = "convert input"; Old = (Join-Path $RemuxRootDir "input"); New = $paths.RemuxInputDir },
-        @{ Label = "convert output"; Old = (Join-Path $RemuxRootDir "output"); New = $paths.RemuxOutputDir },
-        @{ Label = "convert original videos"; Old = (Join-Path (Join-Path $RemuxRootDir "original") "videos"); New = $paths.RemuxOriginalVideosDir },
-        @{ Label = "convert original images"; Old = (Join-Path (Join-Path $RemuxRootDir "original") "images"); New = $paths.RemuxOriginalImagesDir },
-        @{ Label = "convert failed"; Old = (Join-Path $RemuxRootDir "failed"); New = $paths.RemuxFailedDir },
+        $pairs.Add(@{ Label = "$($preset.Name) input";    Old = (Join-Path $presetRoot "input");    New = $paths.InputDir }) | Out-Null
+        $pairs.Add(@{ Label = "$($preset.Name) output";   Old = (Join-Path $presetRoot "output");   New = $paths.OutputDir }) | Out-Null
+        $pairs.Add(@{ Label = "$($preset.Name) original"; Old = (Join-Path $presetRoot "original"); New = $paths.OriginalDir }) | Out-Null
+        $pairs.Add(@{ Label = "$($preset.Name) failed";   Old = (Join-Path $presetRoot "failed");   New = $paths.FailedDir }) | Out-Null
 
-        @{ Label = "long input"; Old = (Join-Path $LongRootDir "input"); New = $paths.LongInputDir },
-        @{ Label = "long output"; Old = (Join-Path $LongRootDir "output"); New = $paths.LongOutputDir },
-        @{ Label = "long original"; Old = (Join-Path $LongRootDir "original"); New = $paths.LongOriginalDir },
-        @{ Label = "long failed"; Old = (Join-Path $LongRootDir "failed"); New = $paths.LongFailedDir },
-        @{ Label = "long work"; Old = (Join-Path $LongRootDir "work"); New = $paths.LongWorkDir },
+        $pairs.Add(@{
+            Label = "archive $($preset.Name)"
+            Old   = (Join-Path $ArchiveRootDir $preset.Name)
+            New   = $paths.ArchiveDir
+        }) | Out-Null
+    }
 
-        @{ Label = "images input"; Old = (Join-Path $ImageBulkRootDir "input"); New = $paths.ImageBulkInputDir },
-        @{ Label = "images output"; Old = (Join-Path $ImageBulkRootDir "output"); New = $paths.ImageBulkOutputDir },
-        @{ Label = "images original"; Old = (Join-Path $ImageBulkRootDir "original"); New = $paths.ImageBulkOriginalDir },
-        @{ Label = "images failed"; Old = (Join-Path $ImageBulkRootDir "failed"); New = $paths.ImageBulkFailedDir },
-
-        @{ Label = "imageclean input"; Old = (Join-Path $ImageCleanRootDir "input"); New = $paths.ImageCleanInputDir },
-        @{ Label = "imageclean output"; Old = (Join-Path $ImageCleanRootDir "output"); New = $paths.ImageCleanOutputDir },
-        @{ Label = "imageclean original"; Old = (Join-Path $ImageCleanRootDir "original"); New = $paths.ImageCleanOriginalDir },
-        @{ Label = "imageclean failed"; Old = (Join-Path $ImageCleanRootDir "failed"); New = $paths.ImageCleanFailedDir },
-
-        @{ Label = "sets input"; Old = (Join-Path $SetRootDir "input"); New = $paths.SetInputDir },
-        @{ Label = "sets output"; Old = (Join-Path $SetRootDir "output"); New = $paths.SetOutputDir },
-        @{ Label = "sets original"; Old = (Join-Path $SetRootDir "original"); New = $paths.SetOriginalDir },
-        @{ Label = "sets failed"; Old = (Join-Path $SetRootDir "failed"); New = $paths.SetFailedDir },
-
-        @{ Label = "setbatch input"; Old = (Join-Path $SetBatchRootDir "input"); New = $paths.SetBatchInputDir },
-        @{ Label = "setbatch output"; Old = (Join-Path $SetBatchRootDir "output"); New = $paths.SetBatchOutputDir },
-        @{ Label = "setbatch original"; Old = (Join-Path $SetBatchRootDir "original"); New = $paths.SetBatchOriginalDir },
-        @{ Label = "setbatch failed"; Old = (Join-Path $SetBatchRootDir "failed"); New = $paths.SetBatchFailedDir },
-
-        @{ Label = "assetstore input"; Old = (Join-Path $AssetStoreRootDir "input"); New = $paths.AssetStoreInputDir },
-        @{ Label = "assetstore output"; Old = (Join-Path $AssetStoreRootDir "output"); New = $paths.AssetStoreOutputDir },
-        @{ Label = "assetstore original"; Old = (Join-Path $AssetStoreRootDir "original"); New = $paths.AssetStoreOriginalDir },
-        @{ Label = "assetstore failed"; Old = (Join-Path $AssetStoreRootDir "failed"); New = $paths.AssetStoreFailedDir },
-
-        @{ Label = "archive default"; Old = (Join-Path $ArchiveRootDir "output"); New = $paths.ArchiveDefaultOutputDir },
-        @{ Label = "archive videoclean"; Old = (Join-Path $ArchiveRootDir "videoclean"); New = $paths.ArchiveVideoCleanOutputDir },
-        @{ Label = "archive images"; Old = (Join-Path $ArchiveRootDir "images"); New = $paths.ArchiveImageBulkOutputDir },
-        @{ Label = "archive imageclean"; Old = (Join-Path $ArchiveRootDir "imageclean"); New = $paths.ArchiveImageCleanOutputDir },
-        @{ Label = "archive convert"; Old = (Join-Path $ArchiveRootDir "convert"); New = $paths.ArchiveRemuxOutputDir },
-        @{ Label = "archive long"; Old = (Join-Path $ArchiveRootDir "long"); New = $paths.ArchiveLongOutputDir },
-        @{ Label = "archive sets"; Old = (Join-Path $ArchiveRootDir "sets"); New = $paths.ArchiveSetOutputDir },
-        @{ Label = "archive setbatch"; Old = (Join-Path $ArchiveRootDir "setbatch"); New = $paths.ArchiveSetBatchOutputDir },
-        @{ Label = "archive assetstore"; Old = (Join-Path $ArchiveRootDir "assetstore"); New = $paths.ArchiveAssetStoreOutputDir }
-    )
+    $pairs.Add(@{
+        Label = "legacy archive output"
+        Old   = (Join-Path $ArchiveRootDir "output")
+        New   = $rootPaths.ArchiveDir
+    }) | Out-Null
 
     $totalMoved = 0
     foreach ($pair in $pairs) {
@@ -1365,72 +1414,23 @@ function Invoke-DirectoryOutputArchive {
     return $count
 }
 
-function Get-OutputArchiveTargets {
-    return @(
-        [pscustomobject]@{
-            SourceDirectory = $OutputDir
-            ArchiveDirectory = $ArchiveDefaultOutputDir
-            Label = "default"
-        },
-        [pscustomobject]@{
-            SourceDirectory = $VideoCleanOutputDir
-            ArchiveDirectory = $ArchiveVideoCleanOutputDir
-            Label = "videoclean"
-        },
-        [pscustomobject]@{
-            SourceDirectory = $ImageBulkOutputDir
-            ArchiveDirectory = $ArchiveImageBulkOutputDir
-            Label = "images"
-        },
-        [pscustomobject]@{
-            SourceDirectory = $ImageCleanOutputDir
-            ArchiveDirectory = $ArchiveImageCleanOutputDir
-            Label = "imageclean"
-        },
-        [pscustomobject]@{
-            SourceDirectory = $LongOutputDir
-            ArchiveDirectory = $ArchiveLongOutputDir
-            Label = "long"
-        },
-        [pscustomobject]@{
-            SourceDirectory = $RemuxOutputDir
-            ArchiveDirectory = $ArchiveRemuxOutputDir
-            Label = "convert"
-        }
-    )
-}
 
+# Retention sweeps every preset's archive folder for the current workspace. The images
+# preset is excluded, matching the long-standing rule that archived images are kept.
 function Get-ArchiveRetentionTargets {
-    return @(
-        [pscustomobject]@{
-            TargetDirectory = $ArchiveDefaultOutputDir
-            Label = "archive default"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $ArchiveVideoCleanOutputDir
-            Label = "archive videoclean"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $ArchiveLongOutputDir
-            Label = "archive long"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $ArchiveRemuxOutputDir
-            Label = "archive convert"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $ArchiveSetOutputDir
-            Label = "archive sets"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $ArchiveSetBatchOutputDir
-            Label = "archive setbatch"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $ArchiveAssetStoreOutputDir
-            Label = "archive assetstore"
-        }
-    )
+    $targets = New-Object System.Collections.Generic.List[object]
+
+    foreach ($preset in Get-PipelinePresets) {
+        if ($preset.Name -eq "images") { continue }
+
+        $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $script:CurrentWorkspaceName
+        $targets.Add([pscustomobject]@{
+            TargetDirectory = $paths.ArchiveDir
+            Label = "archive $($preset.Name)"
+        }) | Out-Null
+    }
+
+    return $targets.ToArray()
 }
 
 function Get-LegacyArchiveRetentionTargets {
@@ -1478,126 +1478,50 @@ function Get-LegacyArchiveRetentionTargets {
     )
 }
 
+# Retention sweeps the original, failed and work folders of every preset in the current
+# workspace. The images preset keeps its assets, matching the archive rule above.
 function Get-PipelineAssetRetentionTargets {
-    return @(
-        [pscustomobject]@{
-            TargetDirectory = $OriginalDir
-            Label = "default original"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $FailedDir
-            Label = "default failed"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $VideoCleanOriginalDir
-            Label = "videoclean original"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $VideoCleanFailedDir
-            Label = "videoclean failed"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $RemuxOriginalVideosDir
-            Label = "convert original videos"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $RemuxOriginalImagesDir
-            Label = "convert original images"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $RemuxFailedDir
-            Label = "convert failed"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $ImageBulkOriginalDir
-            Label = "images original"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $ImageBulkFailedDir
-            Label = "images failed"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $LongOriginalDir
-            Label = "long original"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $LongFailedDir
-            Label = "long failed"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $LongWorkDir
-            Label = "long work"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $SetOriginalDir
-            Label = "sets original"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $SetFailedDir
-            Label = "sets failed"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $SetBatchOriginalDir
-            Label = "setbatch original"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $SetBatchFailedDir
-            Label = "setbatch failed"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $AssetStoreOriginalDir
-            Label = "assetstore original"
-        },
-        [pscustomobject]@{
-            TargetDirectory = $AssetStoreFailedDir
-            Label = "assetstore failed"
+    $targets = New-Object System.Collections.Generic.List[object]
+
+    foreach ($preset in Get-PipelinePresets) {
+        if ($preset.Name -eq "images") { continue }
+
+        $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $script:CurrentWorkspaceName
+
+        $targets.Add([pscustomobject]@{ TargetDirectory = $paths.OriginalDir; Label = "$($preset.Name) original" }) | Out-Null
+        $targets.Add([pscustomobject]@{ TargetDirectory = $paths.FailedDir;   Label = "$($preset.Name) failed" }) | Out-Null
+
+        if ($preset.Segment) {
+            $targets.Add([pscustomobject]@{ TargetDirectory = $paths.WorkDir; Label = "$($preset.Name) work" }) | Out-Null
         }
-    )
+    }
+
+    return $targets.ToArray()
 }
 
+# Sync folders sit above the workspace level: <root>\sync and <root>\<preset>\sync. They are
+# written by the upload scripts rather than the watcher, which only ages them out.
 function Get-SyncRetentionTargets {
-    return @(
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $PipelineRoot "sync"
-            Label = "root sync"
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $DefaultRootDir "sync"
-            Label = "default sync"
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $VideoCleanRootDir "sync"
-            Label = "videoclean sync"
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $RemuxRootDir "sync"
-            Label = "convert sync"
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $ImageBulkRootDir "sync"
-            Label = "images sync"
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $LongRootDir "sync"
-            Label = "long sync"
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $SetRootDir "sync"
-            Label = "sets sync"
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $SetBatchRootDir "sync"
-            Label = "setbatch sync"
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $AssetStoreRootDir "sync"
-            Label = "assetstore sync"
-        },
-        [pscustomobject]@{
-            TargetDirectory = Join-Path $PipelineRoot ".sync-parts"
-            Label = "sync parts"
-        }
-    )
+    $targets = New-Object System.Collections.Generic.List[object]
+
+    $targets.Add([pscustomobject]@{
+        TargetDirectory = Join-Path $PipelineRoot "sync"
+        Label = "root sync"
+    }) | Out-Null
+
+    foreach ($preset in Get-PipelinePresets) {
+        $targets.Add([pscustomobject]@{
+            TargetDirectory = Join-Path (Join-Path $PipelineRoot $preset.Name) "sync"
+            Label = "$($preset.Name) sync"
+        }) | Out-Null
+    }
+
+    $targets.Add([pscustomobject]@{
+        TargetDirectory = Join-Path $PipelineRoot ".sync-parts"
+        Label = "sync parts"
+    }) | Out-Null
+
+    return $targets.ToArray()
 }
 
 function Invoke-AssetRetentionCleanup {
@@ -1708,13 +1632,18 @@ function Invoke-OutputArchiveIfDue {
 
         Write-Log "Running scheduled output archive check (older than $ArchiveAgeHours hours)."
 
-        foreach ($target in Get-OutputArchiveTargets) {
-            [void](Invoke-FlatOutputArchive -SourceDirectory $target.SourceDirectory -ArchiveDirectory $target.ArchiveDirectory -Label $target.Label -CutoffTime $cutoffTime)
-        }
+        # A flat preset archives loose files; a grouped preset moves whole output folders,
+        # which is exactly the distinction its Grouping option already encodes.
+        foreach ($preset in Get-PipelinePresets) {
+            $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $script:CurrentWorkspaceName
 
-        [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetOutputDir -ArchiveDirectory $ArchiveSetOutputDir -Label "sets" -CutoffTime $cutoffTime)
-        [void](Invoke-DirectoryOutputArchive -SourceDirectory $SetBatchOutputDir -ArchiveDirectory $ArchiveSetBatchOutputDir -Label "setbatch" -CutoffTime $cutoffTime)
-        [void](Invoke-DirectoryOutputArchive -SourceDirectory $AssetStoreOutputDir -ArchiveDirectory $ArchiveAssetStoreOutputDir -Label "assetstore" -CutoffTime $cutoffTime)
+            if ($preset.Grouping -eq "Flat") {
+                [void](Invoke-FlatOutputArchive -SourceDirectory $paths.OutputDir -ArchiveDirectory $paths.ArchiveDir -Label $preset.Name -CutoffTime $cutoffTime)
+            }
+            else {
+                [void](Invoke-DirectoryOutputArchive -SourceDirectory $paths.OutputDir -ArchiveDirectory $paths.ArchiveDir -Label $preset.Name -CutoffTime $cutoffTime)
+            }
+        }
     }
 
     Invoke-AssetRetentionCleanup
@@ -1739,27 +1668,6 @@ function Move-InputFile {
     Write-Log "Moved input file to: $destination"
 }
 
-function Move-InputFileToRandomOutput {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [Parameter(Mandatory = $true)]
-        [string]$DestinationDirectory
-    )
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        Write-Log "Input file is no longer present, cannot move to output: $Path" "WARN"
-        return $null
-    }
-
-    $extension = [System.IO.Path]::GetExtension($Path)
-    $destination = New-IPhoneRandomFilePath -Directory $DestinationDirectory -Extension $extension
-    Move-Item -LiteralPath $Path -Destination $destination -Force
-    Write-Log "Moved input file to random output path: $destination"
-
-    return $destination
-}
 
 function Remove-GeneratedOutputs {
     param(
@@ -1851,7 +1759,18 @@ function Get-MediaDimensions {
     )
 
     $output = Invoke-ExternalTool -Command $script:FFprobePath -Arguments $arguments
-    $probe = (($output | Out-String).Trim() | ConvertFrom-Json)
+    $raw = ($output | Out-String).Trim()
+
+    # A file that is not really media at all makes ffprobe print a diagnostic instead of JSON.
+    # Parsing that as JSON produces a baffling "unexpected character" error that says nothing
+    # about the actual problem, so name the real one.
+    try {
+        $probe = $raw | ConvertFrom-Json
+    }
+    catch {
+        throw "ffprobe could not read '$Path' as media. It may be corrupt, truncated, or not the format its extension claims."
+    }
+
     $frame = @($probe.frames)[0]
     if ($null -eq $frame -or [int]$frame.width -le 0 -or [int]$frame.height -le 0) {
         throw "Unable to read image dimensions from ffprobe for: $Path"
@@ -1968,11 +1887,20 @@ function Remove-HeicWorkingCopy {
     }
 }
 
+# Decides how much may be trimmed off the end of a video variant. ConfiguredMinMs and
+# ConfiguredMaxMs default to the global trim range; a preset passes its own to override it.
 function Get-TrimRange {
     param(
         [Parameter(Mandatory = $true)]
-        [double]$DurationSeconds
+        [double]$DurationSeconds,
+
+        [int]$ConfiguredMinMs = -1,
+
+        [int]$ConfiguredMaxMs = -1
     )
+
+    if ($ConfiguredMinMs -lt 0) { $ConfiguredMinMs = $DefaultMinTrimMs }
+    if ($ConfiguredMaxMs -lt 0) { $ConfiguredMaxMs = $DefaultMaxTrimMs }
 
     $durationMs = [int][Math]::Floor($DurationSeconds * 1000)
 
@@ -2004,8 +1932,8 @@ function Get-TrimRange {
         }
     }
 
-    $safeConfiguredMax = [int][Math]::Min($MaxTrimMs, $durationMs - 1000)
-    if ($safeConfiguredMax -lt $MinTrimMs) {
+    $safeConfiguredMax = [int][Math]::Min($ConfiguredMaxMs, $durationMs - 1000)
+    if ($safeConfiguredMax -lt $ConfiguredMinMs) {
         return [pscustomobject]@{
             CanTrim = $false
             MinMs = 0
@@ -2016,7 +1944,7 @@ function Get-TrimRange {
 
     return [pscustomobject]@{
         CanTrim = $true
-        MinMs = $MinTrimMs
+        MinMs = $ConfiguredMinMs
         MaxMs = $safeConfiguredMax
         Reason = "configured trim range"
     }
@@ -2060,13 +1988,22 @@ function Clear-Metadata {
     Invoke-ExternalTool -Command $script:ExifToolPath -Arguments @("-all=", "-overwrite_original", $Path) | Out-Null
 }
 
-function Convert-VideoVariant {
+# Produces one randomly named .mp4 variant: trims the tail, encodes, strips metadata, and
+# optionally enforces a size cap.
+#
+# Every video lane goes through here. The lane-specific policy is expressed by two arguments:
+#   MaxVideoBitrateKbps  0 means no bitrate ceiling on the first encode.
+#   MaxSizeMegabytes     0 skips the size-cap retry pass entirely.
+# The set, set-batch and asset-store lanes pass 0 for both; the default lane passes neither.
+#
+# LogLabel identifies the lane in the log, e.g. "Video variant 3" or "Set video variant 2".
+function New-VideoVariant {
     param(
         [Parameter(Mandatory = $true)]
         [string]$InputPath,
 
         [Parameter(Mandatory = $true)]
-        [int]$VariantNumber,
+        [string]$OutputDirectory,
 
         [Parameter(Mandatory = $true)]
         [double]$DurationSeconds,
@@ -2074,8 +2011,29 @@ function Convert-VideoVariant {
         [Parameter(Mandatory = $true)]
         [int]$TrimMs,
 
-        [string]$OutputDirectory = $OutputDir
+        [Parameter(Mandatory = $true)]
+        [string]$LogLabel,
+
+        # Encoder settings come from the caller's preset. Below zero, or empty, falls back to
+        # the global default, which is what the size-cap retry pass relies on.
+        [int]$QualityValue = -1,
+
+        [int]$MaxWidthValue = -1,
+
+        [string]$AudioBitrateValue = "",
+
+        [int]$MaxVideoBitrateKbps = 0,
+
+        [double]$MaxSizeMegabytes = 0,
+
+        [int]$SizeCapFallbackMaxWidth = 0
     )
+
+    if ($QualityValue -lt 0) {
+        $QualityValue = if ($script:UseNvenc) { $DefaultNvencCq } elseif ($script:UseAmf) { $DefaultAmfQp } else { $DefaultCrf }
+    }
+    if ($MaxWidthValue -lt 0) { $MaxWidthValue = $DefaultMaxWidth }
+    if ([string]::IsNullOrWhiteSpace($AudioBitrateValue)) { $AudioBitrateValue = $DefaultAudioBitrate }
 
     $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
@@ -2083,200 +2041,83 @@ function Convert-VideoVariant {
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
     $targetDurationText = $targetDuration.ToString("0.###", $culture)
 
-    Write-Log "Video variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
+    Write-Log "$LogLabel trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
 
-    $qualityValue = if ($script:UseNvenc) { $NvencCq } elseif ($script:UseAmf) { $AmfQp } else { $Crf }
-    $maxVideoBitrateKbps = Get-PrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration -MaxSizeMegabytes $DefaultMaxOutputSizeMB -MaxrateScale $DefaultNvencPrimaryMaxrateScale
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-t", $targetDurationText,
-        "-map", "0:v:0",
-        "-map", "0:a:0?"
-    )
-    $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth -MaxVideoBitrateKbps $maxVideoBitrateKbps
-    $arguments += @(
-        "-c:a", "aac",
-        "-b:a", $AudioBitrate,
-        "-movflags", "+faststart",
-        "-map_metadata", "-1",
-        $outputPath
-    )
+    $encodeArgs = @{
+        InputPath           = $InputPath
+        OutputPath          = $outputPath
+        QualityValue        = $QualityValue
+        MaxWidthValue       = $MaxWidthValue
+        AudioBitrateValue   = $AudioBitrateValue
+        DurationSeconds     = $targetDuration
+        MaxVideoBitrateKbps = $MaxVideoBitrateKbps
+    }
 
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+    Invoke-VideoEncode @encodeArgs
+
     Clear-Metadata -Path $outputPath
-    Invoke-OutputSizeCap -OutputPath $outputPath -MaxSizeMegabytes $DefaultMaxOutputSizeMB -FallbackMaxWidth $DefaultSizeCapFallbackMaxWidth -SourceInputPath $InputPath -SegmentDurationSeconds $DurationSeconds -TrimMs $TrimMs
-    Write-Log "Created video output: $outputPath"
+
+    if ($MaxSizeMegabytes -gt 0) {
+        Invoke-OutputSizeCap -OutputPath $outputPath -MaxSizeMegabytes $MaxSizeMegabytes -FallbackMaxWidth $SizeCapFallbackMaxWidth -SourceInputPath $InputPath -SegmentDurationSeconds $DurationSeconds -TrimMs $TrimMs
+    }
+
+    Write-Log "Created $LogLabel output: $outputPath"
 
     return $outputPath
 }
 
-function Convert-ImageVariant {
+
+
+
+
+
+
+# Produces one randomly named image variant: a tiny randomized crop scaled back to the
+# original dimensions, so each copy differs while looking identical, with metadata stripped.
+#
+# Quality is passed in rather than read from config because the lanes disagree today. The bulk
+# lane uses the configured quality, the clean lane uses 4 for HEIC sources and 2 otherwise, and
+# the set family hardcodes 2. Unifying those values is a separate change.
+#
+# RemoveOutputOnFailure deletes a partial output before rethrowing. Only the image-clean lane
+# does that today; the others leave partial outputs for their caller to reap.
+function New-ImageVariant {
     param(
         [Parameter(Mandatory = $true)]
         [string]$InputPath,
 
         [Parameter(Mandatory = $true)]
-        [int]$VariantNumber
-    )
-
-    $extension = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
-    $outputExtension = $extension
-    if ($extension -eq ".heic") {
-        $outputExtension = ".png"
-    }
-
-    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDir -Extension $outputExtension
-
-    if ($extension -eq ".heic") {
-        $arguments = @(
-            "-y",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-i", $InputPath,
-            "-frames:v", "1",
-            "-map_metadata", "-1",
-            $outputPath
-        )
-
-        Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    }
-    else {
-        Copy-Item -LiteralPath $InputPath -Destination $outputPath -Force
-    }
-
-    Clear-Metadata -Path $outputPath
-    Write-Log "Created image output variant ${VariantNumber}: $outputPath"
-
-    return $outputPath
-}
-
-function Process-VideoFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
+        [string]$OutputDirectory,
 
         [Parameter(Mandatory = $true)]
-        [int]$CopyCount,
-
-        [string]$OutputDirectory = $OutputDir
-    )
-
-    $createdOutputs = New-Object System.Collections.Generic.List[string]
-
-    try {
-        $duration = Get-VideoDurationSeconds -Path $Path
-        $durationText = $duration.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-        Write-Log "Video duration: ${durationText}s"
-
-        $range = Get-TrimRange -DurationSeconds $duration
-        if ($range.CanTrim) {
-            Write-Log "Using trim range $($range.MinMs)-$($range.MaxMs) ms ($($range.Reason))"
-        }
-        else {
-            Write-Log "Skipping duration trimming: $($range.Reason)" "WARN"
-        }
-
-        $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
-
-        for ($variant = 1; $variant -le $CopyCount; $variant++) {
-            $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $CopyCount
-            $outputPath = Convert-VideoVariant -InputPath $Path -VariantNumber $variant -DurationSeconds $duration -TrimMs $trimMs -OutputDirectory $OutputDirectory
-            $createdOutputs.Add($outputPath)
-        }
-
-        return $createdOutputs.ToArray()
-    }
-    catch {
-        Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
-        throw
-    }
-}
-
-function Process-ImageFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [Parameter(Mandatory = $true)]
-        [int]$CopyCount
-    )
-
-    $createdOutputs = New-Object System.Collections.Generic.List[string]
-
-    try {
-        for ($variant = 1; $variant -le $CopyCount; $variant++) {
-            $outputPath = Convert-ImageVariant -InputPath $Path -VariantNumber $variant
-            $createdOutputs.Add($outputPath)
-        }
-
-        return $createdOutputs.ToArray()
-    }
-    catch {
-        Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
-        throw
-    }
-}
-
-function Get-ImageBulkOutputExtension {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath
-    )
-
-    $extension = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
-    if ($extension -in @(".heic", ".heif")) {
-        return ".png"
-    }
-
-    return $extension
-}
-
-function Get-ImageCleanOutputExtension {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath
-    )
-
-    if (Test-IsHeicImage -Path $InputPath) {
-        return ".jpg"
-    }
-
-    return (Get-ImageBulkOutputExtension -InputPath $InputPath)
-}
-
-function Convert-ImageBulkVariant {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath,
-
-        [Parameter(Mandatory = $true)]
-        [int]$VariantNumber,
+        [string]$OutputExtension,
 
         [Parameter(Mandatory = $true)]
         [pscustomobject]$Dimensions,
 
         [Parameter(Mandatory = $true)]
-        [string]$BatchId,
+        [string]$LogLabel,
 
-        [string]$SourcePath = $InputPath
+        [string]$JpegQuality = "2",
+
+        [string]$WebpQuality = "92",
+
+        [int]$PngCompressionLevel = 6,
+
+        # Below zero means "use the global crop range". A preset passes its own.
+        [int]$CropMinPermille = -1,
+
+        [int]$CropMaxPermille = -1,
+
+        [switch]$RemoveOutputOnFailure
     )
 
-    $sourceExtension = [System.IO.Path]::GetExtension($SourcePath).ToLowerInvariant()
-    $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $isPngFamilyConversion = (
-        $ImageBulkConvertPngToJpeg -and
-        $sourceExtension -in @(".png", ".heic", ".heif")
-    )
-    if ($isPngFamilyConversion) {
-        $outputExtension = ".jpg"
-    }
-    $outputPath = New-IPhoneRandomFilePath -Directory $ImageBulkOutputDir -Extension $outputExtension
+    if ($CropMinPermille -lt 0) { $CropMinPermille = $DefaultCropMinPermille }
+    if ($CropMaxPermille -lt 0) { $CropMaxPermille = $DefaultCropMaxPermille }
+
+    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension $OutputExtension
     $width = $Dimensions.Width
     $height = $Dimensions.Height
-    $canCrop = ($width -ge 200 -and $height -ge 200)
 
     $arguments = @(
         "-y",
@@ -2287,8 +2128,9 @@ function Convert-ImageBulkVariant {
         "-map_metadata", "-1"
     )
 
-    if ($canCrop) {
-        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
+    # Cropping a very small image would visibly degrade it, so leave those untouched.
+    if ($width -ge 200 -and $height -ge 200) {
+        $cropPermille = Get-Random -Minimum $CropMinPermille -Maximum ($CropMaxPermille + 1)
         $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
         $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
         $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
@@ -2297,195 +2139,20 @@ function Convert-ImageBulkVariant {
         $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
         $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
         $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
-        Write-Log "Image bulk variant $VariantNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
+        Write-Log "$LogLabel crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
     }
     else {
-        Write-Log "Image bulk variant $VariantNumber skipping crop because image is small: ${width}x${height}" "WARN"
+        Write-Log "$LogLabel skipping crop because image is small: ${width}x${height}" "WARN"
     }
 
-    if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $jpegQuality = if ($isPngFamilyConversion) {
-            [string]$ImageBulkConvertedJpegQuality
-        }
-        else {
-            [string]$ImageBulkNativeJpegQuality
-        }
-        $arguments += @("-q:v", $jpegQuality)
+    if ($OutputExtension -in @(".jpg", ".jpeg")) {
+        $arguments += @("-q:v", $JpegQuality)
     }
-    elseif ($outputExtension -eq ".webp") {
-        $arguments += @("-quality", "92")
+    elseif ($OutputExtension -eq ".webp") {
+        $arguments += @("-quality", $WebpQuality)
     }
-    elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", ([string]$ImageBulkPngCompressionLevel))
-    }
-
-    $arguments += @($outputPath)
-
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    Clear-Metadata -Path $outputPath
-    Write-Log "Created image bulk output variant ${VariantNumber}: $outputPath"
-
-    return $outputPath
-}
-
-function Process-ImageBulkFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [int]$VariantConcurrency = $ImageProcessingConcurrency
-    )
-
-    $createdOutputs = New-Object System.Collections.Generic.List[string]
-    $processingSource = Resolve-ImageProcessingSource -Path $Path
-
-    try {
-        $effectiveVariantConcurrency = [Math]::Max(1, $VariantConcurrency)
-        $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
-        Write-Log "Image bulk dimensions: $($dimensions.Width)x$($dimensions.Height)"
-
-        $batchId = New-ImageBulkBatchId
-        Write-Log "Image bulk batch id: $batchId"
-
-        if ($script:SupportsParallel -and $ImageBulkCopiesPerFile -gt 1 -and $effectiveVariantConcurrency -gt 1) {
-            $libPath = $script:ScriptPath
-            $ffPath = $script:FFmpegPath
-            $fpPath = $script:FFprobePath
-            $exPath = $script:ExifToolPath
-            $procPath = $processingSource.ProcessingPath
-            $srcPath = $Path
-            $dims = $dimensions
-            $bId = $batchId
-            $workspaceNameForParallel = $script:CurrentWorkspaceName
-            $variantResults = 1..$ImageBulkCopiesPerFile | ForEach-Object -ThrottleLimit $effectiveVariantConcurrency -Parallel {
-                . $using:libPath -AsLibrary
-                Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
-                $script:FFmpegPath = $using:ffPath
-                $script:FFprobePath = $using:fpPath
-                $script:ExifToolPath = $using:exPath
-                try {
-                    $out = Convert-ImageBulkVariant -InputPath $using:procPath -SourcePath $using:srcPath -VariantNumber $_ -Dimensions $using:dims -BatchId $using:bId
-                    [pscustomobject]@{ Output = $out; Error = $null }
-                }
-                catch {
-                    [pscustomobject]@{ Output = $null; Error = $_.Exception.Message }
-                }
-            }
-            foreach ($vr in $variantResults) {
-                if ($vr.Output) { $createdOutputs.Add($vr.Output) }
-            }
-            $variantErrors = @($variantResults | Where-Object { $_.Error })
-            if ($variantErrors.Count -gt 0) {
-                throw "Failed $($variantErrors.Count)/$ImageBulkCopiesPerFile image bulk variants. First error: $($variantErrors[0].Error)"
-            }
-        }
-        else {
-            for ($variant = 1; $variant -le $ImageBulkCopiesPerFile; $variant++) {
-                $outputPath = Convert-ImageBulkVariant -InputPath $processingSource.ProcessingPath -SourcePath $Path -VariantNumber $variant -Dimensions $dimensions -BatchId $batchId
-                $createdOutputs.Add($outputPath)
-            }
-        }
-
-        Move-InputFile -Path $Path -DestinationDirectory $ImageBulkOriginalDir
-        Write-Log "Successfully processed image bulk file: $Path"
-    }
-    catch {
-        if ($createdOutputs.Count -gt 0) {
-            Write-Log "Preserving $($createdOutputs.Count) completed image bulk output(s) after failure: $Path" "WARN"
-        }
-        throw
-    }
-    finally {
-        Remove-HeicWorkingCopy -Path $processingSource.TempPath
-    }
-}
-
-function Process-ImageBulkFileSafely {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [int]$VariantConcurrency = $ImageProcessingConcurrency
-    )
-
-    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-
-    if (-not $script:ProcessingPaths.Add($fullPath)) {
-        return
-    }
-
-    try {
-        Write-Log "Detected image bulk file: $fullPath"
-        Wait-FileReady -Path $fullPath
-        Process-ImageBulkFile -Path $fullPath -VariantConcurrency $VariantConcurrency
-    }
-    catch {
-        Write-Log "Failed image bulk processing '$fullPath': $($_.Exception.Message)" "ERROR"
-        try {
-            Move-InputFile -Path $fullPath -DestinationDirectory $ImageBulkFailedDir
-        }
-        catch {
-            Write-Log "Could not move failed image bulk file '$fullPath': $($_.Exception.Message)" "ERROR"
-        }
-    }
-    finally {
-        [void]$script:ProcessingPaths.Remove($fullPath)
-    }
-}
-
-function Convert-ImageCleanFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath,
-
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$Dimensions,
-
-        [string]$SourcePath = $InputPath
-    )
-
-    $sourceIsHeic = Test-IsHeicImage -Path $SourcePath
-    $outputExtension = Get-ImageCleanOutputExtension -InputPath $SourcePath
-    $outputPath = New-IPhoneRandomFilePath -Directory $ImageCleanOutputDir -Extension $outputExtension
-    $width = $Dimensions.Width
-    $height = $Dimensions.Height
-    $canCrop = ($width -ge 200 -and $height -ge 200)
-
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-frames:v", "1",
-        "-map_metadata", "-1"
-    )
-
-    if ($canCrop) {
-        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
-        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
-        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
-        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
-        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
-        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
-        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
-        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
-        Write-Log "Image clean crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
-    }
-    else {
-        Write-Log "Image clean skipping crop because image is small: ${width}x${height}" "WARN"
-    }
-
-    if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $jpegQuality = if ($sourceIsHeic) { "4" } else { "2" }
-        $arguments += @("-q:v", $jpegQuality)
-    }
-    elseif ($outputExtension -eq ".webp") {
-        $arguments += @("-quality", "92")
-    }
-    elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", ([string]$ImageCleanPngCompressionLevel))
+    elseif ($OutputExtension -eq ".png") {
+        $arguments += @("-compression_level", ([string]$PngCompressionLevel))
     }
 
     $arguments += @($outputPath)
@@ -2493,521 +2160,39 @@ function Convert-ImageCleanFile {
     try {
         Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
         Clear-Metadata -Path $outputPath
-        Write-Log "Created image clean output: $outputPath"
-        return $outputPath
     }
     catch {
-        Remove-GeneratedOutputs -Paths @($outputPath)
+        if ($RemoveOutputOnFailure) {
+            Remove-GeneratedOutputs -Paths @($outputPath)
+        }
         throw
     }
-}
 
-function Process-ImageCleanFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $createdOutputs = New-Object System.Collections.Generic.List[string]
-    $processingSource = Resolve-ImageProcessingSource -Path $Path
-
-    try {
-        $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
-        Write-Log "Image clean dimensions: $($dimensions.Width)x$($dimensions.Height)"
-
-        $outputPath = Convert-ImageCleanFile -InputPath $processingSource.ProcessingPath -SourcePath $Path -Dimensions $dimensions
-        $createdOutputs.Add($outputPath)
-
-        Move-InputFile -Path $Path -DestinationDirectory $ImageCleanOriginalDir
-        Write-Log "Successfully processed image clean file: $Path"
-    }
-    catch {
-        Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
-        throw
-    }
-    finally {
-        Remove-HeicWorkingCopy -Path $processingSource.TempPath
-    }
-}
-
-function Process-ImageCleanFileSafely {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-
-    if (-not $script:ProcessingPaths.Add($fullPath)) {
-        return
-    }
-
-    try {
-        Write-Log "Detected image clean file: $fullPath"
-        Wait-FileReady -Path $fullPath
-        Process-ImageCleanFile -Path $fullPath
-    }
-    catch {
-        Write-Log "Failed image clean processing '$fullPath': $($_.Exception.Message)" "ERROR"
-        try {
-            Move-InputFile -Path $fullPath -DestinationDirectory $ImageCleanFailedDir
-        }
-        catch {
-            Write-Log "Could not move failed image clean file '$fullPath': $($_.Exception.Message)" "ERROR"
-        }
-    }
-    finally {
-        [void]$script:ProcessingPaths.Remove($fullPath)
-    }
-}
-
-function Convert-SetVideoVariant {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$OutputDirectory,
-
-        [Parameter(Mandatory = $true)]
-        [int]$VariantNumber,
-
-        [Parameter(Mandatory = $true)]
-        [double]$DurationSeconds,
-
-        [Parameter(Mandatory = $true)]
-        [int]$TrimMs
-    )
-
-    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
-    $trimSeconds = $TrimMs / 1000.0
-    $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
-    $culture = [System.Globalization.CultureInfo]::InvariantCulture
-    $targetDurationText = $targetDuration.ToString("0.###", $culture)
-
-    Write-Log "Set video variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
-
-    $qualityValue = if ($script:UseNvenc) { $NvencCq } elseif ($script:UseAmf) { $AmfQp } else { $Crf }
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-t", $targetDurationText,
-        "-map", "0:v:0",
-        "-map", "0:a:0?"
-    )
-    $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth
-    $arguments += @(
-        "-c:a", "aac",
-        "-b:a", $AudioBitrate,
-        "-movflags", "+faststart",
-        "-map_metadata", "-1",
-        $outputPath
-    )
-
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    Clear-Metadata -Path $outputPath
-    Write-Log "Created set video output: $outputPath"
+    Write-Log "Created $LogLabel output: $outputPath"
 
     return $outputPath
 }
 
-function Convert-SetImageVariant {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath,
 
-        [Parameter(Mandatory = $true)]
-        [string]$OutputDirectory,
 
-        [Parameter(Mandatory = $true)]
-        [int]$VariantNumber,
 
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$Dimensions,
 
-        [string]$SourcePath = $InputPath
-    )
 
-    $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
-    $width = $Dimensions.Width
-    $height = $Dimensions.Height
-    $canCrop = ($width -ge 200 -and $height -ge 200)
 
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-frames:v", "1",
-        "-map_metadata", "-1"
-    )
 
-    if ($canCrop) {
-        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
-        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
-        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
-        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
-        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
-        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
-        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
-        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
-        Write-Log "Set image variant $VariantNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
-    }
-    else {
-        Write-Log "Set image variant $VariantNumber skipping crop because image is small: ${width}x${height}" "WARN"
-    }
 
-    if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $arguments += @("-q:v", "2")
-    }
-    elseif ($outputExtension -eq ".webp") {
-        $arguments += @("-quality", "92")
-    }
-    elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", "6")
-    }
 
-    $arguments += @($outputPath)
 
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    Clear-Metadata -Path $outputPath
-    Write-Log "Created set image output: $outputPath"
 
-    return $outputPath
-}
 
-function Process-SetMediaFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
 
-    $outputDirectory = $null
 
-    try {
-        $outputDirectory = New-RegularRandomDirectory -Directory $SetOutputDir
-        Write-Log "Set output directory: $outputDirectory"
-
-        if (Test-IsVideo $Path) {
-            $duration = Get-VideoDurationSeconds -Path $Path
-            $durationText = $duration.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-            Write-Log "Set video duration: ${durationText}s"
-
-            $range = Get-TrimRange -DurationSeconds $duration
-            if ($range.CanTrim) {
-                Write-Log "Set video trim range $($range.MinMs)-$($range.MaxMs) ms"
-            }
-            else {
-                Write-Log "Set video skipping trim: $($range.Reason)" "WARN"
-            }
-
-            $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
-            for ($variant = 1; $variant -le $SetCopiesPerFile; $variant++) {
-                $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $SetCopiesPerFile
-                [void](Convert-SetVideoVariant -InputPath $Path -OutputDirectory $outputDirectory -VariantNumber $variant -DurationSeconds $duration -TrimMs $trimMs)
-            }
-        }
-        else {
-            $processingSource = Resolve-ImageProcessingSource -Path $Path
-
-            try {
-                $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
-                Write-Log "Set image dimensions: $($dimensions.Width)x$($dimensions.Height)"
-
-                for ($variant = 1; $variant -le $SetCopiesPerFile; $variant++) {
-                    [void](Convert-SetImageVariant -InputPath $processingSource.ProcessingPath -SourcePath $Path -OutputDirectory $outputDirectory -VariantNumber $variant -Dimensions $dimensions)
-                }
-            }
-            finally {
-                Remove-HeicWorkingCopy -Path $processingSource.TempPath
-            }
-        }
-
-        Move-InputFile -Path $Path -DestinationDirectory $SetOriginalDir
-        Write-Log "Successfully processed set media file: $Path"
-    }
-    catch {
-        Remove-GeneratedOutputDirectory -Path $outputDirectory
-        throw
-    }
-}
-
-function Process-SetMediaFileSafely {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-
-    if (-not $script:ProcessingPaths.Add($fullPath)) {
-        return
-    }
-
-    try {
-        Write-Log "Detected set media file: $fullPath"
-        Wait-FileReady -Path $fullPath
-
-        if (-not (Test-IsSupportedMedia $fullPath)) {
-            Write-Log "Skipping unsupported set media file: $fullPath" "WARN"
-            return
-        }
-
-        Process-SetMediaFile -Path $fullPath
-    }
-    catch {
-        Write-Log "Failed set media processing '$fullPath': $($_.Exception.Message)" "ERROR"
-        try {
-            Move-InputFile -Path $fullPath -DestinationDirectory $SetFailedDir
-        }
-        catch {
-            Write-Log "Could not move failed set media file '$fullPath': $($_.Exception.Message)" "ERROR"
-        }
-    }
-    finally {
-        [void]$script:ProcessingPaths.Remove($fullPath)
-    }
-}
-
-function Get-SetBatchOutputExtension {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath
-    )
-
-    $extension = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
-    if ($extension -in @(".heic", ".heif")) {
-        return ".jpg"
-    }
-
-    return $extension
-}
-
-function Convert-SetBatchImageVariant {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$OutputDirectory,
-
-        [Parameter(Mandatory = $true)]
-        [int]$SetNumber,
-
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$Dimensions,
-
-        [string]$SourcePath = $InputPath
-    )
-
-    $outputExtension = Get-SetBatchOutputExtension -InputPath $SourcePath
-    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
-    $width = $Dimensions.Width
-    $height = $Dimensions.Height
-    $canCrop = ($width -ge 200 -and $height -ge 200)
-
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-frames:v", "1",
-        "-map_metadata", "-1"
-    )
-
-    if ($canCrop) {
-        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
-        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
-        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
-        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
-        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
-        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
-        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
-        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
-        Write-Log "Set batch image set $SetNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
-    }
-    else {
-        Write-Log "Set batch image set $SetNumber skipping crop because image is small: ${width}x${height}" "WARN"
-    }
-
-    if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $arguments += @("-q:v", "2")
-    }
-    elseif ($outputExtension -eq ".webp") {
-        $arguments += @("-quality", "92")
-    }
-    elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", "6")
-    }
-
-    $arguments += @($outputPath)
-
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    Clear-Metadata -Path $outputPath
-    Write-Log "Created set batch output (set $SetNumber): $outputPath"
-
-    return $outputPath
-}
-
-function Process-SetBatchSourceFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.IO.FileInfo]$File,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$SetDirectories
-    )
-
-    $path = $File.FullName
-
-    if (Test-IsVideo $path) {
-        $duration = Get-VideoDurationSeconds -Path $path
-        $durationText = $duration.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-        Write-Log "Set batch video duration: ${durationText}s ($($File.Name))"
-
-        $range = Get-TrimRange -DurationSeconds $duration
-        if ($range.CanTrim) {
-            Write-Log "Set batch video trim range $($range.MinMs)-$($range.MaxMs) ms ($($File.Name))"
-        }
-        else {
-            Write-Log "Set batch video skipping trim: $($range.Reason) ($($File.Name))" "WARN"
-        }
-
-        $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
-        for ($setNumber = 1; $setNumber -le $SetBatchCount; $setNumber++) {
-            $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $SetBatchCount
-            [void](Convert-SetVideoVariant -InputPath $path -OutputDirectory $SetDirectories[$setNumber - 1] -VariantNumber $setNumber -DurationSeconds $duration -TrimMs $trimMs)
-        }
-
-        return
-    }
-
-    $processingSource = Resolve-ImageProcessingSource -Path $path
-
-    try {
-        $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
-        Write-Log "Set batch image dimensions: $($dimensions.Width)x$($dimensions.Height) ($($File.Name))"
-
-        if ($script:SupportsParallel -and $SetBatchCount -gt 1) {
-            $libPath = $script:ScriptPath
-            $ffPath = $script:FFmpegPath
-            $fpPath = $script:FFprobePath
-            $exPath = $script:ExifToolPath
-            $procPath = $processingSource.ProcessingPath
-            $srcPath = $path
-            $dims = $dimensions
-            $dirs = $SetDirectories
-            $workspaceNameForParallel = $script:CurrentWorkspaceName
-            $variantResults = 1..$SetBatchCount | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
-                . $using:libPath -AsLibrary
-                Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
-                $script:FFmpegPath = $using:ffPath
-                $script:FFprobePath = $using:fpPath
-                $script:ExifToolPath = $using:exPath
-                $targetDirs = $using:dirs
-                try {
-                    $out = Convert-SetBatchImageVariant -InputPath $using:procPath -SourcePath $using:srcPath -OutputDirectory $targetDirs[$_ - 1] -SetNumber $_ -Dimensions $using:dims
-                    [pscustomobject]@{ Output = $out; Error = $null }
-                }
-                catch {
-                    [pscustomobject]@{ Output = $null; Error = $_.Exception.Message }
-                }
-            }
-            $variantErrors = @($variantResults | Where-Object { $_.Error })
-            if ($variantErrors.Count -gt 0) {
-                throw "Failed $($variantErrors.Count)/$SetBatchCount set-batch copies for '$($File.Name)'. First error: $($variantErrors[0].Error)"
-            }
-        }
-        else {
-            for ($setNumber = 1; $setNumber -le $SetBatchCount; $setNumber++) {
-                [void](Convert-SetBatchImageVariant -InputPath $processingSource.ProcessingPath -SourcePath $path -OutputDirectory $SetDirectories[$setNumber - 1] -SetNumber $setNumber -Dimensions $dimensions)
-            }
-        }
-    }
-    finally {
-        Remove-HeicWorkingCopy -Path $processingSource.TempPath
-    }
-}
-
-function Process-SetBatch {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.IO.FileInfo[]]$Files
-    )
-
-    $batchDirectory = New-RegularRandomDirectory -Directory $SetBatchOutputDir
-    Write-Log "Set batch output directory: $batchDirectory ($SetBatchCount sets, $($Files.Count) source file(s))"
-
-    try {
-        $setDirectories = @()
-        for ($setNumber = 1; $setNumber -le $SetBatchCount; $setNumber++) {
-            $setDirectory = New-RegularRandomDirectory -Directory $batchDirectory
-            $setDirectories += $setDirectory
-        }
-
-        foreach ($file in $Files) {
-            Write-Log "Set batch processing source file: $($file.Name)"
-            Process-SetBatchSourceFile -File $file -SetDirectories $setDirectories
-        }
-    }
-    catch {
-        Remove-GeneratedOutputDirectory -Path $batchDirectory
-        throw
-    }
-
-    # Outputs are complete. Archiving the source files is best-effort and must not
-    # discard the finished sets, so it runs after the transactional block above.
-    foreach ($file in $Files) {
-        try {
-            Move-InputFile -Path $file.FullName -DestinationDirectory $SetBatchOriginalDir
-        }
-        catch {
-            Write-Log "Set batch sets are complete but could not archive source '$($file.FullName)': $($_.Exception.Message)" "WARN"
-        }
-    }
-
-    Write-Log "Successfully processed set batch of $($Files.Count) file(s) into $SetBatchCount sets: $batchDirectory"
-}
-
-function Process-SetBatchSafely {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.IO.FileInfo[]]$Files
-    )
-
-    if ($Files -and $Files.Count -gt 0) {
-        [void](Set-PipelineWorkspaceFromInputPath -Path $Files[0].FullName)
-    }
-
-    try {
-        Write-Log "Detected set batch: $($Files.Count) file(s)."
-        Process-SetBatch -Files $Files
-    }
-    catch {
-        Write-Log "Failed set batch processing: $($_.Exception.Message)" "ERROR"
-        foreach ($file in $Files) {
-            try {
-                Move-InputFile -Path $file.FullName -DestinationDirectory $SetBatchFailedDir
-            }
-            catch {
-                Write-Log "Could not move failed set batch file '$($file.FullName)': $($_.Exception.Message)" "ERROR"
-            }
-        }
-    }
-}
 
 # ---------------------------------------------------------------------------
 # Asset store manifest pipeline
 # ---------------------------------------------------------------------------
 # Treats everything dropped in assetstore\<workspace>\input as one batch. Produces
-# $AssetStoreSetCount randomly named sets, each holding one processed,
+# SetCount randomly named sets, each holding one processed,
 # metadata-stripped copy of every source file, then writes a
 # heatup.assetStoreMediaManifest.v1 manifest describing every generated variant.
 # Each video copy gets a tiny end-trim (tens of ms at most, see
@@ -3033,440 +2218,16 @@ function Get-AssetStoreFamilyKey {
     return $sanitized
 }
 
-function Get-AssetStoreTrimRange {
-    param(
-        [Parameter(Mandatory = $true)]
-        [double]$DurationSeconds
-    )
 
-    $durationMs = [int][Math]::Floor($DurationSeconds * 1000)
 
-    # The whole point of this lane is a near-invisible trim, so only trim when
-    # the clip has comfortable headroom over the largest possible micro-trim.
-    if ($durationMs -lt ($AssetStoreMaxTrimMs + 300)) {
-        return [pscustomobject]@{
-            CanTrim = $false
-            MinMs = 0
-            MaxMs = 0
-            Reason = "video is too short for an asset-store micro-trim"
-        }
-    }
 
-    $minMs = [Math]::Max(1, $AssetStoreMinTrimMs)
-    $maxMs = [Math]::Max($minMs, $AssetStoreMaxTrimMs)
 
-    return [pscustomobject]@{
-        CanTrim = $true
-        MinMs = $minMs
-        MaxMs = $maxMs
-        Reason = "asset-store micro-trim range"
-    }
-}
 
-function New-AssetStoreVideoVariant {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath,
 
-        [Parameter(Mandatory = $true)]
-        [string]$OutputDirectory,
 
-        [Parameter(Mandatory = $true)]
-        [string]$SetName,
 
-        [Parameter(Mandatory = $true)]
-        [int]$SetNumber,
 
-        [Parameter(Mandatory = $true)]
-        [string]$FamilyKey,
 
-        [Parameter(Mandatory = $true)]
-        [string]$SourceOriginalName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$BatchKey,
-
-        [Parameter(Mandatory = $true)]
-        [double]$DurationSeconds,
-
-        [Parameter(Mandatory = $true)]
-        [int]$TrimMs
-    )
-
-    # Reuse the set lane's encoder (H.264 MP4, AAC, width cap, FFmpeg + ExifTool
-    # metadata stripping) so asset-store videos match the other lanes exactly.
-    $outputPath = Convert-SetVideoVariant -InputPath $InputPath -OutputDirectory $OutputDirectory -VariantNumber $SetNumber -DurationSeconds $DurationSeconds -TrimMs $TrimMs
-    $fileName = [System.IO.Path]::GetFileName($outputPath)
-    $sizeBytes = (Get-Item -LiteralPath $outputPath).Length
-    $variantDuration = [Math]::Round([Math]::Max(0.1, $DurationSeconds - ($TrimMs / 1000.0)), 3)
-
-    return [ordered]@{
-        familyKey          = $FamilyKey
-        variantKey         = "{0}__{1}" -f $FamilyKey, $SetName
-        path               = "{0}/{1}" -f $SetName, $fileName
-        renditionSetKey    = $SetName
-        generationBatchKey = $BatchKey
-        sourceOriginalName = $SourceOriginalName
-        sourceFamilyName   = $FamilyKey
-        durationSeconds    = [double]$variantDuration
-        sizeBytes          = [long]$sizeBytes
-        transformProfile   = "asset_store_video_micro_trim"
-        generatedAt        = (Get-UtcIsoTimestamp)
-        metadata           = [ordered]@{
-            encoder  = (Get-VideoEncoderName)
-            trimMs   = $TrimMs
-            maxWidth = $MaxWidth
-        }
-    }
-}
-
-function New-AssetStoreImageVariant {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$SourcePath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$OutputDirectory,
-
-        [Parameter(Mandatory = $true)]
-        [string]$SetName,
-
-        [Parameter(Mandatory = $true)]
-        [int]$SetNumber,
-
-        [Parameter(Mandatory = $true)]
-        [string]$FamilyKey,
-
-        [Parameter(Mandatory = $true)]
-        [string]$SourceOriginalName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$BatchKey,
-
-        [Parameter(Mandatory = $true)]
-        [pscustomobject]$Dimensions
-    )
-
-    # Reuse the set-batch image variant (FFmpeg re-encode, tiny randomized crop
-    # back to original dimensions, metadata stripped) for per-set differentiation.
-    $outputPath = Convert-SetBatchImageVariant -InputPath $InputPath -SourcePath $SourcePath -OutputDirectory $OutputDirectory -SetNumber $SetNumber -Dimensions $Dimensions
-    $fileName = [System.IO.Path]::GetFileName($outputPath)
-    $sizeBytes = (Get-Item -LiteralPath $outputPath).Length
-
-    return [ordered]@{
-        familyKey          = $FamilyKey
-        variantKey         = "{0}__{1}" -f $FamilyKey, $SetName
-        path               = "{0}/{1}" -f $SetName, $fileName
-        renditionSetKey    = $SetName
-        generationBatchKey = $BatchKey
-        sourceOriginalName = $SourceOriginalName
-        sourceFamilyName   = $FamilyKey
-        sizeBytes          = [long]$sizeBytes
-        transformProfile   = "asset_store_image_recrop"
-        generatedAt        = (Get-UtcIsoTimestamp)
-        metadata           = [ordered]@{
-            sourceWidth  = $Dimensions.Width
-            sourceHeight = $Dimensions.Height
-        }
-    }
-}
-
-function Process-AssetStoreSourceFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.IO.FileInfo]$File,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$SetDirectories,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$SetNames,
-
-        [Parameter(Mandatory = $true)]
-        [string]$BatchKey,
-
-        [Parameter(Mandatory = $true)]
-        [string]$FamilyKey
-    )
-
-    $path = $File.FullName
-    $records = New-Object System.Collections.Generic.List[object]
-
-    if (Test-IsVideo $path) {
-        $duration = Get-VideoDurationSeconds -Path $path
-        $durationText = $duration.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-        Write-Log "Asset store video duration: ${durationText}s ($($File.Name))"
-
-        $range = Get-AssetStoreTrimRange -DurationSeconds $duration
-        if ($range.CanTrim) {
-            Write-Log "Asset store micro-trim range $($range.MinMs)-$($range.MaxMs) ms ($($File.Name))"
-        }
-        else {
-            Write-Log "Asset store skipping micro-trim: $($range.Reason) ($($File.Name))" "WARN"
-        }
-
-        $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
-        for ($setNumber = 1; $setNumber -le $AssetStoreSetCount; $setNumber++) {
-            $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $AssetStoreSetCount
-            $record = New-AssetStoreVideoVariant -InputPath $path -OutputDirectory $SetDirectories[$setNumber - 1] -SetName $SetNames[$setNumber - 1] -SetNumber $setNumber -FamilyKey $FamilyKey -SourceOriginalName $File.Name -BatchKey $BatchKey -DurationSeconds $duration -TrimMs $trimMs
-            $records.Add($record)
-        }
-
-        return $records.ToArray()
-    }
-
-    $processingSource = Resolve-ImageProcessingSource -Path $path
-
-    try {
-        $dimensions = Get-MediaDimensions -Path $processingSource.ProcessingPath
-        Write-Log "Asset store image dimensions: $($dimensions.Width)x$($dimensions.Height) ($($File.Name))"
-
-        for ($setNumber = 1; $setNumber -le $AssetStoreSetCount; $setNumber++) {
-            $record = New-AssetStoreImageVariant -InputPath $processingSource.ProcessingPath -SourcePath $path -OutputDirectory $SetDirectories[$setNumber - 1] -SetName $SetNames[$setNumber - 1] -SetNumber $setNumber -FamilyKey $FamilyKey -SourceOriginalName $File.Name -BatchKey $BatchKey -Dimensions $dimensions
-            $records.Add($record)
-        }
-    }
-    finally {
-        Remove-HeicWorkingCopy -Path $processingSource.TempPath
-    }
-
-    return $records.ToArray()
-}
-
-function Write-AssetStoreManifest {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$BatchDirectory,
-
-        [Parameter(Mandatory = $true)]
-        [string]$GeneratedAt,
-
-        [AllowEmptyCollection()]
-        [object[]]$Variants
-    )
-
-    $manifest = [ordered]@{
-        schema      = $AssetStoreManifestSchema
-        generatedAt = $GeneratedAt
-        importRoot  = "."
-        variants    = [object[]]$Variants
-    }
-
-    $json = $manifest | ConvertTo-Json -Depth 12
-    $manifestPath = Join-Path $BatchDirectory "manifest.json"
-    # Write UTF-8 without a BOM so strict JSON parsers accept the file.
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($manifestPath, $json, $utf8NoBom)
-    Write-Log "Wrote asset store manifest: $manifestPath ($($Variants.Count) variant(s))"
-
-    return $manifestPath
-}
-
-function Process-AssetStoreBatch {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.IO.FileInfo[]]$Files
-    )
-
-    $batchDirectory = New-RegularRandomDirectory -Directory $AssetStoreOutputDir
-    $batchKey = [System.IO.Path]::GetFileName($batchDirectory)
-    $generatedAt = Get-UtcIsoTimestamp
-    Write-Log "Asset store batch output directory: $batchDirectory ($AssetStoreSetCount set(s), $($Files.Count) source file(s))"
-
-    $variants = New-Object System.Collections.Generic.List[object]
-
-    try {
-        $setDirectories = @()
-        $setNames = @()
-        for ($setNumber = 1; $setNumber -le $AssetStoreSetCount; $setNumber++) {
-            $setDirectory = New-RegularRandomDirectory -Directory $batchDirectory
-            $setName = [System.IO.Path]::GetFileName($setDirectory)
-            $setDirectories += $setDirectory
-            $setNames += $setName
-        }
-
-        # Each source file is one family; keep family keys unique within a batch
-        # even when two sources share a base name (e.g. clip.mov and clip.mp4).
-        $usedFamilyKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($file in $Files) {
-            $familyKey = Get-AssetStoreFamilyKey -FileName $file.Name
-            $candidate = $familyKey
-            $suffix = 2
-            while (-not $usedFamilyKeys.Add($candidate)) {
-                $candidate = "{0}_{1}" -f $familyKey, $suffix
-                $suffix++
-            }
-            $familyKey = $candidate
-
-            Write-Log "Asset store processing source file: $($file.Name) (family $familyKey)"
-            $records = Process-AssetStoreSourceFile -File $file -SetDirectories $setDirectories -SetNames $setNames -BatchKey $batchKey -FamilyKey $familyKey
-            foreach ($record in $records) {
-                $variants.Add($record)
-            }
-        }
-
-        [void](Write-AssetStoreManifest -BatchDirectory $batchDirectory -GeneratedAt $generatedAt -Variants $variants.ToArray())
-    }
-    catch {
-        Remove-GeneratedOutputDirectory -Path $batchDirectory
-        throw
-    }
-
-    # Outputs and manifest are complete; archiving the sources is best-effort and
-    # must not discard the finished sets, so it runs after the transactional block.
-    foreach ($file in $Files) {
-        try {
-            Move-InputFile -Path $file.FullName -DestinationDirectory $AssetStoreOriginalDir
-        }
-        catch {
-            Write-Log "Asset store sets are complete but could not archive source '$($file.FullName)': $($_.Exception.Message)" "WARN"
-        }
-    }
-
-    Write-Log "Successfully processed asset store batch of $($Files.Count) file(s) into $AssetStoreSetCount set(s): $batchDirectory"
-}
-
-function Process-AssetStoreBatchSafely {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.IO.FileInfo[]]$Files
-    )
-
-    if ($Files -and $Files.Count -gt 0) {
-        [void](Set-PipelineWorkspaceFromInputPath -Path $Files[0].FullName)
-    }
-
-    try {
-        Write-Log "Detected asset store batch: $($Files.Count) file(s)."
-        Process-AssetStoreBatch -Files $Files
-    }
-    catch {
-        Write-Log "Failed asset store batch processing: $($_.Exception.Message)" "ERROR"
-        foreach ($file in $Files) {
-            try {
-                Move-InputFile -Path $file.FullName -DestinationDirectory $AssetStoreFailedDir
-            }
-            catch {
-                Write-Log "Could not move failed asset store file '$($file.FullName)': $($_.Exception.Message)" "ERROR"
-            }
-        }
-    }
-}
-
-function Process-MediaFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-
-    Write-Log "Detected file: $Path"
-    Wait-FileReady -Path $Path
-
-    if (-not (Test-IsSupportedMedia $Path)) {
-        Write-Log "Skipping unsupported file: $Path" "WARN"
-        return
-    }
-
-    Write-Log "Started processing: $Path"
-
-    $copyCount = Get-DefaultPipelineCopyCount
-    Write-Log "Default pipeline copy count for entry $($script:DefaultPipelineEntryCount): $copyCount"
-
-    if (Test-IsVideo $Path) {
-        [void](Process-VideoFile -Path $Path -CopyCount $copyCount)
-    }
-    else {
-        [void](Process-ImageFile -Path $Path -CopyCount $copyCount)
-    }
-
-    Move-InputFile -Path $Path -DestinationDirectory $OriginalDir
-    Write-Log "Successfully processed: $Path"
-}
-
-function Process-OneSafely {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-
-    if (-not $script:ProcessingPaths.Add($fullPath)) {
-        return
-    }
-
-    try {
-        Process-MediaFile -Path $fullPath
-    }
-    catch {
-        Write-Log "Failed processing '$fullPath': $($_.Exception.Message)" "ERROR"
-        try {
-            Move-InputFile -Path $fullPath -DestinationDirectory $FailedDir
-        }
-        catch {
-            Write-Log "Could not move failed file '$fullPath': $($_.Exception.Message)" "ERROR"
-        }
-    }
-    finally {
-        [void]$script:ProcessingPaths.Remove($fullPath)
-    }
-}
-
-function Process-VideoCleanFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-
-    Write-Log "Started video clean processing: $Path"
-    [void](Process-VideoFile -Path $Path -CopyCount 1 -OutputDirectory $VideoCleanOutputDir)
-    Move-InputFile -Path $Path -DestinationDirectory $VideoCleanOriginalDir
-    Write-Log "Successfully processed video clean file: $Path"
-}
-
-function Process-VideoCleanFileSafely {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-
-    if (-not $script:ProcessingPaths.Add($fullPath)) {
-        return
-    }
-
-    try {
-        Write-Log "Detected video clean file: $fullPath"
-        Wait-FileReady -Path $fullPath
-        Process-VideoCleanFile -Path $fullPath
-    }
-    catch {
-        Write-Log "Failed video clean processing '$fullPath': $($_.Exception.Message)" "ERROR"
-        try {
-            Move-InputFile -Path $fullPath -DestinationDirectory $VideoCleanFailedDir
-        }
-        catch {
-            Write-Log "Could not move failed video clean file '$fullPath': $($_.Exception.Message)" "ERROR"
-        }
-    }
-    finally {
-        [void]$script:ProcessingPaths.Remove($fullPath)
-    }
-}
 
 function Invoke-MovToMp4Remux {
     param(
@@ -3494,129 +2255,8 @@ function Invoke-MovToMp4Remux {
     Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
 }
 
-function Invoke-RemuxImageConvert {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath,
 
-        [Parameter(Mandatory = $true)]
-        [string]$OutputPath
-    )
 
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-frames:v", "1",
-        "-map_metadata", "-1"
-    )
-
-    $outputExtension = [System.IO.Path]::GetExtension($OutputPath).ToLowerInvariant()
-    if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $arguments += @("-q:v", "2")
-    }
-    elseif ($outputExtension -eq ".webp") {
-        $arguments += @("-quality", "92")
-    }
-    elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", "6")
-    }
-
-    $arguments += @($OutputPath)
-
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-}
-
-function Convert-RemuxMediaFile {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
-
-    if ($RemuxVideoSourceExtensions -contains $extension) {
-        $outputPath = New-IPhoneRandomFilePath -Directory $RemuxOutputDir -Extension ".mp4"
-
-        Write-Log "Started convert (video) for: $Path"
-        Write-Log "Convert output path: $outputPath"
-
-        try {
-            Invoke-MovToMp4Remux -InputPath $Path -OutputPath $outputPath
-            Clear-Metadata -Path $outputPath
-            Move-InputFile -Path $Path -DestinationDirectory $RemuxOriginalVideosDir
-            Write-Log "Successfully converted video to MP4: $outputPath"
-        }
-        catch {
-            Remove-GeneratedOutputs -Paths @($outputPath)
-            throw
-        }
-
-        return
-    }
-
-    if ($RemuxImageSourceExtensions -contains $extension) {
-        $outputPath = New-IPhoneRandomFilePath -Directory $RemuxOutputDir -Extension $RemuxImageOutputExtension
-
-        Write-Log "Started convert (image) for: $Path"
-        Write-Log "Convert output path: $outputPath"
-
-        try {
-            Invoke-RemuxImageConvert -InputPath $Path -OutputPath $outputPath
-            Clear-Metadata -Path $outputPath
-            Move-InputFile -Path $Path -DestinationDirectory $RemuxOriginalImagesDir
-            Write-Log "Successfully converted image to $($RemuxImageOutputExtension): $outputPath"
-        }
-        catch {
-            Remove-GeneratedOutputs -Paths @($outputPath)
-            throw
-        }
-
-        return
-    }
-
-    if (Test-IsSupportedMedia $Path) {
-        Write-Log "Convert pass-through (already a supported format): $Path"
-        $outputPath = Move-InputFileToRandomOutput -Path $Path -DestinationDirectory $RemuxOutputDir
-        Write-Log "Passed through to convert output unchanged: $outputPath"
-        return
-    }
-
-    throw "Unsupported convert source format '$extension' for: $Path"
-}
-
-function Process-RemuxFileSafely {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-
-    if (-not $script:ProcessingPaths.Add($fullPath)) {
-        return
-    }
-
-    try {
-        Write-Log "Detected convert file: $fullPath"
-        Wait-FileReady -Path $fullPath
-        Convert-RemuxMediaFile -Path $fullPath
-    }
-    catch {
-        Write-Log "Failed converting '$fullPath': $($_.Exception.Message)" "ERROR"
-        try {
-            Move-InputFile -Path $fullPath -DestinationDirectory $RemuxFailedDir
-        }
-        catch {
-            Write-Log "Could not move failed remux file '$fullPath': $($_.Exception.Message)" "ERROR"
-        }
-    }
-    finally {
-        [void]$script:ProcessingPaths.Remove($fullPath)
-    }
-}
 
 function Get-LongSegmentPlan {
     param(
@@ -3625,8 +2265,8 @@ function Get-LongSegmentPlan {
     )
 
     $durationMs = [int][Math]::Floor($DurationSeconds * 1000)
-    $targetMs = [int]($LongSegmentTargetSeconds * 1000)
-    $minMs = [int]($LongSegmentMinSeconds * 1000)
+    $targetMs = [int]($DefaultSegmentTargetSeconds * 1000)
+    $minMs = [int]($DefaultSegmentMinSeconds * 1000)
     $durations = New-Object System.Collections.Generic.List[int]
 
     if ($durationMs -le 0) {
@@ -3690,14 +2330,6 @@ function Get-LongSegmentPlan {
     return $segments.ToArray()
 }
 
-function Get-LongVideoScaleFilter {
-    param(
-        [Parameter(Mandatory = $true)]
-        [int]$MaxWidthValue
-    )
-
-    return Get-VideoScaleFilter -MaxWidthValue $MaxWidthValue
-}
 
 function Get-TargetVideoBitrateKbps {
     param(
@@ -3712,7 +2344,7 @@ function Get-TargetVideoBitrateKbps {
         return 0
     }
 
-    $audioBitrateText = ($AudioBitrate -replace "[^0-9.]", "")
+    $audioBitrateText = ($DefaultAudioBitrate -replace "[^0-9.]", "")
     $audioBitrateKbps = 128.0
     $parsedAudioBitrate = 0.0
     if (-not [string]::IsNullOrWhiteSpace($audioBitrateText)) {
@@ -3765,7 +2397,10 @@ function Invoke-LongSegmentExtract {
     Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
 }
 
-function Invoke-LongVideoEncode {
+# The single H.264/AAC ffmpeg invocation used by every video lane, and by the size-cap retry
+# pass. StartSeconds below zero encodes from the beginning, DurationSeconds at or below zero
+# encodes to the end, and MaxVideoBitrateKbps of zero applies no bitrate ceiling.
+function Invoke-VideoEncode {
     param(
         [Parameter(Mandatory = $true)]
         [string]$InputPath,
@@ -3781,8 +2416,12 @@ function Invoke-LongVideoEncode {
 
         [double]$DurationSeconds = -1,
 
-        [int]$MaxVideoBitrateKbps = 0
+        [int]$MaxVideoBitrateKbps = 0,
+
+        [string]$AudioBitrateValue = ""
     )
+
+    if ([string]::IsNullOrWhiteSpace($AudioBitrateValue)) { $AudioBitrateValue = $DefaultAudioBitrate }
 
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
     $arguments = @(
@@ -3812,7 +2451,7 @@ function Invoke-LongVideoEncode {
     $arguments += New-VideoEncoderArguments -QualityValue $QualityValue -MaxWidthValue $MaxWidthValue -MaxVideoBitrateKbps $MaxVideoBitrateKbps
     $arguments += @(
         "-c:a", "aac",
-        "-b:a", $AudioBitrate,
+        "-b:a", $AudioBitrateValue,
         "-movflags", "+faststart",
         "-map_metadata", "-1",
         $OutputPath
@@ -3880,7 +2519,7 @@ function Invoke-OutputSizeCap {
         $tempPath = Join-Path $outputDirectory ("sizecap_{0}.mp4" -f (New-RandomToken 8))
 
         try {
-            Invoke-LongVideoEncode -InputPath $encodeInputPath -OutputPath $tempPath -StartSeconds $encodeStartSeconds -DurationSeconds $encodeDurationSeconds -QualityValue $profile.Quality -MaxWidthValue $profile.MaxWidth -MaxVideoBitrateKbps $profile.Bitrate
+            Invoke-VideoEncode -InputPath $encodeInputPath -OutputPath $tempPath -StartSeconds $encodeStartSeconds -DurationSeconds $encodeDurationSeconds -QualityValue $profile.Quality -MaxWidthValue $profile.MaxWidth -MaxVideoBitrateKbps $profile.Bitrate
             $newSize = (Get-Item -LiteralPath $tempPath).Length
             $bitrateLabel = if ($profile.Bitrate -gt 0) { "$($profile.Bitrate)k maxrate" } else { "no maxrate" }
             Write-Log "Size-cap attempt $qualityLabel $($profile.Quality), max width $($profile.MaxWidth), $bitrateLabel -> $([math]::Round($newSize / 1MB, 2)) MB"
@@ -3922,509 +2561,1130 @@ function Invoke-OutputSizeCap {
     }
 }
 
-function Get-LongOutputRecompressTargets {
+# Maintenance mode (-RecompressOutputs): walks every preset that has a size cap and re-runs
+# the size-cap pass on any output that is over it. Useful after lowering a cap, since the
+# watcher only applies caps at creation time.
+function Get-OversizedOutputs {
     param(
-        [Parameter(Mandatory = $true)]
-        [string[]]$Directories
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][double]$MaxSizeMegabytes
     )
 
-    $maxBytes = [long]($LongMaxOutputSizeMB * 1024 * 1024)
-    $targets = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $Directory)) { return @() }
 
-    foreach ($directory in $Directories) {
-        if (-not (Test-Path -LiteralPath $directory)) {
-            continue
-        }
+    $maxBytes = [long]($MaxSizeMegabytes * 1024 * 1024)
 
-        Get-ChildItem -LiteralPath $directory -File -Filter "*.mp4" | ForEach-Object {
-            if ($_.Length -gt $maxBytes) {
-                $targets.Add($_.FullName)
-            }
-        }
-    }
-
-    return $targets.ToArray()
+    return @(
+        Get-ChildItem -LiteralPath $Directory -File -Filter "*.mp4" -Recurse |
+            Where-Object { $_.Length -gt $maxBytes } |
+            ForEach-Object { $_.FullName }
+    )
 }
 
-function Start-LongOutputRecompressBatch {
-    $directories = @($LongOutputDir)
-    $targets = Get-LongOutputRecompressTargets -Directories $directories
-
-    Write-Log "Long output recompress: found $($targets.Count) file(s) over $LongMaxOutputSizeMB MB in $($directories -join ', ')"
-
+function Start-OutputRecompressBatch {
     $processed = 0
     $failed = 0
 
-    foreach ($path in $targets) {
-        try {
-            $before = (Get-Item -LiteralPath $path).Length
-            Invoke-OutputSizeCap -OutputPath $path -MaxSizeMegabytes $LongMaxOutputSizeMB -FallbackMaxWidth $LongSizeCapFallbackMaxWidth
-            $after = (Get-Item -LiteralPath $path).Length
-            Write-Log "Recompressed long output: $path ($([math]::Round($before / 1MB, 2)) MB -> $([math]::Round($after / 1MB, 2)) MB)"
-            $processed++
-        }
-        catch {
-            Write-Log "Failed to recompress long output '$path': $($_.Exception.Message)" "ERROR"
-            $failed++
+    foreach ($preset in Get-PipelinePresets) {
+        if ($preset.SizeCapMB -le 0) { continue }
+
+        foreach ($workspaceName in $WorkspaceNames) {
+            $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $workspaceName
+            $targets = @(Get-OversizedOutputs -Directory $paths.OutputDir -MaxSizeMegabytes $preset.SizeCapMB)
+
+            if ($targets.Count -eq 0) { continue }
+
+            Write-Log "Recompress: $($targets.Count) file(s) over $($preset.SizeCapMB) MB in $($paths.OutputDir)"
+
+            foreach ($path in $targets) {
+                try {
+                    $before = (Get-Item -LiteralPath $path).Length
+                    Invoke-OutputSizeCap -OutputPath $path -MaxSizeMegabytes $preset.SizeCapMB -FallbackMaxWidth $preset.SizeCapFallbackMaxWidth
+                    $after = (Get-Item -LiteralPath $path).Length
+                    Write-Log "Recompressed: $path ($([math]::Round($before / 1MB, 2)) MB -> $([math]::Round($after / 1MB, 2)) MB)"
+                    $processed++
+                }
+                catch {
+                    Write-Log "Failed to recompress '$path': $($_.Exception.Message)" "ERROR"
+                    $failed++
+                }
+            }
         }
     }
 
-    Write-Log "Long output recompress finished: $processed succeeded, $failed failed"
+    Write-Log "Recompress finished: $processed succeeded, $failed failed"
 }
 
-function Convert-LongVideoVariant {
+
+
+
+
+
+
+
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Event stream, control surface, and status
+# ---------------------------------------------------------------------------
+#
+# The daily text log is written for people and cannot be parsed reliably: the preset and
+# workspace appear only inside English prose, and with parallel runspaces the per-variant
+# lines of different files interleave with nothing tying them back to a source file.
+#
+# These three surfaces exist so a monitoring UI does not have to guess:
+#
+#   logs\events-YYYYMMDD.jsonl   append-only event stream, one JSON object per line
+#   status\watcher.json          current state, rewritten each sweep
+#   control\                     flag files the poll loop checks each tick
+
+$script:WatcherStartedUtc = (Get-Date).ToUniversalTime().ToString('o')
+$script:LaneSnapshot = New-Object 'System.Collections.Specialized.OrderedDictionary'
+
+# The name of the single-instance mutex for a given pipeline root.
+#
+# The default root keeps the original unqualified name, so an existing installation and any
+# tooling that probes for it are unaffected. Any other root gets a name derived from its
+# path, which lets a second root run alongside without the two fighting over one lock.
+#
+# A UI can use this to answer "is the watcher running" for free, with Mutex.OpenExisting,
+# instead of scanning the process list.
+function Get-WatcherMutexName {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $normalized = $Root.TrimEnd('\', '/').ToLowerInvariant()
+    if ($normalized -eq 'd:\mediapipeline') {
+        return "Global\MediaPipelineWatcher"
+    }
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($normalized)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+
+    try {
+        $hash = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').Substring(0, 16)
+    }
+    finally {
+        $sha.Dispose()
+    }
+
+    return "Global\MediaPipelineWatcher_$hash"
+}
+
+function Get-ControlDirectory {
+    return (Join-Path $PipelineRoot "control")
+}
+
+function Get-StatusDirectory {
+    return (Join-Path $PipelineRoot "status")
+}
+
+# Appends one event to the daily JSONL stream. Serialized through its own named mutex so
+# parallel worker runspaces cannot interleave partial lines, the same way Write-Log is.
+#
+# JobId is what makes parallel progress attributable: every event from one group carries the
+# same id, so a reader can reassemble "file X is on variant 12 of 20" from an interleaved
+# stream.
+function Write-PipelineEvent {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputPath,
-
-        [Parameter(Mandatory = $true)]
-        [int]$SegmentNumber,
-
-        [Parameter(Mandatory = $true)]
-        [int]$VariantNumber,
-
-        [Parameter(Mandatory = $true)]
-        [double]$SegmentDurationSeconds,
-
-        [Parameter(Mandatory = $true)]
-        [int]$TrimMs
+        [Parameter(Mandatory = $true)][string]$Name,
+        [hashtable]$Data
     )
 
-    $outputPath = New-IPhoneRandomFilePath -Directory $LongOutputDir -Extension ".mp4"
-    $trimSeconds = $TrimMs / 1000.0
-    $targetDuration = [Math]::Max(0.1, $SegmentDurationSeconds - $trimSeconds)
-    $culture = [System.Globalization.CultureInfo]::InvariantCulture
-    $targetDurationText = $targetDuration.ToString("0.###", $culture)
+    try {
+        if (-not (Test-Path -LiteralPath $LogsDir)) {
+            New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
+        }
 
-    Write-Log "Long segment $SegmentNumber variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
+        $record = [ordered]@{
+            ts = (Get-Date).ToUniversalTime().ToString('o')
+            ev = $Name
+        }
 
-    $qualityValue = if ($script:UseNvenc) { $LongNvencCq } elseif ($script:UseAmf) { $LongAmfQp } else { $Crf }
-    $maxVideoBitrateKbps = Get-PrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration -MaxSizeMegabytes $LongMaxOutputSizeMB -MaxrateScale $LongNvencPrimaryMaxrateScale
-    Invoke-LongVideoEncode -InputPath $InputPath -OutputPath $outputPath -DurationSeconds $targetDuration -QualityValue $qualityValue -MaxWidthValue $MaxWidth -MaxVideoBitrateKbps $maxVideoBitrateKbps
-    Clear-Metadata -Path $outputPath
-    Invoke-OutputSizeCap -OutputPath $outputPath -MaxSizeMegabytes $LongMaxOutputSizeMB -FallbackMaxWidth $LongSizeCapFallbackMaxWidth -SourceInputPath $InputPath -SegmentDurationSeconds $SegmentDurationSeconds -TrimMs $TrimMs
-    Write-Log "Created long output: $outputPath"
+        if ($Data) {
+            foreach ($key in $Data.Keys) {
+                $record[$key] = $Data[$key]
+            }
+        }
 
-    return $outputPath
+        $line = $record | ConvertTo-Json -Depth 6 -Compress
+        $eventFile = Join-Path $LogsDir ("events-{0}.jsonl" -f (Get-Date -Format "yyyyMMdd"))
+
+        $mutex = New-Object System.Threading.Mutex($false, "Local\MediaPipelineEventMutex")
+        $acquired = $false
+
+        try {
+            try { $acquired = $mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+            Add-Content -LiteralPath $eventFile -Value $line -Encoding UTF8
+        }
+        finally {
+            if ($acquired) { $mutex.ReleaseMutex() }
+            $mutex.Dispose()
+        }
+    }
+    catch {
+        # Losing an event must never stop media processing.
+    }
 }
 
-function Process-LongVideoFile {
+function Test-ControlFlag {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return (Test-Path -LiteralPath (Join-Path (Get-ControlDirectory) $Name))
+}
+
+# Pausing is checked from the most specific flag outwards, so a single lane can be paused
+# without touching the rest.
+function Test-PresetPaused {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][string]$WorkspaceName
+    )
+
+    if (Test-ControlFlag -Name "pause") { return $true }
+    if (Test-ControlFlag -Name "pause.$($Preset.Name)") { return $true }
+    if (Test-ControlFlag -Name "pause.$($Preset.Name).$WorkspaceName") { return $true }
+
+    return $false
+}
+
+function Test-StopRequested {
+    return (Test-ControlFlag -Name "stop")
+}
+
+function Clear-StopRequest {
+    $stopFile = Join-Path (Get-ControlDirectory) "stop"
+    if (Test-Path -LiteralPath $stopFile) {
+        Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Set-LaneSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$PresetName,
+        [Parameter(Mandatory = $true)][string]$WorkspaceName,
+        [int]$Queued,
+        [bool]$Paused
+    )
+
+    $key = "$PresetName/$WorkspaceName"
+    $script:LaneSnapshot[$key] = [ordered]@{
+        preset    = $PresetName
+        workspace = $WorkspaceName
+        queued    = $Queued
+        paused    = $Paused
+    }
+}
+
+# Rewrites status\watcher.json after each full sweep. A UI reads this instead of guessing
+# at process state, and it is cheap because the queue counts were already gathered by the
+# poll that just ran.
+function Write-WatcherStatus {
+    try {
+        $statusDir = Get-StatusDirectory
+        if (-not (Test-Path -LiteralPath $statusDir)) {
+            New-Item -ItemType Directory -Path $statusDir -Force | Out-Null
+        }
+
+        $presetSummaries = New-Object System.Collections.Generic.List[object]
+        foreach ($preset in Get-PipelinePresets) {
+            $presetSummaries.Add([ordered]@{
+                name        = $preset.Name
+                videoCopies = $preset.VideoCopies
+                imageCopies = $preset.ImageCopies
+                grouping    = $preset.Grouping
+                setCount    = $preset.SetCount
+                batch       = $preset.Batch
+                segment     = $preset.Segment
+                manifest    = $preset.Manifest
+                sizeCapMB   = $preset.SizeCapMB
+            }) | Out-Null
+        }
+
+        $status = [ordered]@{
+            schema       = "mediaPipeline.status.v1"
+            pid          = $PID
+            startedUtc   = $script:WatcherStartedUtc
+            updatedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+            pipelineRoot = $PipelineRoot
+            encoder      = Get-VideoEncoderName
+            pollSeconds  = $PollSeconds
+            pausedAll    = (Test-ControlFlag -Name "pause")
+            workspaces   = $WorkspaceNames
+            presets      = $presetSummaries.ToArray()
+            lanes        = @($script:LaneSnapshot.Values)
+        }
+
+        $json = $status | ConvertTo-Json -Depth 8
+        $statusPath = Join-Path $statusDir "watcher.json"
+        $tempPath = "$statusPath.tmp"
+
+        # Write then move, so a reader never sees a half-written file.
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tempPath, $json, $utf8NoBom)
+        Move-Item -LiteralPath $tempPath -Destination $statusPath -Force
+    }
+    catch {
+        # Status is a convenience for the UI, never a reason to stop processing.
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Unified processing core
+# ---------------------------------------------------------------------------
+#
+# One function processes every preset. What used to be nine hand-written pipelines is now
+# a group of source files, a preset that says what to make of them, and three axes:
+#
+#   Grouping   where outputs land: one shared folder, one folder per source, or N set folders
+#   Batch      whether a whole input folder is one transaction or each file is its own
+#   Segment    whether long videos are split before variants are made
+#
+# Media type is detected per file, and the preset carries a separate copy count for video and
+# for images, so a single inbox can take a mixed folder without choosing a lane.
+
+# Emits one progress event per finished variant. The n-of-total pair is what a UI needs for
+# a real progress bar, and the old text log could not provide it: the total was only ever
+# logged for one lane, and parallel per-variant lines were unattributable.
+function Write-PresetVariantEvent {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][System.IO.FileInfo]$File,
+        [Parameter(Mandatory = $true)][int]$Index,
+        [Parameter(Mandatory = $true)][int]$Total,
+        [Parameter(Mandatory = $true)][string]$OutputPath
+    )
+
+    Write-PipelineEvent -Name "job.variant" -Data @{
+        jobId     = $script:CurrentJobId
+        preset    = $Preset.Name
+        workspace = $script:CurrentWorkspaceName
+        file      = $File.Name
+        n         = $Index
+        total     = $Total
+        output    = [System.IO.Path]::GetFileName($OutputPath)
+    }
+}
+
+function Get-MediaKind {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    if ($VideoExtensions -contains $extension) { return "Video" }
+    if ($ImageExtensions -contains $extension) { return "Image" }
+    return "Unsupported"
+}
+
+# A preset ignores a media type whose copy count is zero, which is how a video-only or
+# image-only preset is expressed.
+function Test-PresetAcceptsFile {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    switch (Get-MediaKind -Path $Path) {
+        "Video" { return ($Preset.VideoCopies -gt 0) }
+        "Image" { return ($Preset.ImageCopies -gt 0) }
+        default { return $false }
+    }
+}
+
+function Get-PresetCandidateFiles {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][pscustomobject]$Paths
+    )
+
+    if (-not (Test-Path -LiteralPath $Paths.InputDir)) { return @() }
+
+    return @(
+        Get-ChildItem -LiteralPath $Paths.InputDir -File |
+            Where-Object {
+                (-not (Test-IsTemporaryDownload $_.FullName)) -and
+                (Test-PresetAcceptsFile -Preset $Preset -Path $_.FullName)
+            } |
+            Sort-Object LastWriteTime, FullName
+    )
+}
+
+# One rule for every preset: images come out as .jpg, except WebP which is already small and
+# web-ready. This replaces three mappers that disagreed with each other, so the same .heic no
+# longer becomes .png in one lane and .jpg in another.
+function Get-PresetOutputExtension {
+    param([Parameter(Mandatory = $true)][string]$SourcePath)
+
+    $extension = [System.IO.Path]::GetExtension($SourcePath).ToLowerInvariant()
+    if ($extension -eq ".webp") { return ".webp" }
+    return ".jpg"
+}
+
+# Prepares a source for processing.
+#
+# HEIC decodes to a temporary working copy because ffmpeg cannot filter it directly. A .mov
+# bound for segmenting is remuxed to .mp4 first, because lossless segment extraction is
+# unreliable on that container. Everything else is fed to ffmpeg as-is.
+#
+# Returns ProcessingPath (what ffmpeg reads), SourcePath (what decides the output format),
+# and TempPath (a working copy to delete afterwards, or $null).
+function Resolve-PresetSource {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [string]$WorkDir
+    )
+
+    if ($Kind -eq "Image") {
+        return Resolve-ImageProcessingSource -Path $Path
+    }
+
+    $source = [pscustomobject]@{
+        SourcePath     = $Path
+        ProcessingPath = $Path
+        TempPath       = $null
+    }
+
+    $needsRemux = (
+        $Preset.Normalize -and
+        $Preset.Segment -and
+        ([System.IO.Path]::GetExtension($Path).ToLowerInvariant() -eq ".mov")
+    )
+
+    if ($needsRemux) {
+        if (-not (Test-Path -LiteralPath $WorkDir)) {
+            New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+        }
+
+        $remuxPath = Join-Path $WorkDir ([System.IO.Path]::GetFileNameWithoutExtension($Path) + ".mp4")
+        Invoke-MovToMp4Remux -InputPath $Path -OutputPath $remuxPath
+        Write-Log "Normalized .mov source to .mp4 before segmenting: $remuxPath"
+        $source.ProcessingPath = $remuxPath
+        $source.TempPath = $remuxPath
+    }
+
+    return $source
+}
+
+# How many variants this file gets. When CopiesAlternate is set, consecutive files alternate
+# between the two counts so a run of files does not all produce the same number of outputs.
+function Get-PresetCopyCount {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][string]$Kind
+    )
+
+    $count = if ($Kind -eq "Video") { $Preset.VideoCopies } else { $Preset.ImageCopies }
+
+    if ($Preset.CopiesAlternate -gt 0) {
+        $script:PresetEntryCount++
+        if (($script:PresetEntryCount % 2) -eq 1) {
+            $count = $Preset.CopiesAlternate
+        }
+    }
+
+    return $count
+}
+
+# The destination folder for each variant, one entry per variant to produce.
+#
+#   Flat        every variant into the preset's shared output folder
+#   PerSource   every variant into one new folder belonging to this source file
+#   PerSet      the file contributes CopyCount variants to each of the SetCount set folders
+function New-PresetVariantTargets {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][pscustomobject]$Paths,
+        [Parameter(Mandatory = $true)][int]$CopyCount,
+        [AllowEmptyCollection()][string[]]$SetDirectories,
+        [System.Collections.Generic.List[string]]$CreatedDirectories
+    )
+
+    switch ($Preset.Grouping) {
+        "PerSource" {
+            $directory = New-RegularRandomDirectory -Directory $Paths.OutputDir
+            if ($CreatedDirectories) { $CreatedDirectories.Add($directory) | Out-Null }
+            Write-Log "Preset '$($Preset.Name)' output directory: $directory"
+            return @(1..$CopyCount | ForEach-Object { $directory })
+        }
+        "PerSet" {
+            $targets = New-Object System.Collections.Generic.List[string]
+            foreach ($setDirectory in $SetDirectories) {
+                for ($copy = 1; $copy -le $CopyCount; $copy++) {
+                    $targets.Add($setDirectory) | Out-Null
+                }
+            }
+            return $targets.ToArray()
+        }
+        default {
+            return @(1..$CopyCount | ForEach-Object { $Paths.OutputDir })
+        }
+    }
+}
+
+# Produces every variant of one already-resolved source file, returning the output paths.
+# Manifest records are appended to $Records when the preset writes a manifest.
+function Invoke-PresetFileVariants {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][pscustomobject]$Paths,
+        [Parameter(Mandatory = $true)][System.IO.FileInfo]$File,
+        [Parameter(Mandatory = $true)][pscustomobject]$Source,
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [AllowEmptyCollection()][string[]]$SetDirectories,
+        [AllowEmptyCollection()][string[]]$SetNames,
+        [System.Collections.Generic.List[string]]$CreatedDirectories,
+        [System.Collections.Generic.List[object]]$Records,
+        [string]$BatchKey,
+        [string]$FamilyKey
+    )
+
+    $created = New-Object System.Collections.Generic.List[string]
+    $copyCount = Get-PresetCopyCount -Preset $Preset -Kind $Kind
+    $targets = @(New-PresetVariantTargets -Preset $Preset -Paths $Paths -CopyCount $copyCount -SetDirectories $SetDirectories -CreatedDirectories $CreatedDirectories)
+
+    if ($Kind -eq "Image") {
+        $dimensions = Get-MediaDimensions -Path $Source.ProcessingPath
+        $outputExtension = Get-PresetOutputExtension -SourcePath $Source.SourcePath
+
+        # A source that had to be decoded first is already a re-encode, so give it a little
+        # more quality headroom than an untouched JPEG.
+        $jpegQuality = if ($Source.TempPath) { [string]$Preset.ConvertedJpegQuality } else { [string]$Preset.JpegQuality }
+
+        for ($index = 0; $index -lt $targets.Count; $index++) {
+            $variantArgs = @{
+                InputPath           = $Source.ProcessingPath
+                OutputDirectory     = $targets[$index]
+                OutputExtension     = $outputExtension
+                Dimensions          = $dimensions
+                LogLabel            = "$($Preset.Name) image variant $($index + 1)"
+                JpegQuality         = $jpegQuality
+                PngCompressionLevel = $Preset.PngCompressionLevel
+                CropMinPermille     = $Preset.CropMinPermille
+                CropMaxPermille     = $Preset.CropMaxPermille
+            }
+
+            $outputPath = New-ImageVariant @variantArgs
+            $created.Add($outputPath) | Out-Null
+            Write-PresetVariantEvent -Preset $Preset -File $File -Index ($index + 1) -Total $targets.Count -OutputPath $outputPath
+
+            if ($Records -ne $null) {
+                $Records.Add((New-PresetManifestRecord -Preset $Preset -File $File -OutputPath $outputPath -SetName $SetNames[[int]($index / $copyCount)] -BatchKey $BatchKey -FamilyKey $FamilyKey -Kind $Kind -Dimensions $dimensions)) | Out-Null
+            }
+        }
+
+        return $created.ToArray()
+    }
+
+    # Video. Segmenting splits the source first and then makes CopyCount variants of every
+    # segment; otherwise the whole file is the single segment.
+    $duration = Get-VideoDurationSeconds -Path $Source.ProcessingPath
+    $segments = @([pscustomobject]@{ Index = 1; StartSeconds = -1; DurationSeconds = $duration; Path = $Source.ProcessingPath })
+    $segmentTemps = New-Object System.Collections.Generic.List[string]
+
+    if ($Preset.Segment) {
+        $segments = @(Invoke-PresetSegmentExtract -Preset $Preset -Paths $Paths -Source $Source -DurationSeconds $duration -TempPaths $segmentTemps)
+    }
+
+    # Progress is reported across every segment, so a segmented job reads as one bar rather
+    # than restarting at zero for each segment.
+    $totalVariants = $targets.Count * $segments.Count
+    $variantsDone = 0
+
+    # Which quality knob applies depends on the encoder that was probed at startup.
+    $presetQuality = if ($script:UseNvenc) { $Preset.NvencCq } elseif ($script:UseAmf) { $Preset.AmfQp } else { $Preset.Crf }
+
+    try {
+        foreach ($segment in $segments) {
+            $trimRange = Get-TrimRange -DurationSeconds $segment.DurationSeconds -ConfiguredMinMs $Preset.MinTrimMs -ConfiguredMaxMs $Preset.MaxTrimMs
+            if (-not $trimRange.CanTrim) {
+                Write-Log "Preset '$($Preset.Name)': not trimming ($($trimRange.Reason))." "WARN"
+            }
+
+            $usedTrims = New-Object 'System.Collections.Generic.HashSet[int]'
+
+            for ($index = 0; $index -lt $targets.Count; $index++) {
+                $trimMs = if ($trimRange.CanTrim) {
+                    New-TrimMilliseconds -Range $trimRange -UsedValues $usedTrims -CopyCount $targets.Count
+                }
+                else {
+                    0
+                }
+
+                $segmentLabel = if ($Preset.Segment) { " segment $($segment.Index)" } else { "" }
+
+                $variantArgs = @{
+                    InputPath               = $segment.Path
+                    OutputDirectory         = $targets[$index]
+                    DurationSeconds         = $segment.DurationSeconds
+                    TrimMs                  = $trimMs
+                    LogLabel                = "$($Preset.Name)$segmentLabel video variant $($index + 1)"
+                    QualityValue            = $presetQuality
+                    MaxWidthValue           = $Preset.MaxWidth
+                    AudioBitrateValue       = $Preset.AudioBitrate
+                    MaxSizeMegabytes        = $Preset.SizeCapMB
+                    SizeCapFallbackMaxWidth = $Preset.SizeCapFallbackMaxWidth
+                }
+
+                if ($Preset.SizeCapMB -gt 0) {
+                    $targetDuration = [Math]::Max(0.1, $segment.DurationSeconds - ($trimMs / 1000.0))
+                    $variantArgs.MaxVideoBitrateKbps = Get-PrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration -MaxSizeMegabytes $Preset.SizeCapMB -MaxrateScale $Preset.MaxrateScale
+                }
+
+                $outputPath = New-VideoVariant @variantArgs
+                $created.Add($outputPath) | Out-Null
+                $variantsDone++
+                Write-PresetVariantEvent -Preset $Preset -File $File -Index $variantsDone -Total $totalVariants -OutputPath $outputPath
+
+                if ($Records -ne $null) {
+                    $Records.Add((New-PresetManifestRecord -Preset $Preset -File $File -OutputPath $outputPath -SetName $SetNames[[int]($index / $copyCount)] -BatchKey $BatchKey -FamilyKey $FamilyKey -Kind $Kind -TrimMs $trimMs -DurationSeconds $segment.DurationSeconds)) | Out-Null
+                }
+            }
+        }
+    }
+    finally {
+        foreach ($tempPath in $segmentTemps) {
+            if ($tempPath -and (Test-Path -LiteralPath $tempPath)) {
+                Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    return $created.ToArray()
+}
+
+# Splits a long video into losslessly extracted segments in the preset's work folder.
+function Invoke-PresetSegmentExtract {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][pscustomobject]$Paths,
+        [Parameter(Mandatory = $true)][pscustomobject]$Source,
+        [Parameter(Mandatory = $true)][double]$DurationSeconds,
+        [AllowEmptyCollection()][System.Collections.Generic.List[string]]$TempPaths
+    )
+
+    $plan = @(Get-LongSegmentPlan -DurationSeconds $DurationSeconds)
+    $summary = ($plan | ForEach-Object { "{0:0.##}s" -f $_.DurationSeconds }) -join ", "
+    Write-Log "Preset '$($Preset.Name)' segment plan: $($plan.Count) segment(s): $summary"
+
+    if (-not (Test-Path -LiteralPath $Paths.WorkDir)) {
+        New-Item -ItemType Directory -Path $Paths.WorkDir -Force | Out-Null
+    }
+
+    $segments = New-Object System.Collections.Generic.List[object]
+    $jobToken = [Guid]::NewGuid().ToString("n").Substring(0, 8)
+
+    foreach ($entry in $plan) {
+        $segmentPath = Join-Path $Paths.WorkDir ("segment_{0}_{1:D3}.mp4" -f $jobToken, $entry.Index)
+        Invoke-LongSegmentExtract -InputPath $Source.ProcessingPath -OutputPath $segmentPath -StartSeconds $entry.StartSeconds -DurationSeconds $entry.DurationSeconds
+        $TempPaths.Add($segmentPath) | Out-Null
+
+        $segments.Add([pscustomobject]@{
+            Index           = $entry.Index
+            StartSeconds    = -1
+            DurationSeconds = $entry.DurationSeconds
+            Path            = $segmentPath
+        }) | Out-Null
+    }
+
+    return $segments.ToArray()
+}
+
+function New-PresetManifestRecord {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][System.IO.FileInfo]$File,
+        [Parameter(Mandatory = $true)][string]$OutputPath,
+        [string]$SetName,
+        [string]$BatchKey,
+        [string]$FamilyKey,
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [int]$TrimMs = 0,
+        [double]$DurationSeconds = 0,
+        [pscustomobject]$Dimensions
+    )
+
+    $record = [ordered]@{
+        familyKey          = $FamilyKey
+        variantKey         = "{0}__{1}" -f $FamilyKey, $SetName
+        path               = "{0}/{1}" -f $SetName, [System.IO.Path]::GetFileName($OutputPath)
+        renditionSetKey    = $SetName
+        generationBatchKey = $BatchKey
+        sourceOriginalName = $File.Name
+        sourceFamilyName   = $FamilyKey
+        sizeBytes          = (Get-Item -LiteralPath $OutputPath).Length
+        generatedAt        = Get-UtcIsoTimestamp
+        metadata           = [ordered]@{
+            encoder  = Get-VideoEncoderName
+            trimMs   = $TrimMs
+            maxWidth = $Preset.MaxWidth
+        }
+    }
+
+    if ($Kind -eq "Video") {
+        $record.durationSeconds = [Math]::Max(0.1, $DurationSeconds - ($TrimMs / 1000.0))
+        $record.transformProfile = "preset_video_micro_trim"
+    }
+    else {
+        $record.durationSeconds = 0
+        $record.transformProfile = "preset_image_recrop"
+        if ($Dimensions) {
+            $record.metadata.sourceWidth = $Dimensions.Width
+            $record.metadata.sourceHeight = $Dimensions.Height
+        }
+    }
+
+    return [pscustomobject]$record
+}
+
+# Processes one group of files as a single transaction.
+#
+# A per-file preset calls this with a group of one, which is what removes the loop inversion
+# the old code had between the per-file lanes and the batch lanes: creating the destination
+# before the source loop is correct in both cases, and a group of one degenerates to the
+# old per-file behavior.
+function Invoke-PresetGroup {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][pscustomobject]$Paths,
+        [Parameter(Mandatory = $true)][object[]]$Files
     )
 
     $createdOutputs = New-Object System.Collections.Generic.List[string]
-    $workDir = Join-Path $LongWorkDir ("job_{0}_{1}" -f (Get-Date -Format "yyyyMMdd_HHmmss"), (New-RandomToken 4))
+    $createdDirectories = New-Object System.Collections.Generic.List[string]
+    $records = if ($Preset.Manifest) { New-Object System.Collections.Generic.List[object] } else { $null }
+    $processedFiles = New-Object System.Collections.Generic.List[object]
+
+    $setDirectories = @()
+    $setNames = @()
+    $batchDirectory = $null
+    $batchKey = $null
 
     try {
-        New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+        # PerSet builds its whole container tree up front so every source contributes to the
+        # same set folders.
+        if ($Preset.Grouping -eq "PerSet") {
+            $batchDirectory = New-RegularRandomDirectory -Directory $Paths.OutputDir
+            $createdDirectories.Add($batchDirectory) | Out-Null
+            $batchKey = [System.IO.Path]::GetFileName($batchDirectory)
+            Write-Log "Preset '$($Preset.Name)' batch directory: $batchDirectory"
 
-        $extension = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
-        $sourcePath = $Path
-        if ($extension -eq ".mov") {
-            $sourcePath = Join-Path $workDir "source.mp4"
-            Write-Log "Long pipeline remuxing MOV source before segmentation: $Path"
-            Invoke-MovToMp4Remux -InputPath $Path -OutputPath $sourcePath
-        }
-
-        $duration = Get-VideoDurationSeconds -Path $sourcePath
-        $durationText = $duration.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-        $segments = Get-LongSegmentPlan -DurationSeconds $duration
-        $segmentSummary = (($segments | ForEach-Object { $_.DurationSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture) + "s" }) -join ", ")
-
-        Write-Log "Long video duration: ${durationText}s"
-        Write-Log "Long segment plan: $($segments.Count) segment(s): $segmentSummary"
-
-        $segmentPaths = @{}
-        foreach ($segment in $segments) {
-            $segmentPath = Join-Path $workDir ("segment_{0:00}.mp4" -f $segment.Index)
-            $startText = $segment.StartSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-            $segmentDurationText = $segment.DurationSeconds.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
-            Write-Log "Long pipeline extracting segment $($segment.Index) (${startText}s, ${segmentDurationText}s)"
-            Invoke-LongSegmentExtract -InputPath $sourcePath -OutputPath $segmentPath -StartSeconds $segment.StartSeconds -DurationSeconds $segment.DurationSeconds
-            $segmentPaths[$segment.Index] = $segmentPath
-        }
-
-        foreach ($segment in $segments) {
-            $segmentInputPath = $segmentPaths[$segment.Index]
-            $range = Get-TrimRange -DurationSeconds $segment.DurationSeconds
-            if ($range.CanTrim) {
-                Write-Log "Long segment $($segment.Index) trim range $($range.MinMs)-$($range.MaxMs) ms"
-            }
-            else {
-                Write-Log "Long segment $($segment.Index) skipping trim: $($range.Reason)" "WARN"
-            }
-
-            $usedTrimValues = [System.Collections.Generic.HashSet[int]]::new()
-            for ($variant = 1; $variant -le $LongCopiesPerSegment; $variant++) {
-                $trimMs = New-TrimMilliseconds -Range $range -UsedValues $usedTrimValues -CopyCount $LongCopiesPerSegment
-                $outputPath = Convert-LongVideoVariant -InputPath $segmentInputPath -SegmentNumber $segment.Index -VariantNumber $variant -SegmentDurationSeconds $segment.DurationSeconds -TrimMs $trimMs
-                $createdOutputs.Add($outputPath)
+            for ($setNumber = 1; $setNumber -le $Preset.SetCount; $setNumber++) {
+                $setDirectory = New-RegularRandomDirectory -Directory $batchDirectory
+                $setDirectories += $setDirectory
+                $setNames += [System.IO.Path]::GetFileName($setDirectory)
             }
         }
+        else {
+            # A flat or per-source preset has no set folders, but manifest records still want
+            # a stable name, so the preset's own output folder stands in.
+            $setNames = @(".")
+        }
 
-        Move-InputFile -Path $Path -DestinationDirectory $LongOriginalDir
-        Write-Log "Successfully processed long video: $Path"
+        $usedFamilyKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+
+        foreach ($file in $Files) {
+            $kind = Get-MediaKind -Path $file.FullName
+            $source = $null
+
+            $familyKey = $null
+            if ($Preset.Manifest) {
+                $familyKey = Get-AssetStoreFamilyKey -FileName $file.Name
+                $candidate = $familyKey
+                $suffix = 2
+                while (-not $usedFamilyKeys.Add($candidate)) {
+                    $candidate = "{0}_{1}" -f $familyKey, $suffix
+                    $suffix++
+                }
+                $familyKey = $candidate
+            }
+
+            try {
+                # A batch preset already proved the whole folder settled before it got here.
+                # A per-file preset waits on this one file, and throws if it never settles.
+                if ($Preset.Batch -eq "PerFile") {
+                    Wait-FileReady -Path $file.FullName
+                }
+
+                $source = Resolve-PresetSource -Preset $Preset -Path $file.FullName -Kind $kind -WorkDir $Paths.WorkDir
+
+                $variantArgs = @{
+                    Preset             = $Preset
+                    Paths              = $Paths
+                    File               = $file
+                    Source             = $source
+                    Kind               = $kind
+                    SetDirectories     = $setDirectories
+                    SetNames           = $setNames
+                    CreatedDirectories = $createdDirectories
+                    Records            = $records
+                    BatchKey           = $batchKey
+                    FamilyKey          = $familyKey
+                }
+
+                foreach ($outputPath in (Invoke-PresetFileVariants @variantArgs)) {
+                    $createdOutputs.Add($outputPath) | Out-Null
+                }
+
+                $processedFiles.Add($file) | Out-Null
+            }
+            finally {
+                if ($source -and $source.TempPath) {
+                    Remove-HeicWorkingCopy -Path $source.TempPath
+                }
+            }
+        }
+
+        if ($Preset.Manifest -and $batchDirectory) {
+            Write-PresetManifest -Preset $Preset -BatchDirectory $batchDirectory -Variants $records.ToArray()
+        }
     }
     catch {
-        Remove-GeneratedOutputs -Paths $createdOutputs.ToArray()
-        throw
-    }
-    finally {
-        try {
-            if (Test-Path -LiteralPath $workDir) {
-                Remove-Item -LiteralPath $workDir -Recurse -Force
+        Invoke-PresetRollback -Preset $Preset -CreatedOutputs $createdOutputs -CreatedDirectories $createdDirectories
+
+        foreach ($file in $Files) {
+            if (Test-Path -LiteralPath $file.FullName) {
+                Move-InputFile -Path $file.FullName -DestinationDirectory $Paths.FailedDir
             }
         }
-        catch {
-            Write-Log "Could not remove long pipeline work directory '$workDir': $($_.Exception.Message)" "WARN"
+
+        throw
+    }
+
+    # Outputs are complete. Archiving the sources is best-effort and must never discard
+    # finished work, so it happens after the transactional block above.
+    foreach ($file in $processedFiles) {
+        if (Test-Path -LiteralPath $file.FullName) {
+            Move-InputFile -Path $file.FullName -DestinationDirectory $Paths.OriginalDir
+        }
+    }
+
+    return $createdOutputs.ToArray()
+}
+
+# Applies the preset's rollback policy after a failed group.
+function Invoke-PresetRollback {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [AllowEmptyCollection()][System.Collections.Generic.List[string]]$CreatedOutputs,
+        [AllowEmptyCollection()][System.Collections.Generic.List[string]]$CreatedDirectories
+    )
+
+    switch ($Preset.OnFailure) {
+        "DeleteContainer" {
+            foreach ($directory in $CreatedDirectories) {
+                Remove-GeneratedOutputDirectory -Path $directory
+            }
+            if ($CreatedDirectories.Count -eq 0) {
+                Remove-GeneratedOutputs -Paths $CreatedOutputs.ToArray()
+            }
+        }
+        "DeleteFiles" {
+            Remove-GeneratedOutputs -Paths $CreatedOutputs.ToArray()
+        }
+        default {
+            if ($CreatedOutputs.Count -gt 0) {
+                Write-Log "Preset '$($Preset.Name)': preserving $($CreatedOutputs.Count) completed output(s) after failure." "WARN"
+            }
         }
     }
 }
 
-function Process-LongFileSafely {
+function Write-PresetManifest {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][string]$BatchDirectory,
+        [AllowEmptyCollection()][object[]]$Variants
     )
 
-    [void](Set-PipelineWorkspaceFromInputPath -Path $Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $manifest = [ordered]@{
+        schema      = $Preset.ManifestSchema
+        generatedAt = Get-UtcIsoTimestamp
+        importRoot  = "."
+        variants    = [object[]]$Variants
+    }
 
-    if (-not $script:ProcessingPaths.Add($fullPath)) {
+    $json = $manifest | ConvertTo-Json -Depth 12
+    $manifestPath = Join-Path $BatchDirectory "manifest.json"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($manifestPath, $json, $utf8NoBom)
+    Write-Log "Wrote manifest: $manifestPath ($($Variants.Count) variant(s))"
+}
+
+function Get-PresetBatchSignature {
+    param([Parameter(Mandatory = $true)][string]$PresetName)
+
+    if ($script:BatchSignatures -and $script:BatchSignatures.ContainsKey($PresetName)) {
+        return $script:BatchSignatures[$PresetName]
+    }
+
+    return $null
+}
+
+function Set-PresetBatchSignature {
+    param(
+        [Parameter(Mandatory = $true)][string]$PresetName,
+        [string]$Signature
+    )
+
+    if (-not $script:BatchSignatures) { return }
+
+    if ($null -eq $Signature) {
+        [void]$script:BatchSignatures.Remove($PresetName)
+    }
+    else {
+        $script:BatchSignatures[$PresetName] = $Signature
+    }
+}
+
+# Runs one group and turns any failure into a log line rather than stopping the watcher.
+# The group's own transaction has already applied the preset's rollback policy and moved the
+# sources to failed\ by the time an exception reaches here.
+function Invoke-PresetGroupSafely {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][pscustomobject]$Paths,
+        [Parameter(Mandatory = $true)][object[]]$Files
+    )
+
+    $names = ($Files | ForEach-Object { $_.Name }) -join ", "
+    $jobId = [Guid]::NewGuid().ToString("n").Substring(0, 8)
+
+    # Every variant produced under this group carries the same job id, which is how a reader
+    # attributes interleaved progress from parallel runspaces back to one source.
+    $script:CurrentJobId = $jobId
+    $script:CurrentJobTotal = 0
+    $script:CurrentJobDone = 0
+
+    Write-Log "Preset '$($Preset.Name)' [$($Paths.WorkspaceName)] processing $($Files.Count) file(s): $names"
+    Write-PipelineEvent -Name "job.start" -Data @{
+        jobId     = $jobId
+        preset    = $Preset.Name
+        workspace = $Paths.WorkspaceName
+        files     = @($Files | ForEach-Object { $_.Name })
+        # Cast to long: PowerShell sums to a double, which serializes as 20.0 and is not
+        # a valid integer token for strict JSON readers.
+        bytes     = [long](($Files | Measure-Object -Property Length -Sum).Sum)
+    }
+
+    try {
+        $outputs = @(Invoke-PresetGroup -Preset $Preset -Paths $Paths -Files $Files)
+        Write-Log "Preset '$($Preset.Name)' [$($Paths.WorkspaceName)] created $($outputs.Count) output(s)."
+        Write-PipelineEvent -Name "job.done" -Data @{
+            jobId     = $jobId
+            preset    = $Preset.Name
+            workspace = $Paths.WorkspaceName
+            outputs   = $outputs.Count
+        }
+    }
+    catch {
+        $origin = if ($_.InvocationInfo) { " at $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())" } else { "" }
+        Write-Log "Preset '$($Preset.Name)' [$($Paths.WorkspaceName)] failed: $($_.Exception.Message)$origin" "ERROR"
+        Write-PipelineEvent -Name "job.failed" -Data @{
+            jobId     = $jobId
+            preset    = $Preset.Name
+            workspace = $Paths.WorkspaceName
+            error     = $_.Exception.Message
+        }
+    }
+    finally {
+        $script:CurrentJobId = $null
+    }
+}
+
+# Decides whether a PerGroup preset's input folder has settled. All three conditions must
+# hold: every file unlocked, the newest write older than StableSeconds, and the folder
+# contents unchanged since the previous poll.
+function Test-PresetBatchSettled {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][object[]]$Files
+    )
+
+    foreach ($file in $Files) {
+        if (-not (Test-FileUnlocked $file.FullName)) { return $false }
+    }
+
+    $newestWrite = ($Files | Measure-Object -Property LastWriteTime -Maximum).Maximum
+    if (((Get-Date) - $newestWrite).TotalSeconds -lt $StableSeconds) { return $false }
+
+    $signature = (($Files | ForEach-Object { '{0}|{1}' -f $_.FullName, $_.Length }) -join ';')
+    $previous = Get-PresetBatchSignature -PresetName $Preset.Name
+
+    if ($signature -eq $previous) { return $true }
+
+    if ($signature -ne $previous) {
+        Write-Log "Preset '$($Preset.Name)': $($Files.Count) file(s) detected; waiting for the batch to settle."
+    }
+
+    Set-PresetBatchSignature -PresetName $Preset.Name -Signature $signature
+    return $false
+}
+
+# One poll of one preset in one workspace.
+function Invoke-PresetPoll {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Preset,
+        [Parameter(Mandatory = $true)][string]$WorkspaceName
+    )
+
+    $paths = Get-PresetWorkspacePaths -PresetName $Preset.Name -WorkspaceName $WorkspaceName
+    $files = @(Get-PresetCandidateFiles -Preset $Preset -Paths $paths)
+    $paused = Test-PresetPaused -Preset $Preset -WorkspaceName $WorkspaceName
+
+    Set-LaneSnapshot -PresetName $Preset.Name -WorkspaceName $WorkspaceName -Queued $files.Count -Paused $paused
+
+    # A paused lane keeps its queue and stops picking work up. Nothing is discarded.
+    if ($paused) { return }
+
+    if ($files.Count -eq 0) {
+        Set-PresetBatchSignature -PresetName $Preset.Name -Signature $null
         return
     }
 
-    try {
-        Write-Log "Detected long pipeline file: $fullPath"
-        Wait-FileReady -Path $fullPath
-        Process-LongVideoFile -Path $fullPath
-    }
-    catch {
-        Write-Log "Failed long pipeline processing '$fullPath': $($_.Exception.Message)" "ERROR"
-        try {
-            Move-InputFile -Path $fullPath -DestinationDirectory $LongFailedDir
+    if ($Preset.Batch -eq "PerGroup") {
+        if (Test-PresetBatchSettled -Preset $Preset -Files $files) {
+            Set-PresetBatchSignature -PresetName $Preset.Name -Signature $null
+            Invoke-PresetGroupSafely -Preset $Preset -Paths $paths -Files $files
         }
-        catch {
-            Write-Log "Could not move failed long pipeline file '$fullPath': $($_.Exception.Message)" "ERROR"
+
+        return
+    }
+
+    # A per-file preset is the same transaction with a group of one.
+    #
+    # Files are processed concurrently when the preset allows it. Alternating copy counts are
+    # excluded because the alternation counter lives in script scope, and each worker runspace
+    # loads its own copy, which would make the alternation arbitrary.
+    $canParallelize = (
+        $script:SupportsParallel -and
+        $Preset.Parallel -eq "OverFiles" -and
+        $Preset.CopiesAlternate -le 0 -and
+        $files.Count -gt 1 -and
+        $ImageProcessingConcurrency -gt 1
+    )
+
+    if ($canParallelize) {
+        Write-Log "Preset '$($Preset.Name)' [$WorkspaceName] processing $($files.Count) file(s) with concurrency $ImageProcessingConcurrency."
+
+        $libPath = $script:ScriptPath
+        $ffPath = $script:FFmpegPath
+        $fpPath = $script:FFprobePath
+        $exPath = $script:ExifToolPath
+        $presetName = $Preset.Name
+
+        $files | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
+            . $using:libPath -AsLibrary
+
+            $script:FFmpegPath = $using:ffPath
+            $script:FFprobePath = $using:fpPath
+            $script:ExifToolPath = $using:exPath
+            $script:CurrentWorkspaceName = $using:WorkspaceName
+
+            $workerPreset = Get-PipelinePreset -Name $using:presetName
+            $workerPaths = Get-PresetWorkspacePaths -PresetName $using:presetName -WorkspaceName $using:WorkspaceName
+
+            Invoke-PresetGroupSafely -Preset $workerPreset -Paths $workerPaths -Files @($_)
         }
+
+        return
     }
-    finally {
-        [void]$script:ProcessingPaths.Remove($fullPath)
+
+    foreach ($file in $files) {
+        Invoke-PresetGroupSafely -Preset $Preset -Paths $paths -Files @($file)
     }
 }
 
-function Get-CandidateInputFiles {
-    if (-not (Test-Path -LiteralPath $InputDir)) {
-        return @()
+function Write-WatcherStartupBanner {
+    Write-Log "Watcher started."
+    Write-Log "Pipeline root: $PipelineRoot"
+    Write-Log "Workspaces: $($WorkspaceNames -join ', ')"
+    Write-Log "Polling every $PollSeconds seconds."
+
+    foreach ($preset in Get-PipelinePresets) {
+        $details = New-Object System.Collections.Generic.List[string]
+        $details.Add("video x$($preset.VideoCopies)") | Out-Null
+        $details.Add("image x$($preset.ImageCopies)") | Out-Null
+        $details.Add($preset.Grouping.ToLowerInvariant()) | Out-Null
+
+        if ($preset.Grouping -eq "PerSet") { $details.Add("$($preset.SetCount) set(s)") | Out-Null }
+        if ($preset.Batch -eq "PerGroup") { $details.Add("batched") | Out-Null }
+        if ($preset.Segment) { $details.Add("segmented") | Out-Null }
+        if ($preset.Manifest) { $details.Add("manifest") | Out-Null }
+        $details.Add($(if ($preset.SizeCapMB -gt 0) { "cap $($preset.SizeCapMB) MB" } else { "no size cap" })) | Out-Null
+
+        Write-Log "Preset '$($preset.Name)': $($details -join ', ')"
     }
 
-    return @(Get-ChildItem -LiteralPath $InputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsSupportedMedia $_.FullName)
-    } | Sort-Object LastWriteTime, FullName)
-}
-
-function Get-CandidateVideoCleanFiles {
-    if (-not (Test-Path -LiteralPath $VideoCleanInputDir)) {
-        return @()
+    if ($ArchiveEnabled) {
+        Write-Log "Archiving outputs older than $ArchiveAgeHours hours every $ArchiveCheckIntervalMinutes minutes."
+    }
+    else {
+        Write-Log "Archiving disabled."
     }
 
-    return @(Get-ChildItem -LiteralPath $VideoCleanInputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsVideo $_.FullName)
-    } | Sort-Object LastWriteTime, FullName)
-}
-
-function Get-CandidateRemuxFiles {
-    if (-not (Test-Path -LiteralPath $RemuxInputDir)) {
-        return @()
+    if ($AssetRetentionDays -gt 0) {
+        Write-Log "Asset retention: deleting retained entries after $AssetRetentionDays day(s)."
     }
-
-    return @(Get-ChildItem -LiteralPath $RemuxInputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsSupportedMedia $_.FullName)
-    } | Sort-Object LastWriteTime, FullName)
-}
-
-function Get-CandidateLongFiles {
-    if (-not (Test-Path -LiteralPath $LongInputDir)) {
-        return @()
-    }
-
-    return @(Get-ChildItem -LiteralPath $LongInputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsVideo $_.FullName)
-    } | Sort-Object LastWriteTime, FullName)
-}
-
-function Get-CandidateImageBulkFiles {
-    if (-not (Test-Path -LiteralPath $ImageBulkInputDir)) {
-        return @()
-    }
-
-    return @(Get-ChildItem -LiteralPath $ImageBulkInputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and ($ImageExtensions -contains $_.Extension.ToLowerInvariant())
-    } | Sort-Object LastWriteTime, FullName)
-}
-
-function Get-CandidateImageCleanFiles {
-    if (-not (Test-Path -LiteralPath $ImageCleanInputDir)) {
-        return @()
-    }
-
-    return @(Get-ChildItem -LiteralPath $ImageCleanInputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and ($ImageExtensions -contains $_.Extension.ToLowerInvariant())
-    } | Sort-Object LastWriteTime, FullName)
-}
-
-function Get-CandidateSetMediaFiles {
-    if (-not (Test-Path -LiteralPath $SetInputDir)) {
-        return @()
-    }
-
-    return @(Get-ChildItem -LiteralPath $SetInputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsSupportedMedia $_.FullName)
-    } | Sort-Object LastWriteTime, FullName)
-}
-
-function Get-CandidateSetBatchFiles {
-    if (-not (Test-Path -LiteralPath $SetBatchInputDir)) {
-        return @()
-    }
-
-    return @(Get-ChildItem -LiteralPath $SetBatchInputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsSupportedMedia $_.FullName)
-    } | Sort-Object LastWriteTime, FullName)
-}
-
-function Get-CandidateAssetStoreFiles {
-    if (-not (Test-Path -LiteralPath $AssetStoreInputDir)) {
-        return @()
-    }
-
-    return @(Get-ChildItem -LiteralPath $AssetStoreInputDir -File | Where-Object {
-        (-not (Test-IsTemporaryDownload $_.FullName)) -and (Test-IsSupportedMedia $_.FullName)
-    } | Sort-Object LastWriteTime, FullName)
 }
 
 function Start-PollingWatcher {
-    Write-Log "Watcher started."
-    Write-Log "Workspaces: $($WorkspaceNames -join ', ')"
-    Write-Log "Input: $InputDir"
-    Write-Log "Output: $OutputDir"
-    if ($DefaultMaxOutputSizeMB -gt 0) {
-        Write-Log "Default pipeline size cap: $DefaultMaxOutputSizeMB MB (fallback max width: $DefaultSizeCapFallbackMaxWidth px)"
-    }
-    else {
-        Write-Log "Default pipeline size cap: disabled"
-    }
-    Write-Log "Original archive: $OriginalDir"
-    Write-Log "Failed: $FailedDir"
-    Write-Log "Video clean input: $VideoCleanInputDir"
-    Write-Log "Video clean output: $VideoCleanOutputDir (one processed MP4 per input)"
-    Write-Log "Convert input: $RemuxInputDir"
-    Write-Log "Convert output: $RemuxOutputDir"
-    Write-Log "Long pipeline input: $LongInputDir"
-    Write-Log "Long pipeline output: $LongOutputDir"
-    if ($LongMaxOutputSizeMB -gt 0) {
-        Write-Log "Long pipeline size cap: $LongMaxOutputSizeMB MB (fallback max width: $LongSizeCapFallbackMaxWidth px)"
-    }
-    else {
-        Write-Log "Long pipeline size cap: disabled"
-    }
-    Write-Log "Image bulk input: $ImageBulkInputDir"
-    Write-Log "Image bulk output: $ImageBulkOutputDir"
-    Write-Log "Image bulk JPEG quality: native q=$ImageBulkNativeJpegQuality; PNG/HEIC conversion enabled=$ImageBulkConvertPngToJpeg at q=$ImageBulkConvertedJpegQuality"
-    Write-Log "Image clean input: $ImageCleanInputDir"
-    Write-Log "Image clean output: $ImageCleanOutputDir"
-    Write-Log "Set pipeline input: $SetInputDir"
-    Write-Log "Set pipeline output: $SetOutputDir"
-    Write-Log "Set batch input: $SetBatchInputDir"
-    Write-Log "Set batch output: $SetBatchOutputDir ($SetBatchCount sets per batch)"
-    Write-Log "Asset store input: $AssetStoreInputDir"
-    Write-Log "Asset store output: $AssetStoreOutputDir ($AssetStoreSetCount sets per batch, micro-trim $AssetStoreMinTrimMs-$AssetStoreMaxTrimMs ms, manifest schema $AssetStoreManifestSchema)"
-    if ($ArchiveEnabled) {
-        Write-Log "Output archive enabled: files older than $ArchiveAgeHours hours move under $ArchiveRootDir (checked every $ArchiveCheckIntervalMinutes minutes)."
-        foreach ($target in Get-OutputArchiveTargets) {
-            Write-Log "Output archive target: $($target.Label) -> $($target.ArchiveDirectory)"
-        }
-        Write-Log "Output archive target: sets -> $ArchiveSetOutputDir"
-        Write-Log "Output archive target: setbatch -> $ArchiveSetBatchOutputDir"
-        Write-Log "Output archive target: assetstore -> $ArchiveAssetStoreOutputDir"
-    }
-    if ($AssetRetentionDays -gt 0) {
-        Write-Log "Asset retention enabled: archive (except archive/images), original, failed, sync, long work, and .sync-parts entries are deleted $AssetRetentionDays day(s) after creation; image-clean is excluded."
-    }
-    else {
-        Write-Log "Asset retention disabled."
-    }
-    if ($script:SupportsParallel) {
-        Write-Log "Image processing concurrency: $ImageProcessingConcurrency (parallel enabled on PowerShell $($PSVersionTable.PSVersion))."
-    }
-    else {
-        Write-Log "Image processing runs sequentially (PowerShell $($PSVersionTable.PSVersion) has no -Parallel; needs 7+)." "WARN"
-    }
-    Write-Log "Polling every $PollSeconds seconds."
+    Write-WatcherStartupBanner
 
-    while ($true) {
+    if (-not (Test-Path -LiteralPath (Get-ControlDirectory))) {
+        New-Item -ItemType Directory -Path (Get-ControlDirectory) -Force | Out-Null
+    }
+
+    # A stop flag left over from a previous run would exit immediately.
+    Clear-StopRequest
+
+    Write-PipelineEvent -Name "watcher.start" -Data @{
+        pid          = $PID
+        pipelineRoot = $PipelineRoot
+        encoder      = Get-VideoEncoderName
+        presets      = @(Get-PipelinePresets | ForEach-Object { $_.Name })
+        workspaces   = $WorkspaceNames
+    }
+
+    $stopping = $false
+
+    while (-not $stopping) {
         foreach ($workspaceName in $WorkspaceNames) {
-        Use-PipelineWorkspace -WorkspaceName $workspaceName
-        try {
-            Invoke-OutputArchiveIfDue
+            if (Test-StopRequested) { $stopping = $true; break }
 
-            $setMediaFiles = Get-CandidateSetMediaFiles
-            foreach ($file in $setMediaFiles) {
-                Process-SetMediaFileSafely -Path $file.FullName
-            }
+            Use-PipelineWorkspace -WorkspaceName $workspaceName
 
-            $setBatchFiles = Get-CandidateSetBatchFiles
-            if ($setBatchFiles.Count -gt 0) {
-                $batchReady = $true
-                foreach ($batchFile in $setBatchFiles) {
-                    if (-not (Test-FileUnlocked $batchFile.FullName)) {
-                        $batchReady = $false
-                        break
-                    }
-                }
+            try {
+                Invoke-OutputArchiveIfDue
 
-                $batchSignature = (($setBatchFiles | ForEach-Object { '{0}|{1}' -f $_.FullName, $_.Length }) -join ';')
-                $newestWrite = ($setBatchFiles | Measure-Object -Property LastWriteTime -Maximum).Maximum
-                $batchSettled = ((Get-Date) - $newestWrite).TotalSeconds -ge $StableSeconds
-
-                if ($batchReady -and $batchSettled -and $batchSignature -eq $script:LastSetBatchSignature) {
-                    Process-SetBatchSafely -Files $setBatchFiles
-                    $script:LastSetBatchSignature = $null
-                }
-                else {
-                    if ($batchSignature -ne $script:LastSetBatchSignature) {
-                        Write-Log "Set batch: $($setBatchFiles.Count) file(s) detected; waiting for the batch to settle before processing."
-                    }
-                    $script:LastSetBatchSignature = $batchSignature
+                foreach ($preset in Get-PipelinePresets) {
+                    if (Test-StopRequested) { $stopping = $true; break }
+                    Invoke-PresetPoll -Preset $preset -WorkspaceName $workspaceName
                 }
             }
-            else {
-                $script:LastSetBatchSignature = $null
+            catch {
+                Write-Log "Watcher loop error [$($script:CurrentWorkspaceName)]: $($_.Exception.Message)" "ERROR"
             }
-
-            $assetStoreFiles = Get-CandidateAssetStoreFiles
-            if ($assetStoreFiles.Count -gt 0) {
-                $assetReady = $true
-                foreach ($assetFile in $assetStoreFiles) {
-                    if (-not (Test-FileUnlocked $assetFile.FullName)) {
-                        $assetReady = $false
-                        break
-                    }
-                }
-
-                $assetSignature = (($assetStoreFiles | ForEach-Object { '{0}|{1}' -f $_.FullName, $_.Length }) -join ';')
-                $assetNewestWrite = ($assetStoreFiles | Measure-Object -Property LastWriteTime -Maximum).Maximum
-                $assetSettled = ((Get-Date) - $assetNewestWrite).TotalSeconds -ge $StableSeconds
-
-                if ($assetReady -and $assetSettled -and $assetSignature -eq $script:LastAssetStoreSignature) {
-                    Process-AssetStoreBatchSafely -Files $assetStoreFiles
-                    $script:LastAssetStoreSignature = $null
-                }
-                else {
-                    if ($assetSignature -ne $script:LastAssetStoreSignature) {
-                        Write-Log "Asset store batch: $($assetStoreFiles.Count) file(s) detected; waiting for the batch to settle before processing."
-                    }
-                    $script:LastAssetStoreSignature = $assetSignature
-                }
-            }
-            else {
-                $script:LastAssetStoreSignature = $null
-            }
-
-            $imageCleanFiles = Get-CandidateImageCleanFiles
-            if ($script:SupportsParallel -and $imageCleanFiles.Count -gt 1) {
-                $libPath = $script:ScriptPath
-                $ffPath = $script:FFmpegPath
-                $fpPath = $script:FFprobePath
-                $exPath = $script:ExifToolPath
-                $workspaceNameForParallel = $script:CurrentWorkspaceName
-                $imageCleanFiles | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
-                    . $using:libPath -AsLibrary
-                    Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
-                    $script:FFmpegPath = $using:ffPath
-                    $script:FFprobePath = $using:fpPath
-                    $script:ExifToolPath = $using:exPath
-                    Process-ImageCleanFileSafely -Path $_.FullName
-                }
-            }
-            else {
-                foreach ($file in $imageCleanFiles) {
-                    Process-ImageCleanFileSafely -Path $file.FullName
-                }
-            }
-
-            $imageBulkFiles = Get-CandidateImageBulkFiles
-            if ($script:SupportsParallel -and $imageBulkFiles.Count -gt 1) {
-                $libPath = $script:ScriptPath
-                $ffPath = $script:FFmpegPath
-                $fpPath = $script:FFprobePath
-                $exPath = $script:ExifToolPath
-                $workspaceNameForParallel = $script:CurrentWorkspaceName
-                Write-Log "Image bulk processing $($imageBulkFiles.Count) file(s) with file concurrency $ImageProcessingConcurrency and per-file variant concurrency 1."
-                $imageBulkFiles | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
-                    . $using:libPath -AsLibrary
-                    Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
-                    $script:FFmpegPath = $using:ffPath
-                    $script:FFprobePath = $using:fpPath
-                    $script:ExifToolPath = $using:exPath
-                    Process-ImageBulkFileSafely -Path $_.FullName -VariantConcurrency 1
-                }
-            }
-            else {
-                foreach ($file in $imageBulkFiles) {
-                    Process-ImageBulkFileSafely -Path $file.FullName
-                }
-            }
-
-            $longFiles = Get-CandidateLongFiles
-            foreach ($file in $longFiles) {
-                Process-LongFileSafely -Path $file.FullName
-            }
-
-            $remuxFiles = Get-CandidateRemuxFiles
-            if ($script:SupportsParallel -and $remuxFiles.Count -gt 1) {
-                $libPath = $script:ScriptPath
-                $ffPath = $script:FFmpegPath
-                $fpPath = $script:FFprobePath
-                $exPath = $script:ExifToolPath
-                $workspaceNameForParallel = $script:CurrentWorkspaceName
-                $remuxFiles | ForEach-Object -ThrottleLimit $ImageProcessingConcurrency -Parallel {
-                    . $using:libPath -AsLibrary
-                    Set-PipelineWorkspacePaths -WorkspaceName $using:workspaceNameForParallel
-                    $script:FFmpegPath = $using:ffPath
-                    $script:FFprobePath = $using:fpPath
-                    $script:ExifToolPath = $using:exPath
-                    Process-RemuxFileSafely -Path $_.FullName
-                }
-            }
-            else {
-                foreach ($file in $remuxFiles) {
-                    Process-RemuxFileSafely -Path $file.FullName
-                }
-            }
-
-            $videoCleanFiles = Get-CandidateVideoCleanFiles
-            foreach ($file in $videoCleanFiles) {
-                Process-VideoCleanFileSafely -Path $file.FullName
-            }
-
-            $files = Get-CandidateInputFiles
-            foreach ($file in $files) {
-                Process-OneSafely -Path $file.FullName
+            finally {
+                Save-PipelineWorkspaceState
             }
         }
-        catch {
-            Write-Log "Watcher loop error [$($script:CurrentWorkspaceName)]: $($_.Exception.Message)" "ERROR"
-        }
-        finally {
-            Save-PipelineWorkspaceState
-        }
-        }
+
+        Write-WatcherStatus
+
+        if ($stopping) { break }
 
         Start-Sleep -Seconds $PollSeconds
     }
+
+    # Reaching here means a stop was requested rather than the process being killed, so the
+    # current file finished cleanly and the mutex is about to be released properly.
+    Write-Log "Stop requested. Watcher shutting down cleanly."
+    Write-PipelineEvent -Name "watcher.stop" -Data @{ pid = $PID; reason = "control" }
+    Clear-StopRequest
+    Write-WatcherStatus
 }
 
 # When dot-sourced by a parallel worker runspace, only load functions/config and return —
@@ -4433,7 +3693,11 @@ if ($AsLibrary) { return }
 
 try {
     $createdNew = $false
-    $script:InstanceMutex = New-Object System.Threading.Mutex($true, "Global\MediaPipelineWatcher", [ref]$createdNew)
+    # The single-instance lock is scoped to the pipeline root, so one watcher per root rather
+    # than one per machine. Two roots can then run side by side, which is what makes it
+    # possible to exercise a sandbox watcher without stopping the real one.
+    $script:InstanceMutexName = Get-WatcherMutexName -Root $PipelineRoot
+    $script:InstanceMutex = New-Object System.Threading.Mutex($true, $script:InstanceMutexName, [ref]$createdNew)
     if (-not $createdNew) {
         Initialize-Folders
         Write-Log "Another watcher instance is already running. Exiting this duplicate process." "WARN"
@@ -4448,11 +3712,11 @@ try {
         exit 0
     }
 
-    if ($RecompressLongOutputs) {
+    if ($RecompressOutputs) {
         foreach ($workspaceName in $WorkspaceNames) {
             Use-PipelineWorkspace -WorkspaceName $workspaceName
             try {
-                Start-LongOutputRecompressBatch
+                Start-OutputRecompressBatch
             }
             finally {
                 Save-PipelineWorkspaceState
