@@ -1,0 +1,521 @@
+{
+  "capturedAtUtc": "2026-08-22T08:22:46.7169910Z",
+  "scriptPath": "C:\\Users\\admin\\AppData\\Local\\Temp\\mp-parity\\app\\watch-media.ps1",
+  "scriptSha256": "797EFEBBC4A9E34A1BC700E2823EAFFD3EC75444D570986CB9E01A25E0E4394A",
+  "scenarios": {
+    "default": {
+      "error": null,
+      "tree": {
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "original": {
+          "exists": true,
+          "fileCount": 3,
+          "dirCount": 0,
+          "extensions": {
+            ".heic": 1,
+            ".jpg": 1,
+            ".mp4": 1
+          },
+          "fileDepths": {
+            "0": 3
+          },
+          "dirDepths": {}
+        },
+        "output": {
+          "exists": true,
+          "fileCount": 8,
+          "dirCount": 0,
+          "extensions": {
+            ".jpg": 3,
+            ".mp4": 3,
+            ".png": 2
+          },
+          "fileDepths": {
+            "0": 8
+          },
+          "dirDepths": {},
+          "shapes": {
+            ".jpg|3024x4082|0": 3,
+            ".mp4|640x1138|11": 3,
+            ".png|3024x4032|na": 2
+          }
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    },
+    "videoclean": {
+      "error": null,
+      "tree": {
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "original": {
+          "exists": true,
+          "fileCount": 1,
+          "dirCount": 0,
+          "extensions": {
+            ".mp4": 1
+          },
+          "fileDepths": {
+            "0": 1
+          },
+          "dirDepths": {}
+        },
+        "output": {
+          "exists": true,
+          "fileCount": 1,
+          "dirCount": 0,
+          "extensions": {
+            ".mp4": 1
+          },
+          "fileDepths": {
+            "0": 1
+          },
+          "dirDepths": {},
+          "shapes": {
+            ".mp4|640x1138|11": 1
+          }
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    },
+    "images": {
+      "error": null,
+      "tree": {
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "original": {
+          "exists": true,
+          "fileCount": 3,
+          "dirCount": 0,
+          "extensions": {
+            ".heic": 1,
+            ".jpg": 1,
+            ".png": 1
+          },
+          "fileDepths": {
+            "0": 3
+          },
+          "dirDepths": {}
+        },
+        "output": {
+          "exists": true,
+          "fileCount": 9,
+          "dirCount": 0,
+          "extensions": {
+            ".jpg": 9
+          },
+          "fileDepths": {
+            "0": 9
+          },
+          "dirDepths": {},
+          "shapes": {
+            ".jpg|1442x2396|0": 3,
+            ".jpg|3024x4032|0": 3,
+            ".jpg|3024x4082|0": 3
+          }
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    },
+    "imageclean": {
+      "error": null,
+      "tree": {
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "original": {
+          "exists": true,
+          "fileCount": 3,
+          "dirCount": 0,
+          "extensions": {
+            ".heic": 1,
+            ".jpg": 1,
+            ".png": 1
+          },
+          "fileDepths": {
+            "0": 3
+          },
+          "dirDepths": {}
+        },
+        "output": {
+          "exists": true,
+          "fileCount": 3,
+          "dirCount": 0,
+          "extensions": {
+            ".jpg": 2,
+            ".png": 1
+          },
+          "fileDepths": {
+            "0": 3
+          },
+          "dirDepths": {},
+          "shapes": {
+            ".jpg|3024x4032|0": 1,
+            ".jpg|3024x4082|0": 1,
+            ".png|1442x2396|na": 1
+          }
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    },
+    "sets": {
+      "error": null,
+      "tree": {
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "original": {
+          "exists": true,
+          "fileCount": 2,
+          "dirCount": 0,
+          "extensions": {
+            ".jpg": 1,
+            ".mp4": 1
+          },
+          "fileDepths": {
+            "0": 2
+          },
+          "dirDepths": {}
+        },
+        "output": {
+          "exists": true,
+          "fileCount": 4,
+          "dirCount": 2,
+          "extensions": {
+            ".jpg": 2,
+            ".mp4": 2
+          },
+          "fileDepths": {
+            "1": 4
+          },
+          "dirDepths": {
+            "1": 2
+          },
+          "shapes": {
+            ".jpg|3024x4082|0": 2,
+            ".mp4|640x1138|11": 2
+          }
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    },
+    "setbatch": {
+      "error": null,
+      "tree": {
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "original": {
+          "exists": true,
+          "fileCount": 4,
+          "dirCount": 0,
+          "extensions": {
+            ".jpg": 2,
+            ".mp4": 2
+          },
+          "fileDepths": {
+            "0": 4
+          },
+          "dirDepths": {}
+        },
+        "output": {
+          "exists": true,
+          "fileCount": 8,
+          "dirCount": 3,
+          "extensions": {
+            ".jpg": 4,
+            ".mp4": 4
+          },
+          "fileDepths": {
+            "2": 8
+          },
+          "dirDepths": {
+            "1": 1,
+            "2": 2
+          },
+          "shapes": {
+            ".jpg|3024x4082|0": 2,
+            ".jpg|4124x5500|0": 2,
+            ".mp4|640x1138|11": 2,
+            ".mp4|640x1138|9": 2
+          }
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    },
+    "assetstore": {
+      "error": null,
+      "tree": {
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "original": {
+          "exists": true,
+          "fileCount": 4,
+          "dirCount": 0,
+          "extensions": {
+            ".jpg": 2,
+            ".mp4": 2
+          },
+          "fileDepths": {
+            "0": 4
+          },
+          "dirDepths": {}
+        },
+        "output": {
+          "exists": true,
+          "fileCount": 9,
+          "dirCount": 3,
+          "extensions": {
+            ".jpg": 4,
+            ".json": 1,
+            ".mp4": 4
+          },
+          "fileDepths": {
+            "1": 1,
+            "2": 8
+          },
+          "dirDepths": {
+            "1": 1,
+            "2": 2
+          },
+          "shapes": {
+            ".jpg|3024x4082|0": 2,
+            ".jpg|4124x5500|0": 2,
+            ".mp4|640x1138|11": 2,
+            ".mp4|640x1138|9": 2
+          },
+          "manifests": [
+            {
+              "schema": "heatup.assetStoreMediaManifest.v1",
+              "importRoot": ".",
+              "variantCount": 8,
+              "variantFields": [
+                "familyKey",
+                "generatedAt",
+                "generationBatchKey",
+                "metadata",
+                "path",
+                "renditionSetKey",
+                "sizeBytes",
+                "sourceFamilyName",
+                "sourceOriginalName",
+                "transformProfile",
+                "variantKey"
+              ]
+            }
+          ]
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    },
+    "long": {
+      "error": null,
+      "tree": {
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "original": {
+          "exists": true,
+          "fileCount": 1,
+          "dirCount": 0,
+          "extensions": {
+            ".mp4": 1
+          },
+          "fileDepths": {
+            "0": 1
+          },
+          "dirDepths": {}
+        },
+        "output": {
+          "exists": true,
+          "fileCount": 6,
+          "dirCount": 0,
+          "extensions": {
+            ".mp4": 6
+          },
+          "fileDepths": {
+            "0": 6
+          },
+          "dirDepths": {},
+          "shapes": {
+            ".mp4|640x1138|3": 2,
+            ".mp4|640x1138|4": 4
+          }
+        },
+        "work": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    },
+    "convert": {
+      "error": null,
+      "tree": {
+        "failed": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        },
+        "originalImages": {
+          "exists": true,
+          "fileCount": 1,
+          "dirCount": 0,
+          "extensions": {
+            ".heic": 1
+          },
+          "fileDepths": {
+            "0": 1
+          },
+          "dirDepths": {}
+        },
+        "originalVideos": {
+          "exists": true,
+          "fileCount": 1,
+          "dirCount": 0,
+          "extensions": {
+            ".mov": 1
+          },
+          "fileDepths": {
+            "0": 1
+          },
+          "dirDepths": {}
+        },
+        "output": {
+          "exists": true,
+          "fileCount": 3,
+          "dirCount": 0,
+          "extensions": {
+            ".jpg": 2,
+            ".mp4": 1
+          },
+          "fileDepths": {
+            "0": 3
+          },
+          "dirDepths": {},
+          "shapes": {
+            ".jpg|3024x4032|0": 1,
+            ".jpg|3024x4082|0": 1,
+            ".mp4|1920x1080|11.5": 1
+          }
+        },
+        "inputRemaining": {
+          "exists": true,
+          "fileCount": 0,
+          "dirCount": 0,
+          "extensions": {},
+          "fileDepths": {},
+          "dirDepths": {}
+        }
+      }
+    }
+  }
+}
