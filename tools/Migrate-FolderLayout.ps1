@@ -6,7 +6,7 @@
     Old:  <root>\<preset>\<workspace>\{input,output,original,failed,work}
           <root>\archive\<preset>\<workspace>\output
     New:  <root>\<workspace>\<preset>\{input,output,original,failed,work,archive}
-          <root>\sync\<workspace>
+          <root>\<workspace>\sync
 
     Presets are also renamed so the media type is visible in the folder name.
 
@@ -174,30 +174,45 @@ Show ""
 $syncRoot = Join-Path $PipelineRoot 'sync'
 
 if (Test-Path -LiteralPath $syncRoot) {
-    Show "Sorting staged uploads into workspace folders"
+    Show "Moving staged uploads into each workspace"
 
-    foreach ($file in (Get-ChildItem -LiteralPath $syncRoot -File -Force -ErrorAction SilentlyContinue)) {
-        $workspace = 'LC'
-        foreach ($candidate in $workspaces) {
-            if ($file.Name -like "$candidate-*") { $workspace = $candidate; break }
+    foreach ($entry in (Get-ChildItem -LiteralPath $syncRoot -Force -ErrorAction SilentlyContinue)) {
+        # A workspace subfolder from the previous layout moves wholesale.
+        if ($entry.PSIsContainer -and $workspaces -contains $entry.Name) {
+            Move-Tree -Source $entry.FullName -Destination (Join-Path (Join-Path $PipelineRoot $entry.Name) 'sync') -Label "sync\$($entry.Name)"
+            continue
         }
 
-        $destination = Join-Path $syncRoot $workspace
-        Show ("  {0,-46} -> sync\{1}" -f $file.Name, $workspace)
+        # A loose file is routed by its workspace prefix, falling back to the default.
+        $workspace = 'LC'
+        foreach ($candidate in $workspaces) {
+            if ($entry.Name -like "$candidate-*") { $workspace = $candidate; break }
+        }
+
+        $destinationDir = Join-Path (Join-Path $PipelineRoot $workspace) 'sync'
+        Show ("  {0,-46} -> {1}\sync" -f $entry.Name, $workspace)
 
         if (-not $WhatIf) {
-            if (-not (Test-Path -LiteralPath $destination)) {
-                New-Item -ItemType Directory -Path $destination -Force | Out-Null
+            if (-not (Test-Path -LiteralPath $destinationDir)) {
+                New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
             }
 
-            $target = Join-Path $destination $file.Name
+            $target = Join-Path $destinationDir $entry.Name
             if (Test-Path -LiteralPath $target) {
-                $conflicts.Add("$($file.FullName) -> $target") | Out-Null
+                $conflicts.Add("$($entry.FullName) -> $target") | Out-Null
             }
             else {
-                Move-Item -LiteralPath $file.FullName -Destination $target -Force
+                Move-Item -LiteralPath $entry.FullName -Destination $target -Force
                 $script:moved++
             }
+        }
+    }
+
+    if (-not $WhatIf) {
+        $left = @(Get-ChildItem -LiteralPath $syncRoot -Recurse -File -Force -ErrorAction SilentlyContinue)
+        if ($left.Count -eq 0) {
+            Remove-Item -LiteralPath $syncRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Show "  removed the old shared sync folder"
         }
     }
 

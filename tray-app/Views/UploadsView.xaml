@@ -18,12 +18,11 @@
 
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock Text="{Binding Status}" Style="{StaticResource Body}" />
-                    <TextBlock Text="{Binding SyncFolder}" Style="{StaticResource Mono}" />
+                    <TextBlock Text="{Binding DeleteNote}" Style="{StaticResource Mono}" />
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <Button Content="Choose a file" Click="OnChooseFile" />
-                    <Button Content="Upload largest" Click="OnUploadLargest" />
+                    <Button Content="Refresh" Click="OnRefresh" />
                     <Button Content="Cancel" Click="OnCancel"
                             Visibility="{Binding IsBusy, Converter={StaticResource TrueToVisible}}" />
                 </StackPanel>
@@ -31,13 +30,132 @@
         </Border>
 
         <ScrollViewer VerticalScrollBarVisibility="Auto">
-            <StackPanel>
+            <StackPanel Margin="0,0,0,20">
 
-                <TextBlock Style="{StaticResource Hint}" Margin="20,18,20,0" MaxWidth="640"
+                <!-- ===== staged files, grouped by workspace ===== -->
+                <ContentControl Template="{StaticResource SectionHeadTemplate}">
+                    <TextBlock Text="READY TO UPLOAD" Style="{StaticResource Caption}" />
+                </ContentControl>
+
+                <ItemsControl ItemsSource="{Binding Workspaces}" Margin="16,0,16,0">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="{DynamicResource LineSoftBrush}"
+                                    BorderThickness="0,0,0,1">
+                                <StackPanel>
+
+                                    <!-- workspace row -->
+                                    <Grid Margin="0,9">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="130" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Expander only where there is something to expand. -->
+                                        <ToggleButton Grid.Column="0"
+                                                      IsChecked="{Binding IsExpanded}"
+                                                      Width="18" Height="18" Margin="0,0,8,0"
+                                                      Background="Transparent"
+                                                      BorderThickness="0"
+                                                      Cursor="Hand"
+                                                      Visibility="{Binding HasFiles, Converter={StaticResource TrueToVisible}}">
+                                            <ToggleButton.Template>
+                                                <ControlTemplate TargetType="ToggleButton">
+                                                    <Border Background="Transparent">
+                                                        <TextBlock x:Name="Marker" Text="+"
+                                                                   FontFamily="Cascadia Mono, Consolas"
+                                                                   FontSize="13"
+                                                                   HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center"
+                                                                   Foreground="{DynamicResource MutedBrush}" />
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsChecked" Value="True">
+                                                            <Setter TargetName="Marker" Property="Text" Value="-" />
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </ToggleButton.Template>
+                                        </ToggleButton>
+
+                                        <TextBlock Grid.Column="1" Text="{Binding Name}"
+                                                   FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource InkBrush}"
+                                                   VerticalAlignment="Center" />
+
+                                        <TextBlock Grid.Column="2" Text="{Binding Summary}"
+                                                   Style="{StaticResource Mono}"
+                                                   VerticalAlignment="Center" />
+
+                                        <Button Grid.Column="3" Content="Upload all"
+                                                Click="OnUploadWorkspace"
+                                                Visibility="{Binding HasFiles, Converter={StaticResource TrueToVisible}}" />
+                                    </Grid>
+
+                                    <!-- files -->
+                                    <ItemsControl ItemsSource="{Binding Files}"
+                                                  Margin="26,0,0,8"
+                                                  Visibility="{Binding IsExpanded, Converter={StaticResource TrueToVisible}}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="0,3">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="90" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+
+                                                    <TextBlock Text="{Binding Name}"
+                                                               FontFamily="Cascadia Mono, Consolas"
+                                                               FontSize="11.5"
+                                                               Foreground="{DynamicResource InkBrush}"
+                                                               VerticalAlignment="Center"
+                                                               TextTrimming="CharacterEllipsis" />
+
+                                                    <TextBlock Grid.Column="1" Text="{Binding Size}"
+                                                               Style="{StaticResource Mono}"
+                                                               TextAlignment="Right"
+                                                               VerticalAlignment="Center" />
+
+                                                    <Grid Grid.Column="2">
+                                                        <Button Content="Upload" Padding="8,2"
+                                                                Click="OnUploadFile"
+                                                                Visibility="{Binding IsQueued, Converter={StaticResource FalseToVisible}}" />
+                                                        <TextBlock Text="queued"
+                                                                   Style="{StaticResource Caption}"
+                                                                   FontWeight="Normal"
+                                                                   Margin="10,0,4,0"
+                                                                   VerticalAlignment="Center"
+                                                                   Visibility="{Binding IsQueued, Converter={StaticResource TrueToVisible}}" />
+                                                    </Grid>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock Text="No workspaces found."
+                           Style="{StaticResource Mono}"
+                           Margin="16,8,16,0"
+                           Visibility="{Binding Workspaces.Count, Converter={StaticResource ZeroToVisible}}" />
+
+                <!-- ===== transfers ===== -->
+                <ContentControl Template="{StaticResource SectionHeadTemplate}">
+                    <TextBlock Text="TRANSFERS" Style="{StaticResource Caption}" />
+                </ContentControl>
+
+                <TextBlock Style="{StaticResource Hint}" Margin="16,0,16,0" MaxWidth="640"
                            HorizontalAlignment="Left"
-                           Text="Large files are split into chunks, sent one at a time, and reassembled on the remote. A chunk that fails is retried on its own rather than failing the whole transfer, and cancelling keeps the local parts so the next attempt resumes where this one stopped." />
+                           Text="Large files are split into chunks, sent one at a time, and reassembled on the remote. Each chunk carries a checksum the remote verifies before appending it. A chunk that fails is retried on its own, and cancelling keeps the local parts so the next attempt resumes." />
 
-                <ItemsControl ItemsSource="{Binding Uploads}" Margin="20,16,20,20">
+                <ItemsControl ItemsSource="{Binding Uploads}" Margin="16,14,16,0">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
                             <Border BorderBrush="{DynamicResource LineBrush}"
@@ -50,17 +168,23 @@
 
                                     <Grid>
                                         <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
 
-                                        <TextBlock Text="{Binding FileName}"
+                                        <TextBlock Text="{Binding Workspace}"
+                                                   Style="{StaticResource Caption}"
+                                                   Margin="0,0,10,0"
+                                                   VerticalAlignment="Center" />
+
+                                        <TextBlock Grid.Column="1" Text="{Binding FileName}"
                                                    FontFamily="Cascadia Mono, Consolas"
                                                    FontSize="12.5"
                                                    Foreground="{DynamicResource InkBrush}"
                                                    TextTrimming="CharacterEllipsis" />
 
-                                        <TextBlock Grid.Column="1" Text="{Binding Phase}"
+                                        <TextBlock Grid.Column="2" Text="{Binding Phase}"
                                                    Style="{StaticResource Caption}"
                                                    FontWeight="Normal" />
                                     </Grid>
@@ -126,9 +250,9 @@
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
 
-                <TextBlock Text="No uploads yet."
+                <TextBlock Text="No transfers yet."
                            Style="{StaticResource Mono}"
-                           Margin="20,0,20,20"
+                           Margin="16,4,16,0"
                            Visibility="{Binding Uploads.Count, Converter={StaticResource ZeroToVisible}}" />
 
             </StackPanel>

@@ -52,6 +52,9 @@ public sealed record UploadTarget
     public int ChunkSizeMB { get; init; } = 256;
     public int ParallelChunks { get; init; } = 4;
 
+    /// <summary>Removes the local file once the remote copy is verified.</summary>
+    public bool DeleteAfterUpload { get; init; }
+
     public static UploadTarget FromConfig(IReadOnlyDictionary<string, string> globals)
     {
         var fallbackKey = Path.Combine(
@@ -69,6 +72,9 @@ public sealed record UploadTarget
             SshKeyFile = Environment.ExpandEnvironmentVariables(Get("RemoteSshKeyFile", fallbackKey)),
             ChunkSizeMB = int.TryParse(Get("ChunkSizeMB", "256"), out var size) ? size : 256,
             ParallelChunks = int.TryParse(Get("ParallelChunks", "4"), out var parallel) ? parallel : 4,
+            DeleteAfterUpload = Get("DeleteAfterUpload", "false")
+                .Trim()
+                .ToLowerInvariant() is "true" or "1" or "yes" or "on",
         };
 
         string Get(string key, string fallback) =>
@@ -85,12 +91,28 @@ public sealed class UploadJob
     public string FileName => Path.GetFileName(SourcePath);
 
     /// <summary>
-    /// Taken from the staging folder: a file in sync\LC belongs to LC. The remote is split by
-    /// workspace and not by preset, so this is the only routing an upload needs.
+    /// Taken from where the file is staged: <root>\LC\sync	hing.zip belongs to LC. The
+    /// remote splits by workspace and not by preset, so this is the only routing an upload
+    /// needs. Set explicitly when a file is uploaded from somewhere else.
     /// </summary>
-    public string Workspace => Path.GetFileName(Path.GetDirectoryName(SourcePath) ?? "") is { Length: > 0 } name
-        ? name
-        : "general";
+    public string? WorkspaceOverride { get; init; }
+
+    public string Workspace
+    {
+        get
+        {
+            if (WorkspaceOverride is { Length: > 0 })
+            {
+                return WorkspaceOverride;
+            }
+
+            // Walk up past the "sync" folder to the workspace that owns it.
+            var syncFolder = Path.GetDirectoryName(SourcePath);
+            var workspace = Path.GetFileName(Path.GetDirectoryName(syncFolder) ?? "");
+
+            return workspace is { Length: > 0 } ? workspace : "general";
+        }
+    }
 
     /// <summary>Where this file lands on the remote, inside its workspace folder.</summary>
     public string RemoteWorkspaceDirectory =>
@@ -100,6 +122,8 @@ public sealed class UploadJob
     public UploadPhase Phase { get; set; } = UploadPhase.Queued;
     public string? Error { get; set; }
     public DateTimeOffset? StartedUtc { get; set; }
+    public bool RemoteVerified { get; set; }
+    public bool SourceDeleted { get; set; }
 
     public int ChunksSent => Chunks.Count(c => c.State == ChunkState.Sent);
     public long BytesSent => Chunks.Where(c => c.State == ChunkState.Sent).Sum(c => c.Length);
@@ -150,8 +174,16 @@ public sealed class UploadService
             await SplitAsync(job, cancellationToken).ConfigureAwait(false);
             await SendAsync(job, cancellationToken).ConfigureAwait(false);
             await AssembleAsync(job, cancellationToken).ConfigureAwait(false);
+            await VerifyAsync(job, cancellationToken).ConfigureAwait(false);
 
             Cleanup(job);
+
+            // Only after the remote length is confirmed. Deleting on "the command exited zero"
+            // would throw away the original on the strength of an exit code alone.
+            if (job.Target.DeleteAfterUpload)
+            {
+                DeleteSource(job);
+            }
 
             job.Phase = UploadPhase.Done;
         }
@@ -476,6 +508,67 @@ public sealed class UploadService
             throw
         }
         """;
+
+    /// <summary>
+    /// Confirms the assembled remote file is the size it should be.
+    ///
+    /// The assembly script already checks every part's hash and the total length, so this is a
+    /// second, independent look from this side before anything local is deleted.
+    /// </summary>
+    private async Task VerifyAsync(UploadJob job, CancellationToken cancellationToken)
+    {
+        job.Phase = UploadPhase.Verifying;
+        Report(job);
+
+        var remoteFile = Path.Combine(job.RemoteWorkspaceDirectory, job.FileName);
+
+        var script = $"(Get-Item -LiteralPath '{remoteFile}').Length";
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+
+        var result = await SshAsync(
+            job.Target,
+            $"powershell -NoProfile -EncodedCommand {encoded}",
+            cancellationToken).ConfigureAwait(false);
+
+        // Remote PowerShell prefixes a CLIXML progress blob, so find the line that is a number.
+        var reported = result.Output
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line => long.TryParse(line, out var value) ? value : -1L)
+            .FirstOrDefault(value => value >= 0, -1L);
+
+        if (reported < 0)
+        {
+            throw new InvalidOperationException(
+                $"Could not read the remote file back to verify it: {result.Output.Trim()}");
+        }
+
+        if (reported != job.TotalBytes)
+        {
+            throw new InvalidOperationException(
+                $"Remote file is {reported} bytes, expected {job.TotalBytes}.");
+        }
+
+        job.RemoteVerified = true;
+    }
+
+    /// <summary>Removes the local original once the remote copy is confirmed.</summary>
+    private static void DeleteSource(UploadJob job)
+    {
+        if (!job.RemoteVerified)
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(job.SourcePath);
+            job.SourceDeleted = true;
+        }
+        catch (IOException)
+        {
+            // Failing to delete is not a failed upload: the file is safely on the remote.
+        }
+    }
 
     private void Cleanup(UploadJob job)
     {

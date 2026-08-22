@@ -1,8 +1,6 @@
-using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using MediaPipelineTray.ViewModels;
-using Microsoft.Win32;
 
 namespace MediaPipelineTray.Views;
 
@@ -12,62 +10,45 @@ public partial class UploadsView : UserControl
 
     private UploadsViewModel? Model => DataContext as UploadsViewModel;
 
-    private async void OnChooseFile(object sender, RoutedEventArgs e)
+    private void OnRefresh(object sender, RoutedEventArgs e) => Model?.Refresh();
+
+    private void OnUploadFile(object sender, RoutedEventArgs e)
     {
-        if (Model is null)
+        if (sender is FrameworkElement { DataContext: SyncFileRow file })
         {
-            return;
-        }
-
-        var dialog = new OpenFileDialog
-        {
-            Title = "Choose a file to upload",
-            InitialDirectory = Directory.Exists(Model.SyncFolder) ? Model.SyncFolder : null,
-            CheckFileExists = true,
-        };
-
-        if (dialog.ShowDialog(Window.GetWindow(this)) == true)
-        {
-            await Model.StartAsync(dialog.FileName);
+            Model?.QueueFile(file);
         }
     }
 
-    /// <summary>
-    /// The common case: the sync folder holds one big archive waiting to go. Picking the
-    /// largest matches what the old script did when run with no arguments.
-    /// </summary>
-    private async void OnUploadLargest(object sender, RoutedEventArgs e)
+    private void OnUploadWorkspace(object sender, RoutedEventArgs e)
     {
-        if (Model is null)
+        if (sender is not FrameworkElement { DataContext: SyncWorkspaceRow workspace } || Model is null)
         {
             return;
         }
 
-        var candidates = Model.FindCandidates();
+        var pending = workspace.Files.Count(f => !f.IsQueued);
 
-        if (candidates.Count == 0)
+        if (pending == 0)
         {
-            MessageBox.Show(
-                Window.GetWindow(this),
-                $"Nothing to upload. Put a file in {Model.SyncFolder} first.",
-                "Uploads",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
             return;
         }
 
-        var largest = candidates[0];
+        var total = UploadRow.Format(workspace.Files.Where(f => !f.IsQueued).Sum(f => f.Length));
 
         var answer = MessageBox.Show(
             Window.GetWindow(this),
-            $"Upload {largest.Name}?\n\n{UploadRow.Format(largest.Length)}",
-            "Uploads",
+            $"Upload {pending} file(s) from {workspace.Name}?\n\n{total} in total.\n\n"
+            + (Model.DeleteAfterUpload
+                ? "Each local file is deleted once its remote copy is verified."
+                : "Local files are kept."),
+            "Upload workspace",
             MessageBoxButton.OKCancel,
             MessageBoxImage.Question);
 
         if (answer == MessageBoxResult.OK)
         {
-            await Model.StartAsync(largest.FullName);
+            Model.QueueWorkspace(workspace);
         }
     }
 

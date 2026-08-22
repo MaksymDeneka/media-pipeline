@@ -52,11 +52,12 @@ public sealed class PipelinePaths
     public string FailedDirectory(string preset, string workspace) =>
         Path.Combine(LaneDirectory(preset, workspace), "failed");
 
-    /// <summary>Uploads stage per workspace, mirroring the remote.</summary>
+    /// <summary>
+    /// Uploads stage beside that workspace's lanes, so everything for one client stays in one
+    /// place. The remote is still split by workspace, so the mapping is direct.
+    /// </summary>
     public string SyncDirectory(string workspace) =>
-        Path.Combine(PipelineRoot, "sync", workspace);
-
-    public string SyncRoot => Path.Combine(PipelineRoot, "sync");
+        Path.Combine(PipelineRoot, workspace, "sync");
 
     /// <summary>
     /// The watcher's single-instance mutex for this root. Opening it is the cheapest possible

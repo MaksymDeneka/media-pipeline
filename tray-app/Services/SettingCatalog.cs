@@ -333,6 +333,48 @@ public static class SettingCatalog
             PresetScoped = false,
         },
 
+        // --- uploads --------------------------------------------------------
+        new()
+        {
+            Key = "DeleteAfterUpload",
+            Default = "false",
+            Label = "Delete after upload",
+            Help = "Removes the local file once the remote copy has been read back and confirmed the right size. Off by default, because it is not reversible.",
+            Kind = SettingKind.Boolean,
+            Group = "Uploads",
+            PresetScoped = false,
+        },
+        new()
+        {
+            Key = "ChunkSizeMB",
+            Default = "256",
+            Label = "Chunk size, MB",
+            Help = "Large files are split into chunks this size. Smaller chunks retry faster on a flaky link, larger ones have less overhead.",
+            Kind = SettingKind.Integer,
+            Group = "Uploads",
+            PresetScoped = false,
+        },
+        new()
+        {
+            Key = "ParallelChunks",
+            Default = "4",
+            Label = "Chunks at once",
+            Help = "How many chunks are sent in parallel.",
+            Kind = SettingKind.Integer,
+            Group = "Uploads",
+            PresetScoped = false,
+        },
+        new()
+        {
+            Key = "RemoteDirectory",
+            Default = @"D:\MediaPipeline\sync",
+            Label = "Remote folder",
+            Help = @"Where uploads land on the remote. A workspace folder is created inside it, so a file staged in LC\sync arrives there under LC.",
+            Kind = SettingKind.Text,
+            Group = "Uploads",
+            PresetScoped = false,
+        },
+
         // --- housekeeping ---------------------------------------------------
         new()
         {

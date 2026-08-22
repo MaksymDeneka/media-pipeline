@@ -526,6 +526,11 @@ function Initialize-Folders {
         }
     }
 
+    # Each workspace gets a sync folder to stage uploads in.
+    foreach ($workspaceName in $WorkspaceNames) {
+        $directories.Add((Join-Path (Join-Path $PipelineRoot $workspaceName) "sync")) | Out-Null
+    }
+
     foreach ($directory in $directories) {
         if (-not (Test-Path -LiteralPath $directory)) {
             New-Item -ItemType Directory -Path $directory -Force | Out-Null
@@ -1354,14 +1359,14 @@ function Get-PipelineAssetRetentionTargets {
 
 # Sync folders sit above the workspace level: <root>\sync and <root>\<preset>\sync. They are
 # written by the upload scripts rather than the watcher, which only ages them out.
-# Uploads stage under <root>\sync\<workspace>, mirroring the remote layout. The watcher does
+# Uploads stage under <root>\<workspace>\sync, beside that workspace's lanes. The watcher does
 # not write these; it only ages them out.
 function Get-SyncRetentionTargets {
     $targets = New-Object System.Collections.Generic.List[object]
 
     foreach ($workspaceName in $WorkspaceNames) {
         $targets.Add([pscustomobject]@{
-            TargetDirectory = Join-Path (Join-Path $PipelineRoot "sync") $workspaceName
+            TargetDirectory = Join-Path (Join-Path $PipelineRoot $workspaceName) "sync"
             Label = "$workspaceName sync"
         }) | Out-Null
     }

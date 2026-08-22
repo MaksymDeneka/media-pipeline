@@ -32,6 +32,7 @@ public sealed class ShellViewModel : IDisposable
         Activity.Start();
         Presets.Load();
         Settings.Load();
+        Uploads.Refresh();
     }
 
     /// <summary>
@@ -48,6 +49,10 @@ public sealed class ShellViewModel : IDisposable
 
             case "Settings" when !Settings.IsDirty:
                 Settings.Load();
+                break;
+
+            case "Uploads":
+                Uploads.Refresh();
                 break;
         }
     }

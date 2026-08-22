@@ -128,12 +128,11 @@ D:\MediaPipeline  LC\                      <- workspace
       work\                <- temporary files, segmenting only
     image-bulk\...
     sets\...
+    sync\                 <- files staged for upload to the remote
   MD\...
   YL\...
   PL\...
   general\...
-  sync    LC\                    <- files staged for upload, per workspace
-    MD\...
   logs    media-pipeline-YYYYMMDD.log     <- human-readable log
     events-YYYYMMDD.jsonl           <- machine-readable event stream
   status    watcher.json                    <- current state
@@ -322,13 +321,18 @@ Remote settings live in `config.ini` and default to the same values the sync scr
 
 ```ini
 [Upload]
-RemoteName = heatup-remote
 RemoteDirectory = D:\MediaPipeline\sync
-RemoteSshHost = heatup-remote
-RemoteSshPort = 2222
+DeleteAfterUpload = false
 ChunkSizeMB = 256
 ParallelChunks = 4
 ```
+
+Put a file in `<workspace>\sync` and it uploads to that workspace on the remote. The Uploads
+tab lists every workspace; expand one to upload a single file, or use **Upload all** for the
+whole folder. Files upload one at a time.
+
+With `DeleteAfterUpload` on, the local file is removed once the remote copy has been read back
+and confirmed the right size. It is off by default, because it cannot be undone.
 
 ---
 

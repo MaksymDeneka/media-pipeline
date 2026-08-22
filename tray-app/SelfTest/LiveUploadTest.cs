@@ -41,6 +41,10 @@ internal static class LiveUploadTest
             RemotePartsRoot = scratchWindows + "\\parts",
             RemoteSftpPartsRoot = scratchSftp + "/parts",
             RemoteDirectory = scratchWindows + "\\out",
+
+            // Exercised here rather than trusted: this deletes the user's original, so it must
+            // only happen once the remote copy has been read back and confirmed.
+            DeleteAfterUpload = true,
         };
 
         // Cleanup removes the whole scratch folder, not just the assembled output.
@@ -89,7 +93,9 @@ internal static class LiveUploadTest
             {
                 Console.WriteLine($"   {job.Chunks.Count} chunk(s) in {stopwatch.Elapsed.TotalSeconds:0.0}s");
 
-                var remoteFile = target.RemoteDirectory + "\\" + Path.GetFileName(localFile);
+                // Uploads land in a workspace folder inside the remote directory, so ask the
+                // job where it actually put the file rather than assuming.
+                var remoteFile = Path.Combine(job.RemoteWorkspaceDirectory, Path.GetFileName(localFile));
                 var remoteHash = await RemoteHash(target, remoteFile);
 
                 failures += Check("remote file matches byte for byte",
@@ -100,10 +106,18 @@ internal static class LiveUploadTest
                     !Directory.Exists(Path.Combine(paths.PipelineRoot, ".sync-parts",
                         Path.GetFileName(localFile) + ".parts")),
                     "local parts remain");
+
+                failures += Check("remote size was verified", job.RemoteVerified, "not verified");
+
+                failures += Check("local original deleted after verification",
+                    job.SourceDeleted && !File.Exists(localFile),
+                    job.SourceDeleted ? "flag set but file remains" : "not deleted");
             }
         }
         finally
         {
+            // The upload deletes this itself when DeleteAfterUpload is on; only clean up
+            // after a failure that left it behind.
             if (File.Exists(localFile))
             {
                 File.Delete(localFile);

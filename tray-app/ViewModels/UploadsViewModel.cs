@@ -32,6 +32,49 @@ public sealed class ChunkTile : Observable
     public bool IsFailed => State == ChunkState.Failed;
 }
 
+/// <summary>A file staged in a workspace's sync folder, ready to upload.</summary>
+public sealed class SyncFileRow : Observable
+{
+    private bool _isQueued;
+
+    public required string FullPath { get; init; }
+    public required string Name { get; init; }
+    public required long Length { get; init; }
+    public required string Workspace { get; init; }
+
+    public string Size => UploadRow.Format(Length);
+
+    /// <summary>True once queued, so the same file cannot be added twice.</summary>
+    public bool IsQueued { get => _isQueued; set => Set(ref _isQueued, value); }
+}
+
+/// <summary>A workspace's sync folder, with the files waiting in it.</summary>
+public sealed class SyncWorkspaceRow : Observable
+{
+    private bool _isExpanded;
+
+    public required string Name { get; init; }
+    public required string Path { get; init; }
+    public ObservableCollection<SyncFileRow> Files { get; } = [];
+
+    public bool IsExpanded { get => _isExpanded; set => Set(ref _isExpanded, value); }
+
+    public string Summary => Files.Count switch
+    {
+        0 => "empty",
+        1 => $"1 file, {UploadRow.Format(Files.Sum(f => f.Length))}",
+        _ => $"{Files.Count} files, {UploadRow.Format(Files.Sum(f => f.Length))}",
+    };
+
+    public bool HasFiles => Files.Count > 0;
+
+    public void Refreshed()
+    {
+        Raise(nameof(Summary));
+        Raise(nameof(HasFiles));
+    }
+}
+
 public sealed class UploadRow : Observable
 {
     private string _phase = "";
@@ -43,6 +86,7 @@ public sealed class UploadRow : Observable
     public required UploadJob Job { get; init; }
 
     public string FileName => Job.FileName;
+    public string Workspace => Job.Workspace;
     public ObservableCollection<ChunkTile> Chunks { get; } = [];
 
     public string Phase { get => _phase; set => Set(ref _phase, value); }
@@ -53,7 +97,6 @@ public sealed class UploadRow : Observable
 
     public void Sync()
     {
-        // Chunks only appear once the split has planned them.
         while (Chunks.Count < Job.Chunks.Count)
         {
             Chunks.Add(new ChunkTile { Index = Chunks.Count + 1 });
@@ -66,12 +109,12 @@ public sealed class UploadRow : Observable
 
         Phase = Job.Phase switch
         {
-            UploadPhase.Queued => "Queued",
+            UploadPhase.Queued => "Waiting",
             UploadPhase.Splitting => "Splitting",
             UploadPhase.Sending => "Sending",
             UploadPhase.Assembling => "Assembling on the remote",
             UploadPhase.Verifying => "Verifying",
-            UploadPhase.Done => "Done",
+            UploadPhase.Done => Job.SourceDeleted ? "Done, local copy deleted" : "Done",
             UploadPhase.Failed => "Failed",
             UploadPhase.Cancelled => "Cancelled",
             UploadPhase.Paused => "Paused",
@@ -79,13 +122,11 @@ public sealed class UploadRow : Observable
         };
 
         CanCancel = Job.Phase is UploadPhase.Queued or UploadPhase.Splitting
-            or UploadPhase.Sending or UploadPhase.Assembling;
+            or UploadPhase.Sending or UploadPhase.Assembling or UploadPhase.Verifying;
 
         Fraction = Job.Fraction;
 
-        Counts = Job.Chunks.Count == 0
-            ? ""
-            : $"{Job.ChunksSent} / {Job.Chunks.Count} chunks";
+        Counts = Job.Chunks.Count == 0 ? "" : $"{Job.ChunksSent} / {Job.Chunks.Count} chunks";
 
         var failedChunk = Job.Chunks.FirstOrDefault(c => c.State == ChunkState.Failed);
         var retrying = Job.Chunks.FirstOrDefault(c => c.State == ChunkState.Sending && c.Attempts > 1);
@@ -111,102 +152,203 @@ public sealed class UploadRow : Observable
 /// <summary>
 /// The upload queue.
 ///
-/// Uploads run one file at a time. Chunks within a file already go in parallel, and running two
-/// large files at once on a link that drops under load would make both slower and less likely
-/// to finish.
+/// Files can be queued one at a time or a whole workspace at once, but they upload
+/// sequentially. Chunks within a file already go in parallel, and running two large files at
+/// once on a link that drops under load would make both slower and less likely to finish.
 /// </summary>
 public sealed class UploadsViewModel : Observable
 {
     private readonly UploadService _service;
     private readonly PipelinePaths _paths;
     private readonly DispatcherTimer _timer;
+    private readonly Queue<SyncFileRow> _pending = new();
 
     private CancellationTokenSource? _cancellation;
-    private UploadRow? _current;
     private bool _isBusy;
-    private string _status = "";
+    private string _status = "Nothing queued.";
+    private bool _deleteAfterUpload;
 
     public UploadsViewModel(UploadService service, PipelinePaths paths)
     {
         _service = service;
         _paths = paths;
 
-        _service.Progress += OnProgress;
-
-        // The service reports from worker threads; repaint on the UI thread on a timer rather
-        // than marshalling every individual chunk update.
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         _timer.Tick += (_, _) => SyncRows();
         _timer.Start();
     }
 
+    public ObservableCollection<SyncWorkspaceRow> Workspaces { get; } = [];
     public ObservableCollection<UploadRow> Uploads { get; } = [];
 
     public bool IsBusy { get => _isBusy; private set => Set(ref _isBusy, value); }
-
     public string Status { get => _status; private set => Set(ref _status, value); }
 
-    /// <summary>The staging root. Files live in a workspace folder beneath it.</summary>
-    public string SyncFolder => _paths.SyncRoot;
-
-    private void OnProgress(object? sender, UploadJob job)
+    /// <summary>Mirrors the config setting, so the tab says what will happen without a detour.</summary>
+    public bool DeleteAfterUpload
     {
-        // Deliberately empty: the timer drives repainting. This keeps worker threads out of
-        // the dispatcher entirely.
-    }
-
-    private void SyncRows()
-    {
-        foreach (var row in Uploads)
+        get => _deleteAfterUpload;
+        private set
         {
-            row.Sync();
-        }
-
-        if (_current is not null && !_current.CanCancel)
-        {
-            IsBusy = false;
-            _current = null;
+            if (Set(ref _deleteAfterUpload, value))
+            {
+                Raise(nameof(DeleteNote));
+            }
         }
     }
 
-    /// <summary>Lists candidates from the sync folder, largest first, skipping work in progress.</summary>
-    public IReadOnlyList<FileInfo> FindCandidates()
+    public string DeleteNote => DeleteAfterUpload
+        ? "Local files are deleted once the remote copy is verified."
+        : "Local files are kept after upload.";
+
+    public int QueuedCount => _pending.Count;
+
+    /// <summary>Rescans every workspace's sync folder.</summary>
+    public void Refresh()
     {
-        if (!Directory.Exists(SyncFolder))
+        var workspaces = ReadWorkspaceNames();
+        var queued = _pending.Select(f => f.FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        DeleteAfterUpload = UploadTarget
+            .FromConfig(IniFile.Load(_paths.ConfigFile).ReadGlobals())
+            .DeleteAfterUpload;
+
+        Workspaces.Clear();
+
+        foreach (var workspace in workspaces)
+        {
+            var directory = _paths.SyncDirectory(workspace);
+            var row = new SyncWorkspaceRow { Name = workspace, Path = directory };
+
+            if (Directory.Exists(directory))
+            {
+                var files = new DirectoryInfo(directory)
+                    .GetFiles("*", SearchOption.TopDirectoryOnly)
+                    .Where(f => f.Length > 0)
+                    .Where(f => !f.Name.EndsWith(".chunked.tmp", StringComparison.OrdinalIgnoreCase))
+                    .Where(f => !f.Name.EndsWith(".rclone-partial", StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(f => f.Length);
+
+                foreach (var file in files)
+                {
+                    row.Files.Add(new SyncFileRow
+                    {
+                        FullPath = file.FullName,
+                        Name = file.Name,
+                        Length = file.Length,
+                        Workspace = workspace,
+                        IsQueued = queued.Contains(file.FullName),
+                    });
+                }
+            }
+
+            row.Refreshed();
+            Workspaces.Add(row);
+        }
+
+        Raise(nameof(QueuedCount));
+    }
+
+    /// <summary>
+    /// Workspace names come from the pipeline root rather than a hardcoded list, so a workspace
+    /// added to the watcher shows up here without another edit.
+    /// </summary>
+    private IReadOnlyList<string> ReadWorkspaceNames()
+    {
+        if (!Directory.Exists(_paths.PipelineRoot))
         {
             return [];
         }
 
+        var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "logs", "status", "control", "archive", ".sync-parts", "sync",
+        };
+
         return
         [
-            // Candidates live one level down, in their workspace folder.
-            .. new DirectoryInfo(SyncFolder)
-                .GetFiles("*", SearchOption.AllDirectories)
-                .Where(f => f.Length > 0)
-                .Where(f => !f.Name.EndsWith(".chunked.tmp", StringComparison.OrdinalIgnoreCase))
-                .Where(f => !f.Name.EndsWith(".rclone-partial", StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(f => f.Length)
+            .. new DirectoryInfo(_paths.PipelineRoot)
+                .GetDirectories()
+                .Select(d => d.Name)
+                .Where(name => !reserved.Contains(name))
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
         ];
     }
 
-    public async Task StartAsync(string path)
+    public void QueueFile(SyncFileRow file)
+    {
+        if (file.IsQueued)
+        {
+            return;
+        }
+
+        file.IsQueued = true;
+        _pending.Enqueue(file);
+        Raise(nameof(QueuedCount));
+
+        _ = PumpAsync();
+    }
+
+    public void QueueWorkspace(SyncWorkspaceRow workspace)
+    {
+        foreach (var file in workspace.Files.Where(f => !f.IsQueued).ToList())
+        {
+            file.IsQueued = true;
+            _pending.Enqueue(file);
+        }
+
+        Raise(nameof(QueuedCount));
+        _ = PumpAsync();
+    }
+
+    /// <summary>Runs the queue one file at a time until it is empty.</summary>
+    private async Task PumpAsync()
     {
         if (IsBusy)
         {
             return;
         }
 
-        var ini = IniFile.Load(_paths.ConfigFile);
-        var target = UploadTarget.FromConfig(ini.ReadGlobals());
-
-        var job = new UploadJob { SourcePath = path, Target = target };
-        var row = new UploadRow { Job = job };
-
-        Uploads.Insert(0, row);
-        _current = row;
         IsBusy = true;
-        Status = $"Uploading {job.FileName}";
 
+        try
+        {
+            while (_pending.Count > 0)
+            {
+                var next = _pending.Dequeue();
+                Raise(nameof(QueuedCount));
+
+                if (!File.Exists(next.FullPath))
+                {
+                    Status = $"{next.Name} is gone, skipping.";
+                    continue;
+                }
+
+                await RunOneAsync(next).ConfigureAwait(true);
+            }
+        }
+        finally
+        {
+            IsBusy = false;
+            Refresh();
+        }
+    }
+
+    private async Task RunOneAsync(SyncFileRow file)
+    {
+        var target = UploadTarget.FromConfig(IniFile.Load(_paths.ConfigFile).ReadGlobals());
+
+        var job = new UploadJob
+        {
+            SourcePath = file.FullPath,
+            Target = target,
+            WorkspaceOverride = file.Workspace,
+        };
+
+        var row = new UploadRow { Job = job };
+        Uploads.Insert(0, row);
+
+        Status = $"Uploading {job.FileName} to {job.Workspace}";
         _cancellation = new CancellationTokenSource();
 
         try
@@ -217,11 +359,11 @@ public sealed class UploadsViewModel : Observable
         {
             _cancellation.Dispose();
             _cancellation = null;
-            IsBusy = false;
             row.Sync();
 
             Status = job.Phase switch
             {
+                UploadPhase.Done when job.SourceDeleted => $"{job.FileName} uploaded and removed locally",
                 UploadPhase.Done => $"{job.FileName} uploaded",
                 UploadPhase.Cancelled => $"{job.FileName} cancelled. Local parts kept, so it resumes where it stopped.",
                 UploadPhase.Failed => $"{job.FileName} failed: {job.Error}",
@@ -230,15 +372,24 @@ public sealed class UploadsViewModel : Observable
         }
     }
 
-    /// <summary>
-    /// Cancels the current upload. Local parts are kept deliberately, so starting the same file
-    /// again skips everything already split and sent.
-    /// </summary>
-    public void Cancel() => _cancellation?.Cancel();
-
-    public void Dispose()
+    private void SyncRows()
     {
-        _timer.Stop();
-        _service.Progress -= OnProgress;
+        foreach (var row in Uploads)
+        {
+            row.Sync();
+        }
     }
+
+    /// <summary>
+    /// Cancels the file in flight. Local parts are kept deliberately, so starting the same file
+    /// again skips everything already split and sent. Anything still queued is dropped.
+    /// </summary>
+    public void Cancel()
+    {
+        _pending.Clear();
+        Raise(nameof(QueuedCount));
+        _cancellation?.Cancel();
+    }
+
+    public void Dispose() => _timer.Stop();
 }
