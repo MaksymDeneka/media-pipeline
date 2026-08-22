@@ -2060,6 +2060,63 @@ function Clear-Metadata {
     Invoke-ExternalTool -Command $script:ExifToolPath -Arguments @("-all=", "-overwrite_original", $Path) | Out-Null
 }
 
+# Produces one randomly named .mp4 variant: trims the tail, encodes, strips metadata, and
+# optionally enforces a size cap.
+#
+# Every video lane goes through here. The lane-specific policy is expressed by two arguments:
+#   MaxVideoBitrateKbps  0 means no bitrate ceiling on the first encode.
+#   MaxSizeMegabytes     0 skips the size-cap retry pass entirely.
+# The set, set-batch and asset-store lanes pass 0 for both; the default lane passes neither.
+#
+# LogLabel identifies the lane in the log, e.g. "Video variant 3" or "Set video variant 2".
+function New-VideoVariant {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [double]$DurationSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TrimMs,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LogLabel,
+
+        [int]$MaxVideoBitrateKbps = 0,
+
+        [double]$MaxSizeMegabytes = 0,
+
+        [int]$SizeCapFallbackMaxWidth = 0
+    )
+
+    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
+    $trimSeconds = $TrimMs / 1000.0
+    $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    $targetDurationText = $targetDuration.ToString("0.###", $culture)
+
+    Write-Log "$LogLabel trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
+
+    $qualityValue = if ($script:UseNvenc) { $NvencCq } elseif ($script:UseAmf) { $AmfQp } else { $Crf }
+
+    Invoke-VideoEncode -InputPath $InputPath -OutputPath $outputPath -QualityValue $qualityValue -MaxWidthValue $MaxWidth -DurationSeconds $targetDuration -MaxVideoBitrateKbps $MaxVideoBitrateKbps
+
+    Clear-Metadata -Path $outputPath
+
+    if ($MaxSizeMegabytes -gt 0) {
+        Invoke-OutputSizeCap -OutputPath $outputPath -MaxSizeMegabytes $MaxSizeMegabytes -FallbackMaxWidth $SizeCapFallbackMaxWidth -SourceInputPath $InputPath -SegmentDurationSeconds $DurationSeconds -TrimMs $TrimMs
+    }
+
+    Write-Log "Created $LogLabel output: $outputPath"
+
+    return $outputPath
+}
+
+# Default pipeline variant: bitrate-ceilinged first encode plus the size-cap retry pass.
 function Convert-VideoVariant {
     param(
         [Parameter(Mandatory = $true)]
@@ -2077,40 +2134,10 @@ function Convert-VideoVariant {
         [string]$OutputDirectory = $OutputDir
     )
 
-    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
-    $trimSeconds = $TrimMs / 1000.0
-    $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
-    $culture = [System.Globalization.CultureInfo]::InvariantCulture
-    $targetDurationText = $targetDuration.ToString("0.###", $culture)
-
-    Write-Log "Video variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
-
-    $qualityValue = if ($script:UseNvenc) { $NvencCq } elseif ($script:UseAmf) { $AmfQp } else { $Crf }
+    $targetDuration = [Math]::Max(0.1, $DurationSeconds - ($TrimMs / 1000.0))
     $maxVideoBitrateKbps = Get-PrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration -MaxSizeMegabytes $DefaultMaxOutputSizeMB -MaxrateScale $DefaultNvencPrimaryMaxrateScale
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-t", $targetDurationText,
-        "-map", "0:v:0",
-        "-map", "0:a:0?"
-    )
-    $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth -MaxVideoBitrateKbps $maxVideoBitrateKbps
-    $arguments += @(
-        "-c:a", "aac",
-        "-b:a", $AudioBitrate,
-        "-movflags", "+faststart",
-        "-map_metadata", "-1",
-        $outputPath
-    )
 
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    Clear-Metadata -Path $outputPath
-    Invoke-OutputSizeCap -OutputPath $outputPath -MaxSizeMegabytes $DefaultMaxOutputSizeMB -FallbackMaxWidth $DefaultSizeCapFallbackMaxWidth -SourceInputPath $InputPath -SegmentDurationSeconds $DurationSeconds -TrimMs $TrimMs
-    Write-Log "Created video output: $outputPath"
-
-    return $outputPath
+    return New-VideoVariant -InputPath $InputPath -OutputDirectory $OutputDirectory -DurationSeconds $DurationSeconds -TrimMs $TrimMs -LogLabel "Video variant $VariantNumber" -MaxVideoBitrateKbps $maxVideoBitrateKbps -MaxSizeMegabytes $DefaultMaxOutputSizeMB -SizeCapFallbackMaxWidth $DefaultSizeCapFallbackMaxWidth
 }
 
 function Convert-ImageVariant {
@@ -2580,38 +2607,9 @@ function Convert-SetVideoVariant {
         [int]$TrimMs
     )
 
-    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
-    $trimSeconds = $TrimMs / 1000.0
-    $targetDuration = [Math]::Max(0.1, $DurationSeconds - $trimSeconds)
-    $culture = [System.Globalization.CultureInfo]::InvariantCulture
-    $targetDurationText = $targetDuration.ToString("0.###", $culture)
-
-    Write-Log "Set video variant $VariantNumber trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
-
-    $qualityValue = if ($script:UseNvenc) { $NvencCq } elseif ($script:UseAmf) { $AmfQp } else { $Crf }
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-t", $targetDurationText,
-        "-map", "0:v:0",
-        "-map", "0:a:0?"
-    )
-    $arguments += New-VideoEncoderArguments -QualityValue $qualityValue -MaxWidthValue $MaxWidth
-    $arguments += @(
-        "-c:a", "aac",
-        "-b:a", $AudioBitrate,
-        "-movflags", "+faststart",
-        "-map_metadata", "-1",
-        $outputPath
-    )
-
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    Clear-Metadata -Path $outputPath
-    Write-Log "Created set video output: $outputPath"
-
-    return $outputPath
+    # The set family deliberately encodes without a bitrate ceiling and without the size-cap
+    # retry pass, so both size arguments stay at their zero defaults.
+    return New-VideoVariant -InputPath $InputPath -OutputDirectory $OutputDirectory -DurationSeconds $DurationSeconds -TrimMs $TrimMs -LogLabel "Set video variant $VariantNumber"
 }
 
 function Convert-SetImageVariant {
@@ -3765,7 +3763,10 @@ function Invoke-LongSegmentExtract {
     Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
 }
 
-function Invoke-LongVideoEncode {
+# The single H.264/AAC ffmpeg invocation used by every video lane, and by the size-cap retry
+# pass. StartSeconds below zero encodes from the beginning, DurationSeconds at or below zero
+# encodes to the end, and MaxVideoBitrateKbps of zero applies no bitrate ceiling.
+function Invoke-VideoEncode {
     param(
         [Parameter(Mandatory = $true)]
         [string]$InputPath,
@@ -3880,7 +3881,7 @@ function Invoke-OutputSizeCap {
         $tempPath = Join-Path $outputDirectory ("sizecap_{0}.mp4" -f (New-RandomToken 8))
 
         try {
-            Invoke-LongVideoEncode -InputPath $encodeInputPath -OutputPath $tempPath -StartSeconds $encodeStartSeconds -DurationSeconds $encodeDurationSeconds -QualityValue $profile.Quality -MaxWidthValue $profile.MaxWidth -MaxVideoBitrateKbps $profile.Bitrate
+            Invoke-VideoEncode -InputPath $encodeInputPath -OutputPath $tempPath -StartSeconds $encodeStartSeconds -DurationSeconds $encodeDurationSeconds -QualityValue $profile.Quality -MaxWidthValue $profile.MaxWidth -MaxVideoBitrateKbps $profile.Bitrate
             $newSize = (Get-Item -LiteralPath $tempPath).Length
             $bitrateLabel = if ($profile.Bitrate -gt 0) { "$($profile.Bitrate)k maxrate" } else { "no maxrate" }
             Write-Log "Size-cap attempt $qualityLabel $($profile.Quality), max width $($profile.MaxWidth), $bitrateLabel -> $([math]::Round($newSize / 1MB, 2)) MB"
@@ -4000,7 +4001,7 @@ function Convert-LongVideoVariant {
 
     $qualityValue = if ($script:UseNvenc) { $LongNvencCq } elseif ($script:UseAmf) { $LongAmfQp } else { $Crf }
     $maxVideoBitrateKbps = Get-PrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration -MaxSizeMegabytes $LongMaxOutputSizeMB -MaxrateScale $LongNvencPrimaryMaxrateScale
-    Invoke-LongVideoEncode -InputPath $InputPath -OutputPath $outputPath -DurationSeconds $targetDuration -QualityValue $qualityValue -MaxWidthValue $MaxWidth -MaxVideoBitrateKbps $maxVideoBitrateKbps
+    Invoke-VideoEncode -InputPath $InputPath -OutputPath $outputPath -DurationSeconds $targetDuration -QualityValue $qualityValue -MaxWidthValue $MaxWidth -MaxVideoBitrateKbps $maxVideoBitrateKbps
     Clear-Metadata -Path $outputPath
     Invoke-OutputSizeCap -OutputPath $outputPath -MaxSizeMegabytes $LongMaxOutputSizeMB -FallbackMaxWidth $LongSizeCapFallbackMaxWidth -SourceInputPath $InputPath -SegmentDurationSeconds $SegmentDurationSeconds -TrimMs $TrimMs
     Write-Log "Created long output: $outputPath"
