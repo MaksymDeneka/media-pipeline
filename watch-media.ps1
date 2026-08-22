@@ -2137,7 +2137,18 @@ function Convert-VideoVariant {
     $targetDuration = [Math]::Max(0.1, $DurationSeconds - ($TrimMs / 1000.0))
     $maxVideoBitrateKbps = Get-PrimaryMaxVideoBitrateKbps -DurationSeconds $targetDuration -MaxSizeMegabytes $DefaultMaxOutputSizeMB -MaxrateScale $DefaultNvencPrimaryMaxrateScale
 
-    return New-VideoVariant -InputPath $InputPath -OutputDirectory $OutputDirectory -DurationSeconds $DurationSeconds -TrimMs $TrimMs -LogLabel "Video variant $VariantNumber" -MaxVideoBitrateKbps $maxVideoBitrateKbps -MaxSizeMegabytes $DefaultMaxOutputSizeMB -SizeCapFallbackMaxWidth $DefaultSizeCapFallbackMaxWidth
+    $variantArgs = @{
+        InputPath               = $InputPath
+        OutputDirectory         = $OutputDirectory
+        DurationSeconds         = $DurationSeconds
+        TrimMs                  = $TrimMs
+        LogLabel                = "Video variant $VariantNumber"
+        MaxVideoBitrateKbps     = $maxVideoBitrateKbps
+        MaxSizeMegabytes        = $DefaultMaxOutputSizeMB
+        SizeCapFallbackMaxWidth = $DefaultSizeCapFallbackMaxWidth
+    }
+
+    return New-VideoVariant @variantArgs
 }
 
 function Convert-ImageVariant {
@@ -2274,6 +2285,99 @@ function Get-ImageCleanOutputExtension {
     return (Get-ImageBulkOutputExtension -InputPath $InputPath)
 }
 
+# Produces one randomly named image variant: a tiny randomized crop scaled back to the
+# original dimensions, so each copy differs while looking identical, with metadata stripped.
+#
+# Quality is passed in rather than read from config because the lanes disagree today. The bulk
+# lane uses the configured quality, the clean lane uses 4 for HEIC sources and 2 otherwise, and
+# the set family hardcodes 2. Unifying those values is a separate change.
+#
+# RemoveOutputOnFailure deletes a partial output before rethrowing. Only the image-clean lane
+# does that today; the others leave partial outputs for their caller to reap.
+function New-ImageVariant {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputExtension,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Dimensions,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LogLabel,
+
+        [string]$JpegQuality = "2",
+
+        [string]$WebpQuality = "92",
+
+        [int]$PngCompressionLevel = 6,
+
+        [switch]$RemoveOutputOnFailure
+    )
+
+    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension $OutputExtension
+    $width = $Dimensions.Width
+    $height = $Dimensions.Height
+
+    $arguments = @(
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", $InputPath,
+        "-frames:v", "1",
+        "-map_metadata", "-1"
+    )
+
+    # Cropping a very small image would visibly degrade it, so leave those untouched.
+    if ($width -ge 200 -and $height -ge 200) {
+        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
+        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
+        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
+        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
+        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
+        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
+        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
+        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
+        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
+        Write-Log "$LogLabel crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
+    }
+    else {
+        Write-Log "$LogLabel skipping crop because image is small: ${width}x${height}" "WARN"
+    }
+
+    if ($OutputExtension -in @(".jpg", ".jpeg")) {
+        $arguments += @("-q:v", $JpegQuality)
+    }
+    elseif ($OutputExtension -eq ".webp") {
+        $arguments += @("-quality", $WebpQuality)
+    }
+    elseif ($OutputExtension -eq ".png") {
+        $arguments += @("-compression_level", ([string]$PngCompressionLevel))
+    }
+
+    $arguments += @($outputPath)
+
+    try {
+        Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
+        Clear-Metadata -Path $outputPath
+    }
+    catch {
+        if ($RemoveOutputOnFailure) {
+            Remove-GeneratedOutputs -Paths @($outputPath)
+        }
+        throw
+    }
+
+    Write-Log "Created $LogLabel output: $outputPath"
+
+    return $outputPath
+}
+
 function Convert-ImageBulkVariant {
     param(
         [Parameter(Mandatory = $true)]
@@ -2300,59 +2404,25 @@ function Convert-ImageBulkVariant {
     if ($isPngFamilyConversion) {
         $outputExtension = ".jpg"
     }
-    $outputPath = New-IPhoneRandomFilePath -Directory $ImageBulkOutputDir -Extension $outputExtension
-    $width = $Dimensions.Width
-    $height = $Dimensions.Height
-    $canCrop = ($width -ge 200 -and $height -ge 200)
 
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-frames:v", "1",
-        "-map_metadata", "-1"
-    )
-
-    if ($canCrop) {
-        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
-        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
-        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
-        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
-        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
-        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
-        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
-        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
-        Write-Log "Image bulk variant $VariantNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
+    $jpegQuality = if ($isPngFamilyConversion) {
+        [string]$ImageBulkConvertedJpegQuality
     }
     else {
-        Write-Log "Image bulk variant $VariantNumber skipping crop because image is small: ${width}x${height}" "WARN"
+        [string]$ImageBulkNativeJpegQuality
     }
 
-    if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $jpegQuality = if ($isPngFamilyConversion) {
-            [string]$ImageBulkConvertedJpegQuality
-        }
-        else {
-            [string]$ImageBulkNativeJpegQuality
-        }
-        $arguments += @("-q:v", $jpegQuality)
-    }
-    elseif ($outputExtension -eq ".webp") {
-        $arguments += @("-quality", "92")
-    }
-    elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", ([string]$ImageBulkPngCompressionLevel))
+    $variantArgs = @{
+        InputPath           = $InputPath
+        OutputDirectory     = $ImageBulkOutputDir
+        OutputExtension     = $outputExtension
+        Dimensions          = $Dimensions
+        LogLabel            = "Image bulk variant $VariantNumber"
+        JpegQuality         = $jpegQuality
+        PngCompressionLevel = $ImageBulkPngCompressionLevel
     }
 
-    $arguments += @($outputPath)
-
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    Clear-Metadata -Path $outputPath
-    Write-Log "Created image bulk output variant ${VariantNumber}: $outputPath"
-
-    return $outputPath
+    return New-ImageVariant @variantArgs
 }
 
 function Process-ImageBulkFile {
@@ -2472,61 +2542,23 @@ function Convert-ImageCleanFile {
         [string]$SourcePath = $InputPath
     )
 
-    $sourceIsHeic = Test-IsHeicImage -Path $SourcePath
+    # HEIC sources decode to a working copy first, and that round trip needs a little more
+    # headroom than an already-lossy JPEG source.
+    $jpegQuality = if (Test-IsHeicImage -Path $SourcePath) { "4" } else { "2" }
     $outputExtension = Get-ImageCleanOutputExtension -InputPath $SourcePath
-    $outputPath = New-IPhoneRandomFilePath -Directory $ImageCleanOutputDir -Extension $outputExtension
-    $width = $Dimensions.Width
-    $height = $Dimensions.Height
-    $canCrop = ($width -ge 200 -and $height -ge 200)
 
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-frames:v", "1",
-        "-map_metadata", "-1"
-    )
-
-    if ($canCrop) {
-        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
-        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
-        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
-        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
-        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
-        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
-        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
-        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
-        Write-Log "Image clean crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
-    }
-    else {
-        Write-Log "Image clean skipping crop because image is small: ${width}x${height}" "WARN"
+    $variantArgs = @{
+        InputPath             = $InputPath
+        OutputDirectory       = $ImageCleanOutputDir
+        OutputExtension       = $outputExtension
+        Dimensions            = $Dimensions
+        LogLabel              = "Image clean"
+        JpegQuality           = $jpegQuality
+        PngCompressionLevel   = $ImageCleanPngCompressionLevel
+        RemoveOutputOnFailure = $true
     }
 
-    if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $jpegQuality = if ($sourceIsHeic) { "4" } else { "2" }
-        $arguments += @("-q:v", $jpegQuality)
-    }
-    elseif ($outputExtension -eq ".webp") {
-        $arguments += @("-quality", "92")
-    }
-    elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", ([string]$ImageCleanPngCompressionLevel))
-    }
-
-    $arguments += @($outputPath)
-
-    try {
-        Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-        Clear-Metadata -Path $outputPath
-        Write-Log "Created image clean output: $outputPath"
-        return $outputPath
-    }
-    catch {
-        Remove-GeneratedOutputs -Paths @($outputPath)
-        throw
-    }
+    return New-ImageVariant @variantArgs
 }
 
 function Process-ImageCleanFile {
@@ -2629,54 +2661,11 @@ function Convert-SetImageVariant {
         [string]$SourcePath = $InputPath
     )
 
+    # Note this uses the bulk mapper, so HEIC lands as .png here while the set-batch lane
+    # writes .jpg for the same input. That disagreement is resolved in a later change.
     $outputExtension = Get-ImageBulkOutputExtension -InputPath $SourcePath
-    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
-    $width = $Dimensions.Width
-    $height = $Dimensions.Height
-    $canCrop = ($width -ge 200 -and $height -ge 200)
 
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-frames:v", "1",
-        "-map_metadata", "-1"
-    )
-
-    if ($canCrop) {
-        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
-        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
-        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
-        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
-        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
-        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
-        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
-        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
-        Write-Log "Set image variant $VariantNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
-    }
-    else {
-        Write-Log "Set image variant $VariantNumber skipping crop because image is small: ${width}x${height}" "WARN"
-    }
-
-    if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $arguments += @("-q:v", "2")
-    }
-    elseif ($outputExtension -eq ".webp") {
-        $arguments += @("-quality", "92")
-    }
-    elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", "6")
-    }
-
-    $arguments += @($outputPath)
-
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    Clear-Metadata -Path $outputPath
-    Write-Log "Created set image output: $outputPath"
-
-    return $outputPath
+    return New-ImageVariant -InputPath $InputPath -OutputDirectory $OutputDirectory -OutputExtension $outputExtension -Dimensions $Dimensions -LogLabel "Set image variant $VariantNumber"
 }
 
 function Process-SetMediaFile {
@@ -2805,53 +2794,8 @@ function Convert-SetBatchImageVariant {
     )
 
     $outputExtension = Get-SetBatchOutputExtension -InputPath $SourcePath
-    $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension $outputExtension
-    $width = $Dimensions.Width
-    $height = $Dimensions.Height
-    $canCrop = ($width -ge 200 -and $height -ge 200)
 
-    $arguments = @(
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", $InputPath,
-        "-frames:v", "1",
-        "-map_metadata", "-1"
-    )
-
-    if ($canCrop) {
-        $cropPermille = Get-Random -Minimum $ImageBulkCropMinPermille -Maximum ($ImageBulkCropMaxPermille + 1)
-        $cropPixelsX = [Math]::Max(1, [int][Math]::Floor($width * $cropPermille / 1000))
-        $cropPixelsY = [Math]::Max(1, [int][Math]::Floor($height * $cropPermille / 1000))
-        $cropWidth = [Math]::Max(1, $width - ($cropPixelsX * 2))
-        $cropHeight = [Math]::Max(1, $height - ($cropPixelsY * 2))
-        $offsetX = Get-Random -Minimum 0 -Maximum (($cropPixelsX * 2) + 1)
-        $offsetY = Get-Random -Minimum 0 -Maximum (($cropPixelsY * 2) + 1)
-        $filter = "crop=${cropWidth}:${cropHeight}:${offsetX}:${offsetY},scale=${width}:${height}"
-        $arguments += @("-filter_complex", "[0:v:0]$filter[v]", "-map", "[v]")
-        Write-Log "Set batch image set $SetNumber crop: ${cropWidth}x${cropHeight}+${offsetX}+${offsetY}, restored to ${width}x${height}"
-    }
-    else {
-        Write-Log "Set batch image set $SetNumber skipping crop because image is small: ${width}x${height}" "WARN"
-    }
-
-    if ($outputExtension -in @(".jpg", ".jpeg")) {
-        $arguments += @("-q:v", "2")
-    }
-    elseif ($outputExtension -eq ".webp") {
-        $arguments += @("-quality", "92")
-    }
-    elseif ($outputExtension -eq ".png") {
-        $arguments += @("-compression_level", "6")
-    }
-
-    $arguments += @($outputPath)
-
-    Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
-    Clear-Metadata -Path $outputPath
-    Write-Log "Created set batch output (set $SetNumber): $outputPath"
-
-    return $outputPath
+    return New-ImageVariant -InputPath $InputPath -OutputDirectory $OutputDirectory -OutputExtension $outputExtension -Dimensions $Dimensions -LogLabel "Set batch image set $SetNumber"
 }
 
 function Process-SetBatchSourceFile {
