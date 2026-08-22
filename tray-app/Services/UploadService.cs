@@ -115,6 +115,9 @@ public sealed class UploadJob
 /// </summary>
 public sealed class UploadService
 {
+    private const string ManifestFileName = "manifest.json";
+    private const string AssemblyScriptName = "assemble.ps1";
+
     private readonly PipelinePaths _paths;
 
     public UploadService(PipelinePaths paths) => _paths = paths;
@@ -187,6 +190,40 @@ public sealed class UploadService
             chunk.State = ChunkState.Pending;
             Report(job);
         }
+
+        await WriteAssemblyFilesAsync(job, partsDirectory, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes the manifest and the assembly script into the parts folder so they travel with
+    /// the parts.
+    ///
+    /// They are files rather than command-line arguments because the remote runs Windows: an
+    /// SSH command goes through cmd.exe, which caps at 8191 characters. A manifest carrying a
+    /// SHA-256 per chunk blows that at four chunks, and a real upload has hundreds.
+    /// </summary>
+    private static async Task WriteAssemblyFilesAsync(
+        UploadJob job, string partsDirectory, CancellationToken cancellationToken)
+    {
+        var manifest = new
+        {
+            fileName = job.FileName,
+            expectedLength = job.TotalBytes,
+            chunkCount = job.Chunks.Count,
+            remoteDirectory = job.Target.RemoteDirectory,
+            remotePartsDirectory = Path.Combine(job.Target.RemotePartsRoot, job.FileName + ".parts"),
+            parts = job.Chunks.Select(c => new { name = c.FileName, length = c.Length, sha256 = c.Sha256 }),
+        };
+
+        await File.WriteAllTextAsync(
+            Path.Combine(partsDirectory, ManifestFileName),
+            JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }),
+            cancellationToken).ConfigureAwait(false);
+
+        await File.WriteAllTextAsync(
+            Path.Combine(partsDirectory, AssemblyScriptName),
+            BuildRemoteScript(),
+            cancellationToken).ConfigureAwait(false);
     }
 
     // --- send --------------------------------------------------------------
@@ -228,6 +265,19 @@ public sealed class UploadService
         {
             throw new InvalidOperationException(
                 $"{failed.Count} chunk(s) could not be sent. First error: {failed[0].Error}");
+        }
+
+        // The manifest and the script go last, so their presence means the parts are complete.
+        foreach (var name in new[] { ManifestFileName, AssemblyScriptName })
+        {
+            await RunProcessAsync(
+                "rclone",
+                [
+                    "copyto", Path.Combine(partsDirectory, name), $"{remoteParts}/{name}",
+                    "--retries", "3", "--timeout", "5m", "--contimeout", "30s",
+                    "--sftp-disable-hashcheck",
+                ],
+                cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -292,23 +342,31 @@ public sealed class UploadService
         job.Phase = UploadPhase.Assembling;
         Report(job);
 
-        var manifest = new
+        var remotePartsWindows = Path.Combine(job.Target.RemotePartsRoot, job.FileName + ".parts");
+        var scriptPath = Path.Combine(remotePartsWindows, AssemblyScriptName);
+
+        // A fixed, short command regardless of how many chunks there are.
+        var result = await SshAsync(
+            job.Target,
+            $"powershell -NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
+            cancellationToken).ConfigureAwait(false);
+
+        if (result.ExitCode != 0)
         {
-            fileName = job.FileName,
-            expectedLength = job.TotalBytes,
-            chunkCount = job.Chunks.Count,
-            remoteDirectory = job.Target.RemoteDirectory,
-            remotePartsDirectory = Path.Combine(job.Target.RemotePartsRoot, job.FileName + ".parts"),
-            parts = job.Chunks.Select(c => new { name = c.FileName, length = c.Length, sha256 = c.Sha256 }),
-        };
+            throw new InvalidOperationException($"Remote assembly failed: {result.Output.Trim()}");
+        }
 
-        var manifestJson = JsonSerializer.Serialize(manifest);
-        var manifestBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(manifestJson));
+        // The script removes the parts it consumed but not its own folder, which it is running
+        // from. Clearing that is a second, equally short command.
+        await SshAsync(
+            job.Target,
+            $"powershell -NoProfile -Command \"Remove-Item -LiteralPath '{remotePartsWindows}' -Recurse -Force -ErrorAction SilentlyContinue\"",
+            cancellationToken).ConfigureAwait(false);
+    }
 
-        var script = BuildRemoteScript(manifestBase64);
-        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-
-        var result = await RunProcessAsync(
+    private static async Task<ProcessResult> SshAsync(
+        UploadTarget target, string command, CancellationToken cancellationToken) =>
+        await RunProcessAsync(
             "ssh",
             [
                 "-o", "BatchMode=yes",
@@ -316,34 +374,37 @@ public sealed class UploadService
                 "-o", "ServerAliveInterval=30",
                 "-o", "ServerAliveCountMax=3",
                 "-o", "TCPKeepAlive=yes",
-                "-i", job.Target.SshKeyFile,
-                "-p", job.Target.SshPort.ToString(),
-                job.Target.SshHost,
-                $"powershell -NoProfile -EncodedCommand {encoded}",
+                "-i", target.SshKeyFile,
+                "-p", target.SshPort.ToString(),
+                target.SshHost,
+                command,
             ],
             cancellationToken,
             throwOnFailure: false).ConfigureAwait(false);
 
-        if (result.ExitCode != 0)
-        {
-            throw new InvalidOperationException(
-                $"Remote assembly failed: {result.Output.Trim()}");
-        }
-    }
-
     /// <summary>
     /// The reassembly script that runs on the remote host.
+    ///
+    /// It reads manifest.json from its own folder rather than taking it as an argument,
+    /// because the remote runs Windows and an SSH command goes through cmd.exe, which caps at
+    /// 8191 characters. With a SHA-256 per chunk an inline manifest exceeds that at four
+    /// chunks, and a real upload has hundreds.
     ///
     /// Every part is hash-checked before it is appended, and the temporary file is removed on
     /// any failure, so a failed run leaves nothing behind to clean up by hand.
     /// </summary>
-    public static string BuildRemoteScript(string manifestBase64) =>
-        $$"""
+    public static string BuildRemoteScript() =>
+        """
         $ErrorActionPreference = 'Stop'
 
-        $manifest = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{manifestBase64}}')) | ConvertFrom-Json
+        $manifestPath = Join-Path $PSScriptRoot 'manifest.json'
+        if (-not (Test-Path -LiteralPath $manifestPath)) {
+            throw "No manifest beside the script at $manifestPath"
+        }
 
-        $partsDirectory = $manifest.remotePartsDirectory
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+
+        $partsDirectory = $PSScriptRoot
         $finalPath = Join-Path $manifest.remoteDirectory $manifest.fileName
         $tempPath = "$finalPath.chunked.tmp"
 
@@ -374,7 +435,6 @@ public sealed class UploadService
 
                     $bytes = [IO.File]::ReadAllBytes($partPath)
                     $stream.Write($bytes, 0, $bytes.Length)
-                    Write-Output "appended $($part.name)"
                 }
             }
             finally {
@@ -389,10 +449,14 @@ public sealed class UploadService
             Move-Item -LiteralPath $tempPath -Destination $finalPath -Force
             Write-Output "assembled $finalPath ($assembledLength bytes)"
 
-            Remove-Item -LiteralPath $partsDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            # Remove the parts, but not this folder: the script is running from it. The caller
+            # clears the folder afterwards.
+            foreach ($part in $manifest.parts) {
+                Remove-Item -LiteralPath (Join-Path $partsDirectory $part.name) -Force -ErrorAction SilentlyContinue
+            }
         }
         catch {
-            # Never leave a half-written file behind: the old script did, and nothing cleaned it up.
+            # Never leave a half-written file behind.
             if (Test-Path -LiteralPath $tempPath) {
                 Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
             }
@@ -445,9 +509,26 @@ public sealed class UploadService
 
         using var process = new Process { StartInfo = info };
 
+        // stdout and stderr are delivered on separate threads, and StringBuilder is not
+        // thread-safe, so both handlers append under one lock.
         var output = new StringBuilder();
-        process.OutputDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
+        var outputLock = new object();
+
+        void Append(string? line)
+        {
+            if (line is null)
+            {
+                return;
+            }
+
+            lock (outputLock)
+            {
+                output.AppendLine(line);
+            }
+        }
+
+        process.OutputDataReceived += (_, e) => Append(e.Data);
+        process.ErrorDataReceived += (_, e) => Append(e.Data);
 
         try
         {
@@ -474,7 +555,13 @@ public sealed class UploadService
             throw;
         }
 
-        var result = new ProcessResult(process.ExitCode, output.ToString());
+        string captured;
+        lock (outputLock)
+        {
+            captured = output.ToString();
+        }
+
+        var result = new ProcessResult(process.ExitCode, captured);
 
         if (throwOnFailure && result.ExitCode != 0)
         {

@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using MediaPipelineTray.Services;
 
@@ -18,8 +17,15 @@ internal static class Program
 {
     private static int _failures;
 
-    private static async Task<int> Main()
+    private static async Task<int> Main(string[] args)
     {
+        // The live check needs a reachable remote, so it is opt-in and never part of the
+        // default offline run.
+        if (args.Contains("--live"))
+        {
+            return await LiveUploadTest.RunAsync(sizeMB: 12, chunkSizeMB: 3);
+        }
+
         var root = Path.Combine(Path.GetTempPath(), "mp-upload-selftest");
 
         if (Directory.Exists(root))
@@ -139,7 +145,15 @@ internal static class Program
                 "length mismatch");
         }
 
-        Check("the parts folder is cleaned up", !Directory.Exists(result.PartsPath), "parts remain");
+        // The script consumes the parts but leaves the folder, because it is running from it.
+        // Removing the folder is the caller's second, short SSH command.
+        var leftovers = Directory.Exists(result.PartsPath)
+            ? Directory.GetFiles(result.PartsPath).Select(Path.GetFileName).ToArray()
+            : [];
+
+        Check("the consumed parts are deleted",
+            leftovers.All(f => f is "manifest.json" or "assemble.ps1"),
+            "left behind: " + string.Join(", ", leftovers));
     }
 
     private static async Task AssemblyRejectsACorruptedPart(string root)
@@ -343,12 +357,13 @@ internal static class Program
             parts = chunks.Select(c => new { name = c.FileName, length = c.Length, sha256 = c.Sha256 }),
         };
 
-        var manifestBase64 = Convert.ToBase64String(
-            Encoding.UTF8.GetBytes(JsonSerializer.Serialize(manifest)));
+        // Same contract as a real upload: manifest.json sits beside the script, and the
+        // script runs from the parts folder.
+        await File.WriteAllTextAsync(
+            Path.Combine(partsPath, "manifest.json"), JsonSerializer.Serialize(manifest));
 
-        var script = UploadService.BuildRemoteScript(manifestBase64);
-        var scriptPath = Path.Combine(root, name + "-assemble.ps1");
-        await File.WriteAllTextAsync(scriptPath, script);
+        var scriptPath = Path.Combine(partsPath, "assemble.ps1");
+        await File.WriteAllTextAsync(scriptPath, UploadService.BuildRemoteScript());
 
         var (exitCode, output) = await RunPowerShell(scriptPath);
 
