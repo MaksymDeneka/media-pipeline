@@ -1,5 +1,4 @@
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 using MediaPipelineTray.Models;
 
@@ -8,15 +7,13 @@ namespace MediaPipelineTray.Tray;
 /// <summary>
 /// The notification-area icon.
 ///
-/// The glyph is drawn rather than shipped as a resource, so it can be tinted per state without
-/// carrying four .ico files. It stays monochrome while everything is normal and only takes on
-/// colour when a job finishes or fails, which is the whole point: a glance at the tray should
-/// tell you whether anything needs you.
+/// The glyph comes from <see cref="TrayGlyph"/>, which the window also uses, so the taskbar
+/// button and the tray icon are always the same picture in the same state.
 /// </summary>
 public sealed class TrayIcon : IDisposable
 {
     private readonly NotifyIcon _icon;
-    private readonly Dictionary<ActivityState, Icon> _icons = [];
+    private readonly Dictionary<(ActivityState State, bool IsDark), Icon> _icons = [];
 
     public TrayIcon()
     {
@@ -27,7 +24,16 @@ public sealed class TrayIcon : IDisposable
             ContextMenuStrip = new ContextMenuStrip(),
         };
 
-        _icon.DoubleClick += (_, _) => OpenRequested?.Invoke(this, EventArgs.Empty);
+        // A single left click opens the window. Right click is left to the context menu, which
+        // NotifyIcon shows on its own.
+        _icon.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                OpenRequested?.Invoke(this, EventArgs.Empty);
+            }
+        };
+
         SetState(ActivityState.Idle, "Media Pipeline");
     }
 
@@ -70,7 +76,7 @@ public sealed class TrayIcon : IDisposable
     {
         _icon.Icon = GetIcon(state);
 
-        // The tray truncates past 63 characters and throws in some Windows versions if longer.
+        // The tray truncates past 63 characters and throws on some Windows versions if longer.
         _icon.Text = tooltip.Length > 62 ? tooltip[..62] : tooltip;
     }
 
@@ -84,68 +90,18 @@ public sealed class TrayIcon : IDisposable
 
     private Icon GetIcon(ActivityState state)
     {
-        if (_icons.TryGetValue(state, out var cached))
+        // The tray sits on the taskbar, so it follows the taskbar's theme rather than the
+        // app's window theme. They are the same setting in practice.
+        var key = (state, Theme.IsDark);
+
+        if (_icons.TryGetValue(key, out var cached))
         {
             return cached;
         }
 
-        var icon = Render(state);
-        _icons[state] = icon;
+        var icon = TrayGlyph.Render(state, Theme.IsDark);
+        _icons[key] = icon;
         return icon;
-    }
-
-    /// <summary>
-    /// Draws a rounded square outline. Idle and paused are a hollow outline, running fills it,
-    /// and only finished and failed are tinted.
-    /// </summary>
-    private static Icon Render(ActivityState state)
-    {
-        const int size = 32;
-
-        var (stroke, fill) = state switch
-        {
-            ActivityState.Failed => (Color.FromArgb(0xE8, 0x69, 0x5C), Color.FromArgb(0xE8, 0x69, 0x5C)),
-            ActivityState.Finished => (Color.FromArgb(0x4F, 0xB8, 0x77), Color.FromArgb(0x4F, 0xB8, 0x77)),
-            ActivityState.Running => (Color.White, Color.White),
-            ActivityState.Paused => (Color.FromArgb(0x9B, 0x9B, 0xA2), Color.Transparent),
-            _ => (Color.FromArgb(0xC8, 0xC8, 0xCC), Color.Transparent),
-        };
-
-        using var bitmap = new Bitmap(size, size);
-        using (var graphics = Graphics.FromImage(bitmap))
-        {
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            graphics.Clear(Color.Transparent);
-
-            var rect = new Rectangle(5, 5, size - 11, size - 11);
-
-            using var path = RoundedRect(rect, 6);
-
-            if (fill != Color.Transparent)
-            {
-                using var brush = new SolidBrush(fill);
-                graphics.FillPath(brush, path);
-            }
-
-            using var pen = new Pen(stroke, 3f);
-            graphics.DrawPath(pen, path);
-        }
-
-        return Icon.FromHandle(bitmap.GetHicon());
-    }
-
-    private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
-    {
-        var diameter = radius * 2;
-        var path = new GraphicsPath();
-
-        path.AddArc(bounds.X, bounds.Y, diameter, diameter, 180, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Y, diameter, diameter, 270, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
-        path.AddArc(bounds.X, bounds.Bottom - diameter, diameter, diameter, 90, 90);
-        path.CloseFigure();
-
-        return path;
     }
 
     public void Dispose()

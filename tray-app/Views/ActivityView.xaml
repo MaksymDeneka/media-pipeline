@@ -226,31 +226,6 @@
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
 
-            <!-- ===== idle ===== -->
-            <ContentControl Template="{StaticResource SectionHeadTemplate}">
-                <TextBlock Text="IDLE" Style="{StaticResource Caption}" />
-            </ContentControl>
-
-            <ItemsControl ItemsSource="{Binding Idle}" Margin="16,0,16,20">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <WrapPanel />
-                    </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Border Background="{DynamicResource SunkBrush}"
-                                CornerRadius="3"
-                                Padding="7,2" Margin="0,0,5,5">
-                            <TextBlock Text="{Binding Lane}"
-                                       FontFamily="Cascadia Mono, Consolas"
-                                       FontSize="10.5"
-                                       Foreground="{DynamicResource FaintBrush}" />
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
-
         </StackPanel>
     </ScrollViewer>
 

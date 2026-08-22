@@ -139,7 +139,6 @@ public sealed class MainViewModel : Observable, IDisposable
     public ObservableCollection<LaneRow> Queued { get; } = [];
     public ObservableCollection<FinishedRow> Finished { get; } = [];
     public ObservableCollection<FailureRow> Failures { get; } = [];
-    public ObservableCollection<LaneRow> Idle { get; } = [];
 
     public string StatusText { get => _statusText; private set => Set(ref _statusText, value); }
     public string StatusMeta { get => _statusMeta; private set => Set(ref _statusMeta, value); }
@@ -228,7 +227,6 @@ public sealed class MainViewModel : Observable, IDisposable
         SyncQueued(snapshot);
         SyncFinished(snapshot);
         SyncFailures(snapshot);
-        SyncIdle(snapshot);
     }
 
     private string BuildMeta(PipelineSnapshot snapshot)
@@ -349,32 +347,4 @@ public sealed class MainViewModel : Observable, IDisposable
         }
     }
 
-    private void SyncIdle(PipelineSnapshot snapshot)
-    {
-        Idle.Clear();
-
-        // A lane whose file is already being worked on has an empty input folder, so the
-        // status file reports it as queue-zero. Showing it as idle while its progress bar is
-        // moving would be plainly wrong.
-        var busy = snapshot.Running
-            .Select(job => $"{job.Preset}/{job.Workspace}")
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var lane in snapshot.Idle)
-        {
-            if (busy.Contains(lane.Key))
-            {
-                continue;
-            }
-
-            Idle.Add(new LaneRow
-            {
-                Lane = $"{lane.Preset} / {lane.Workspace}",
-                Detail = "idle",
-                Preset = lane.Preset,
-                Workspace = lane.Workspace,
-                Paused = _watcher.IsPaused(lane.Preset, lane.Workspace),
-            });
-        }
-    }
 }

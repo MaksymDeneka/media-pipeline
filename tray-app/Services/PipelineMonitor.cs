@@ -13,7 +13,6 @@ public sealed record PipelineSnapshot
     public IReadOnlyList<JobProgress> Finished { get; init; } = [];
     public IReadOnlyList<JobProgress> Failed { get; init; } = [];
     public IReadOnlyList<LaneInfo> Queued { get; init; } = [];
-    public IReadOnlyList<LaneInfo> Idle { get; init; } = [];
 
     public int TotalQueued => Queued.Sum(lane => lane.Queued);
     public int OutputsToday { get; init; }
@@ -119,7 +118,6 @@ public sealed class PipelineMonitor
             Finished = [.. _finished],
             Failed = [.. _failed.Values.OrderByDescending(job => job.EndedUtc)],
             Queued = [.. lanes.Where(lane => lane.Queued > 0).OrderByDescending(lane => lane.Queued)],
-            Idle = [.. lanes.Where(lane => lane.Queued == 0)],
             OutputsToday = _outputsToday,
         };
     }

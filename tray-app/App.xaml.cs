@@ -103,7 +103,14 @@ public partial class App : Application
         }
 
         _tray.BuildMenu(_viewModel.PausedAll, lines);
-        _tray.SetState(_viewModel.TrayState, $"Media Pipeline — {_viewModel.StatusText}");
+        _tray.SetState(_viewModel.TrayState, $"Media Pipeline  ·  {_viewModel.StatusText}");
+
+        // The window carries the same glyph in the same state, so the taskbar button and the
+        // tray icon always agree.
+        if (_window is not null)
+        {
+            _window.Icon = TrayGlyph.RenderForWindow(_viewModel.TrayState, Theme.IsDark);
+        }
     }
 
     private void Quit()
