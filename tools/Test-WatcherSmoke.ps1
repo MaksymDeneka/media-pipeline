@@ -128,10 +128,20 @@ try {
 
     # quick makes 1 video copy and 2 image copies
     $expected = 3
+
+    # Wait on the input folder draining, not on a file count in output. FFmpeg creates its
+    # output file before it finishes writing it, so counting output files would treat an
+    # encode still in progress as finished.
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        $produced = @(Get-ChildItem -LiteralPath $outputDir -File -ErrorAction SilentlyContinue).Count
-        if ($produced -ge $expected) { break }
+        $remaining = @(Get-ChildItem -LiteralPath $inputDir -File -ErrorAction SilentlyContinue).Count
+        if ($remaining -eq 0) {
+            # The source moves after the last variant lands, so give the move a moment to
+            # settle before inspecting the folders.
+            Start-Sleep -Milliseconds 750
+            break
+        }
+
         Start-Sleep -Milliseconds 500
     }
 

@@ -266,6 +266,59 @@ outputs, and strands the input file with no failed-move.
 
 ---
 
+## The tray app
+
+A desktop app that shows what the pipeline is doing and lets you change it without editing
+files. It lives in the notification area and keeps running when you close the window; Quit is
+in the tray menu.
+
+```bash
+dotnet build tray-app -c Release
+```
+
+The built `MediaPipelineTray.exe` finds the pipeline by looking for `watch-media.ps1` beside it
+and walking up, then reads `PipelineRoot` from the `config.ini` next to it, so it always agrees
+with the watcher about where things are.
+
+| Tab | What it does |
+| --- | --- |
+| **Activity** | What is running, with real progress, plus what is queued, what finished, and what failed |
+| **Presets** | Every preset's options, with help text and whether each value is overridden or inherited |
+| **Settings** | The global defaults every preset inherits |
+| **Uploads** | Chunked upload of large files to the remote |
+
+The status bar is always visible and can start, stop, restart, or pause the watcher. Stopping
+asks the watcher to finish the file it is on rather than killing it.
+
+It is monochrome on purpose. Green means a job finished and red means one failed, and those are
+the only two places colour appears, so anything coloured is worth looking at. Work in progress
+is drawn at full contrast rather than tinted, and idle and queued differ by shape.
+
+Nothing is scraped from the text log. Progress comes from the event stream grouped by `jobId`,
+state from `status\watcher.json`, and control from flag files in `control\`. Whether the
+watcher is alive comes from its single-instance mutex, so a stale status file cannot fool it.
+
+### Uploads
+
+Large files are split into chunks, sent one at a time, and reassembled on the remote. Each
+chunk carries a SHA-256 that the remote verifies before appending it, so a corrupt transfer is
+caught rather than assembled in. A chunk that fails retries on its own instead of failing the
+whole transfer, and cancelling keeps the local parts so the next attempt resumes.
+
+Remote settings live in `config.ini` and default to the same values the sync scripts use:
+
+```ini
+[Upload]
+RemoteName = heatup-remote
+RemoteDirectory = D:\MediaPipeline\sync
+RemoteSshHost = heatup-remote
+RemoteSshPort = 2222
+ChunkSizeMB = 256
+ParallelChunks = 4
+```
+
+---
+
 ## Changing Settings
 
 Edit `config.ini` (or double-click **`Edit Config.bat`**), save, then double-click
@@ -321,8 +374,15 @@ the task again.
 ## Tests
 
 ```powershell
+# Behavior of every preset, fingerprinted structurally
 pwsh -File tools\Test-PipelineParity.ps1 -Mode Capture -BuildCorpus
 pwsh -File tools\Test-PipelineParity.ps1 -Mode Compare
+
+# A real watcher process: folders, status, locking, pause, and clean shutdown
+pwsh -File tools\Test-WatcherSmoke.ps1
+
+# Chunking, reassembly, and config editing, with no remote involved
+dotnet run --project tray-app\SelfTest
 ```
 
 The harness drives every preset against a throwaway sandbox root and records a structural

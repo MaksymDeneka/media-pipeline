@@ -17,6 +17,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- SelfTest is its own project sitting in a subfolder. Without this the default glob
+         pulls its sources and build output into this assembly, which fails on duplicate
+         assembly attributes. -->
+    <Compile Remove="SelfTest/**" />
+    <Page Remove="SelfTest/**" />
+    <None Remove="SelfTest/**" />
+    <EmbeddedResource Remove="SelfTest/**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- WinForms and WPF both define Application, MessageBox and others. Only Tray\TrayIcon.cs
          touches WinForms, and it has its own explicit using, so drop the global one rather
          than fully qualifying every WPF type in the rest of the app. -->
