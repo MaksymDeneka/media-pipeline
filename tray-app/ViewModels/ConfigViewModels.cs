@@ -170,6 +170,30 @@ public sealed class SettingsViewModel : ConfigEditorViewModel
     public string ConfigPath => Paths.ConfigFile;
     public string PipelineRoot => Paths.PipelineRoot;
 
+    /// <summary>
+    /// Windows startup, which is a machine setting rather than a config.ini one, so it is not
+    /// generated from the catalog and applies immediately instead of on save.
+    /// </summary>
+    public bool StartWithWindows
+    {
+        get => StartupService.IsEnabled;
+        set
+        {
+            if (StartupService.IsEnabled == value)
+            {
+                return;
+            }
+
+            StartupService.SetEnabled(value);
+            Raise();
+            Raise(nameof(StartupNote));
+        }
+    }
+
+    public string StartupNote => StartWithWindows
+        ? "The app starts automatically when you sign in."
+        : "The app does not start automatically.";
+
     public override void Load()
     {
         Groups.Clear();

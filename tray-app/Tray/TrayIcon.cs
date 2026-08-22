@@ -58,6 +58,7 @@ public sealed class TrayIcon : IDisposable
         }
 
         var open = new ToolStripMenuItem("Open window");
+        open.Font = new System.Drawing.Font(open.Font, System.Drawing.FontStyle.Bold);
         open.Click += (_, _) => OpenRequested?.Invoke(this, EventArgs.Empty);
         menu.Items.Add(open);
 
@@ -67,7 +68,9 @@ public sealed class TrayIcon : IDisposable
 
         menu.Items.Add(new ToolStripSeparator());
 
-        var quit = new ToolStripMenuItem("Quit");
+        // Named so it is clear this is the only thing that actually ends the app: closing the
+        // window only hides it.
+        var quit = new ToolStripMenuItem("Quit Media Pipeline");
         quit.Click += (_, _) => QuitRequested?.Invoke(this, EventArgs.Empty);
         menu.Items.Add(quit);
     }

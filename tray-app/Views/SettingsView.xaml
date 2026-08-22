@@ -39,6 +39,32 @@
 
                 <TextBlock Text="{Binding ConfigPath}" Style="{StaticResource Mono}" Margin="0,10,0,0" />
 
+                <!-- A Windows setting rather than a pipeline one, so it sits apart from the
+                     generated fields and applies immediately instead of on save. -->
+                <TextBlock Text="APPLICATION" Style="{StaticResource Caption}" Margin="0,20,0,2" />
+
+                <Border BorderBrush="{DynamicResource LineSoftBrush}" BorderThickness="0,0,0,1"
+                        Padding="0,9">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="150" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Margin="0,0,18,0">
+                            <TextBlock Text="Start with Windows" FontSize="12.5" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource InkBrush}" />
+                            <TextBlock Text="{Binding StartupNote}" Style="{StaticResource Hint}"
+                                       Margin="0,1,0,0" />
+                            <TextBlock Style="{StaticResource Caption}" FontWeight="Normal" Margin="0,3,0,0"
+                                       Text="Applies straight away. The watcher has its own scheduled task and starts regardless." />
+                        </StackPanel>
+
+                        <CheckBox Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                  IsChecked="{Binding StartWithWindows}" />
+                    </Grid>
+                </Border>
+
                 <ItemsControl ItemsSource="{Binding Groups}" Margin="0,14,0,0">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>

@@ -299,6 +299,13 @@ with the watcher about where things are.
 | **Settings** | The global defaults every preset inherits |
 | **Uploads** | Chunked upload of large files to the remote |
 
+It starts with Windows and lives in the notification area. **Closing the window hides it**;
+the only way to exit is right-clicking the tray icon and choosing **Quit Media Pipeline**.
+
+Windows 11 hides new tray icons behind the `^` chevron by default, which makes a tray-first
+app look like it failed to start. The app asks Windows to show its icon on the taskbar
+instead, which takes effect the next time it starts. Startup can be turned off in Settings.
+
 The status bar is always visible and can start, stop, restart, or pause the watcher. Stopping
 asks the watcher to finish the file it is on rather than killing it.
 
@@ -398,8 +405,14 @@ pwsh -File tools\Test-PipelineParity.ps1 -Mode Compare
 # A real watcher process: folders, status, locking, pause, and clean shutdown
 pwsh -File tools\Test-WatcherSmoke.ps1
 
-# Chunking, reassembly, and config editing, with no remote involved
+# Chunking, reassembly, lane aggregation, archiving and config editing, offline
 dotnet run --project tray-app\SelfTest
+
+# A real round trip against the configured remote
+dotnet run --project tray-app\SelfTest -- --live
+
+# The tray app's lifecycle: autostart, close-to-tray, and quit
+pwsh -File tools\Test-TrayLifecycle.ps1
 ```
 
 The harness drives every preset against a throwaway sandbox root and records a structural

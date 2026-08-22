@@ -188,6 +188,23 @@ try {
     Start-Sleep -Seconds 2
     Write-Ok 'Watcher start requested (it runs hidden in the background).'
 
+    # The tray app is optional: the watcher runs without it. Register it to start with Windows
+    # only if it has actually been built, rather than leaving a startup entry pointing at
+    # nothing.
+    $trayExe = Join-Path $AppDir 'tray-app\bin\Release\net8.0-windows\MediaPipelineTray.exe'
+
+    if (Test-Path -LiteralPath $trayExe) {
+        Set-ItemProperty `
+            -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `
+            -Name 'MediaPipelineTray' `
+            -Value ('"' + $trayExe + '"')
+
+        Write-Ok 'Tray app registered to start with Windows.'
+    }
+    else {
+        Write-Note 'Tray app not built. To build it: dotnet build tray-app -c Release'
+    }
+
     Write-Host ''
     Write-Host '====================================================='
     Write-Host '   Setup complete!'
@@ -195,9 +212,9 @@ try {
     Write-Host ''
     Write-Host 'Next steps:'
     Write-Host ('  1. Set your browser''s download folder to:')
-    Write-Host ('       ' + (Join-Path (Join-Path (Join-Path $pipelineRoot 'default') 'LC') 'input')) -ForegroundColor White
-    Write-Host '  2. To change settings: run "Edit Config.bat", save, then'
-    Write-Host '     run "Restart Watcher.bat" to apply them.'
+    Write-Host ('       ' + (Join-Path (Join-Path (Join-Path $pipelineRoot 'LC') 'bulk') 'input')) -ForegroundColor White
+    Write-Host '  2. To change settings: open the tray app, or run "Edit Config.bat",'
+    Write-Host '     save, then run "Restart Watcher.bat" to apply them.'
     Write-Host '  3. The watcher will start by itself every time you sign in.'
     Write-Host ''
 }
