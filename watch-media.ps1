@@ -1,6 +1,6 @@
 param(
     [switch]$CheckOnly,
-    [switch]$RecompressLongOutputs,
+    [switch]$RecompressOutputs,
     [switch]$AsLibrary
 )
 
@@ -143,18 +143,17 @@ $script:ConfigDocument = Read-IniDocument -Path $script:ConfigPath
 $script:ConfigSettings = $script:ConfigDocument.Globals
 $script:ConfigPresetSections = $script:ConfigDocument.Presets
 
-# --- Tunable scalar settings (loaded from config.ini, with built-in defaults) ---
+# --- Global settings (loaded from config.ini, with built-in defaults) ---
+#
+# Every key here that has a matching preset option is simply the default for that option:
+# a preset inherits it unless its own [preset <name>] section overrides it. The script
+# variables are prefixed Default so a preset object passed around as $Preset can never
+# shadow them, which PowerShell's scope resolution would otherwise allow.
+
 $PipelineRoot = Get-Setting 'PipelineRoot' 'D:\MediaPipeline'
 
-$DefaultPipelineMinCopiesPerFile = Get-Setting 'DefaultPipelineMinCopiesPerFile' 7
-$DefaultPipelineAlternatingCopiesPerFile = Get-Setting 'DefaultPipelineAlternatingCopiesPerFile' 8
-$LongCopiesPerSegment = Get-Setting 'LongCopiesPerSegment' 3
-$ImageBulkCopiesPerFile = Get-Setting 'ImageBulkCopiesPerFile' 20
-$SetCopiesPerFile = Get-Setting 'SetCopiesPerFile' 10
-$SetBatchCount = Get-Setting 'SetBatchCount' 10
-
-# How many image conversions run at once (convert pipeline files; bulk pipeline
-# variants). Requires PowerShell 7. "auto" (or blank) = min(6, CPU count).
+# How many files are processed at once. Requires PowerShell 7.
+# "auto" (or blank) = min(6, CPU count).
 $ImageProcessingConcurrencyRaw = Get-Setting 'ImageProcessingConcurrency' 'auto'
 $ImageProcessingConcurrencyParsed = 0
 if ([int]::TryParse([string]$ImageProcessingConcurrencyRaw, [ref]$ImageProcessingConcurrencyParsed) -and $ImageProcessingConcurrencyParsed -ge 1) {
@@ -164,66 +163,64 @@ else {
     $ImageProcessingConcurrency = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
 }
 
-$ImageBulkCropMinPermille = Get-Setting 'ImageBulkCropMinPermille' 5
-$ImageBulkCropMaxPermille = Get-Setting 'ImageBulkCropMaxPermille' 20
-$ImageBulkConvertPngToJpeg = Get-Setting 'ImageBulkConvertPngToJpeg' $true
-$ImageBulkConvertedJpegQuality = Get-Setting 'ImageBulkConvertedJpegQuality' 12
-if ($ImageBulkConvertedJpegQuality -lt 2) { $ImageBulkConvertedJpegQuality = 2 }
-elseif ($ImageBulkConvertedJpegQuality -gt 31) { $ImageBulkConvertedJpegQuality = 31 }
-$ImageBulkNativeJpegQuality = Get-Setting 'ImageBulkNativeJpegQuality' 4
-if ($ImageBulkNativeJpegQuality -lt 2) { $ImageBulkNativeJpegQuality = 2 }
-elseif ($ImageBulkNativeJpegQuality -gt 31) { $ImageBulkNativeJpegQuality = 31 }
-$ImageBulkPngCompressionLevel = Get-Setting 'ImageBulkPngCompressionLevel' 6
-if ($ImageBulkPngCompressionLevel -lt 0) { $ImageBulkPngCompressionLevel = 0 }
-elseif ($ImageBulkPngCompressionLevel -gt 9) { $ImageBulkPngCompressionLevel = 9 }
-$ImageCleanPngCompressionLevel = Get-Setting 'ImageCleanPngCompressionLevel' 1
-if ($ImageCleanPngCompressionLevel -lt 0) { $ImageCleanPngCompressionLevel = 0 }
-elseif ($ImageCleanPngCompressionLevel -gt 9) { $ImageCleanPngCompressionLevel = 9 }
-$MinTrimMs = Get-Setting 'MinTrimMs' 15
-$MaxTrimMs = Get-Setting 'MaxTrimMs' 95
+# Image defaults
+$DefaultCropMinPermille = Get-Setting 'CropMinPermille' 5
+$DefaultCropMaxPermille = Get-Setting 'CropMaxPermille' 20
+
+$DefaultJpegQuality = Get-Setting 'JpegQuality' 4
+if ($DefaultJpegQuality -lt 2) { $DefaultJpegQuality = 2 }
+elseif ($DefaultJpegQuality -gt 31) { $DefaultJpegQuality = 31 }
+
+# Sources that had to be decoded first (HEIC) are already a re-encode, so they get a little
+# more headroom than an untouched JPEG.
+$DefaultConvertedJpegQuality = Get-Setting 'ConvertedJpegQuality' 12
+if ($DefaultConvertedJpegQuality -lt 2) { $DefaultConvertedJpegQuality = 2 }
+elseif ($DefaultConvertedJpegQuality -gt 31) { $DefaultConvertedJpegQuality = 31 }
+
+$DefaultPngCompressionLevel = Get-Setting 'PngCompressionLevel' 6
+if ($DefaultPngCompressionLevel -lt 0) { $DefaultPngCompressionLevel = 0 }
+elseif ($DefaultPngCompressionLevel -gt 9) { $DefaultPngCompressionLevel = 9 }
+
+# Video defaults
+$DefaultMinTrimMs = Get-Setting 'MinTrimMs' 15
+$DefaultMaxTrimMs = Get-Setting 'MaxTrimMs' 95
 $PreferNvenc = Get-Setting 'PreferNvenc' $true
 $PreferAmf = Get-Setting 'PreferAmf' $true
-$Crf = Get-Setting 'Crf' 24
+$DefaultCrf = Get-Setting 'Crf' 24
+
 # Named X264Preset rather than Preset so it cannot be shadowed by the pipeline preset object
-# the processing functions pass around. PowerShell resolves an unqualified variable through
-# the caller's scope chain, so two different things called $Preset silently collide.
-$X264Preset = Get-Setting 'Preset' 'medium'
+# the processing functions pass around.
+$X264Preset = Get-Setting 'X264Preset' 'medium'
 $NvencPreset = Get-Setting 'NvencPreset' 'p4'
-$NvencCq = Get-Setting 'NvencCq' 26
-$LongNvencCq = Get-Setting 'LongNvencCq' 28
 $AmfQuality = Get-Setting 'AmfQuality' 'balanced'
-$AmfQp = Get-Setting 'AmfQp' 24
-$LongAmfQp = Get-Setting 'LongAmfQp' 26
-$LongNvencPrimaryMaxrateScale = Get-Setting 'LongNvencPrimaryMaxrateScale' 0.92
-$AudioBitrate = Get-Setting 'AudioBitrate' '128k'
-$MaxWidth = Get-Setting 'MaxWidth' 1080
-$DefaultMaxOutputSizeMB = Get-Setting 'DefaultMaxOutputSizeMB' 8
-$DefaultSizeCapFallbackMaxWidth = Get-Setting 'DefaultSizeCapFallbackMaxWidth' 720
-$DefaultNvencPrimaryMaxrateScale = Get-Setting 'DefaultNvencPrimaryMaxrateScale' 0.92
+$DefaultNvencCq = Get-Setting 'NvencCq' 26
+$DefaultAmfQp = Get-Setting 'AmfQp' 24
+$DefaultAudioBitrate = Get-Setting 'AudioBitrate' '128k'
+$DefaultMaxWidth = Get-Setting 'MaxWidth' 1080
+
+# Size cap defaults. Zero disables both the first-encode bitrate ceiling and the retry pass.
+$DefaultSizeCapMB = Get-Setting 'SizeCapMB' 8
+$DefaultSizeCapFallbackMaxWidth = Get-Setting 'SizeCapFallbackMaxWidth' 720
+$DefaultMaxrateScale = Get-Setting 'MaxrateScale' 0.92
+
+# Segmenting defaults, used by presets with Segment = true.
+$DefaultSegmentTargetSeconds = Get-Setting 'SegmentTargetSeconds' 15
+$DefaultSegmentMinSeconds = Get-Setting 'SegmentMinSeconds' 11
+
+# Manifest schema, used by presets with Manifest = true.
+$DefaultManifestSchema = Get-Setting 'ManifestSchema' 'heatup.assetStoreMediaManifest.v1'
+
+# Timing
 $StableSeconds = Get-Setting 'StableSeconds' 3
 $TimeoutSeconds = Get-Setting 'TimeoutSeconds' 600
 $PollSeconds = Get-Setting 'PollSeconds' 2
-$LongSegmentTargetSeconds = Get-Setting 'LongSegmentTargetSeconds' 15
-$LongSegmentMinSeconds = Get-Setting 'LongSegmentMinSeconds' 11
-$LongMaxOutputSizeMB = Get-Setting 'LongMaxOutputSizeMB' 8
-$LongSizeCapFallbackMaxWidth = Get-Setting 'LongSizeCapFallbackMaxWidth' 720
+
+# Archive and retention
 $ArchiveEnabled = Get-Setting 'ArchiveEnabled' $true
 $ArchiveAgeHours = Get-Setting 'ArchiveAgeHours' 15
 $ArchiveCheckIntervalMinutes = Get-Setting 'ArchiveCheckIntervalMinutes' 30
 $AssetRetentionDays = Get-Setting 'AssetRetentionDays' 5
 
-# Asset store pipeline: like set-batch (one processed copy of every source file
-# per set), but it also writes a heatup.assetStoreMediaManifest.v1 JSON next to
-# the generated sets and uses a deliberately tiny end-trim (tens of ms at most)
-# so each rendition differs without noticeably changing its length.
-$AssetStoreSetCount = Get-Setting 'AssetStoreSetCount' 15
-$AssetStoreMinTrimMs = Get-Setting 'AssetStoreMinTrimMs' 10
-$AssetStoreMaxTrimMs = Get-Setting 'AssetStoreMaxTrimMs' 40
-$AssetStoreManifestSchema = Get-Setting 'AssetStoreManifestSchema' 'heatup.assetStoreMediaManifest.v1'
-
-# --- Derived directory paths (computed from $PipelineRoot above) ---
-# Each pipeline is divided into workspaces so assets can stay categorized.
-# Existing pre-workspace assets are migrated into LC.
 $WorkspaceNames = @("LC", "MD", "YL", "PL", "general")
 $DefaultWorkspaceName = "LC"
 
@@ -315,11 +312,11 @@ function New-PipelinePreset {
         Batch                   = $batch
 
         Segment                 = Get-PresetValue -Overrides $Overrides -Key 'Segment' -GlobalValue $false
-        SegmentTargetSeconds    = Get-PresetValue -Overrides $Overrides -Key 'SegmentTargetSeconds' -GlobalValue $LongSegmentTargetSeconds
-        SegmentMinSeconds       = Get-PresetValue -Overrides $Overrides -Key 'SegmentMinSeconds' -GlobalValue $LongSegmentMinSeconds
+        SegmentTargetSeconds    = Get-PresetValue -Overrides $Overrides -Key 'SegmentTargetSeconds' -GlobalValue $DefaultSegmentTargetSeconds
+        SegmentMinSeconds       = Get-PresetValue -Overrides $Overrides -Key 'SegmentMinSeconds' -GlobalValue $DefaultSegmentMinSeconds
 
         Manifest                = Get-PresetValue -Overrides $Overrides -Key 'Manifest' -GlobalValue $false
-        ManifestSchema          = Get-PresetValue -Overrides $Overrides -Key 'ManifestSchema' -GlobalValue $AssetStoreManifestSchema
+        ManifestSchema          = Get-PresetValue -Overrides $Overrides -Key 'ManifestSchema' -GlobalValue $DefaultManifestSchema
 
         # Converts .mov and .heic sources to workable formats before processing.
         Normalize               = Get-PresetValue -Overrides $Overrides -Key 'Normalize' -GlobalValue $true
@@ -327,24 +324,24 @@ function New-PipelinePreset {
         OnFailure               = Get-PresetChoice -Overrides $Overrides -Key 'OnFailure' -Default $defaultFailure -Allowed $script:PresetFailureValues -PresetName $Name
         Parallel                = Get-PresetChoice -Overrides $Overrides -Key 'Parallel' -Default 'OverFiles' -Allowed $script:PresetParallelValues -PresetName $Name
 
-        MaxWidth                = Get-PresetValue -Overrides $Overrides -Key 'MaxWidth' -GlobalValue $MaxWidth
-        AudioBitrate            = Get-PresetValue -Overrides $Overrides -Key 'AudioBitrate' -GlobalValue $AudioBitrate
+        MaxWidth                = Get-PresetValue -Overrides $Overrides -Key 'MaxWidth' -GlobalValue $DefaultMaxWidth
+        AudioBitrate            = Get-PresetValue -Overrides $Overrides -Key 'AudioBitrate' -GlobalValue $DefaultAudioBitrate
         # Zero means no bitrate ceiling on the first encode and no size-cap retry pass.
-        SizeCapMB               = Get-PresetValue -Overrides $Overrides -Key 'SizeCapMB' -GlobalValue $DefaultMaxOutputSizeMB
+        SizeCapMB               = Get-PresetValue -Overrides $Overrides -Key 'SizeCapMB' -GlobalValue $DefaultSizeCapMB
         SizeCapFallbackMaxWidth = Get-PresetValue -Overrides $Overrides -Key 'SizeCapFallbackMaxWidth' -GlobalValue $DefaultSizeCapFallbackMaxWidth
-        MaxrateScale            = Get-PresetValue -Overrides $Overrides -Key 'MaxrateScale' -GlobalValue $DefaultNvencPrimaryMaxrateScale
-        NvencCq                 = Get-PresetValue -Overrides $Overrides -Key 'NvencCq' -GlobalValue $NvencCq
-        AmfQp                   = Get-PresetValue -Overrides $Overrides -Key 'AmfQp' -GlobalValue $AmfQp
-        Crf                     = Get-PresetValue -Overrides $Overrides -Key 'Crf' -GlobalValue $Crf
+        MaxrateScale            = Get-PresetValue -Overrides $Overrides -Key 'MaxrateScale' -GlobalValue $DefaultMaxrateScale
+        NvencCq                 = Get-PresetValue -Overrides $Overrides -Key 'NvencCq' -GlobalValue $DefaultNvencCq
+        AmfQp                   = Get-PresetValue -Overrides $Overrides -Key 'AmfQp' -GlobalValue $DefaultAmfQp
+        Crf                     = Get-PresetValue -Overrides $Overrides -Key 'Crf' -GlobalValue $DefaultCrf
 
-        MinTrimMs               = Get-PresetValue -Overrides $Overrides -Key 'MinTrimMs' -GlobalValue $MinTrimMs
-        MaxTrimMs               = Get-PresetValue -Overrides $Overrides -Key 'MaxTrimMs' -GlobalValue $MaxTrimMs
+        MinTrimMs               = Get-PresetValue -Overrides $Overrides -Key 'MinTrimMs' -GlobalValue $DefaultMinTrimMs
+        MaxTrimMs               = Get-PresetValue -Overrides $Overrides -Key 'MaxTrimMs' -GlobalValue $DefaultMaxTrimMs
 
-        CropMinPermille         = Get-PresetValue -Overrides $Overrides -Key 'CropMinPermille' -GlobalValue $ImageBulkCropMinPermille
-        CropMaxPermille         = Get-PresetValue -Overrides $Overrides -Key 'CropMaxPermille' -GlobalValue $ImageBulkCropMaxPermille
-        JpegQuality             = Get-PresetValue -Overrides $Overrides -Key 'JpegQuality' -GlobalValue $ImageBulkNativeJpegQuality
-        ConvertedJpegQuality    = Get-PresetValue -Overrides $Overrides -Key 'ConvertedJpegQuality' -GlobalValue $ImageBulkConvertedJpegQuality
-        PngCompressionLevel     = Get-PresetValue -Overrides $Overrides -Key 'PngCompressionLevel' -GlobalValue $ImageBulkPngCompressionLevel
+        CropMinPermille         = Get-PresetValue -Overrides $Overrides -Key 'CropMinPermille' -GlobalValue $DefaultCropMinPermille
+        CropMaxPermille         = Get-PresetValue -Overrides $Overrides -Key 'CropMaxPermille' -GlobalValue $DefaultCropMaxPermille
+        JpegQuality             = Get-PresetValue -Overrides $Overrides -Key 'JpegQuality' -GlobalValue $DefaultJpegQuality
+        ConvertedJpegQuality    = Get-PresetValue -Overrides $Overrides -Key 'ConvertedJpegQuality' -GlobalValue $DefaultConvertedJpegQuality
+        PngCompressionLevel     = Get-PresetValue -Overrides $Overrides -Key 'PngCompressionLevel' -GlobalValue $DefaultPngCompressionLevel
     }
 }
 
@@ -356,59 +353,14 @@ function New-PipelinePreset {
 # that every preset runs, rather than a destination of its own.
 function Get-BuiltInPresetOverrides {
     return [ordered]@{
-        'default' = @{
-            VideoCopies     = [string]$DefaultPipelineMinCopiesPerFile
-            ImageCopies     = [string]$DefaultPipelineMinCopiesPerFile
-            CopiesAlternate = [string]$DefaultPipelineAlternatingCopiesPerFile
-        }
-        'videoclean' = @{
-            VideoCopies = '1'
-            ImageCopies = '0'
-        }
-        'imageclean' = @{
-            VideoCopies         = '0'
-            ImageCopies         = '1'
-            PngCompressionLevel = [string]$ImageCleanPngCompressionLevel
-        }
-        'images' = @{
-            VideoCopies = '0'
-            ImageCopies = [string]$ImageBulkCopiesPerFile
-        }
-        'sets' = @{
-            VideoCopies = [string]$SetCopiesPerFile
-            ImageCopies = [string]$SetCopiesPerFile
-            Grouping    = 'PerSource'
-            SizeCapMB   = '0'
-        }
-        'setbatch' = @{
-            VideoCopies = '1'
-            ImageCopies = '1'
-            Grouping    = 'PerSet'
-            SetCount    = [string]$SetBatchCount
-            Batch       = 'PerGroup'
-            SizeCapMB   = '0'
-        }
-        'assetstore' = @{
-            VideoCopies = '1'
-            ImageCopies = '1'
-            Grouping    = 'PerSet'
-            SetCount    = [string]$AssetStoreSetCount
-            Batch       = 'PerGroup'
-            SizeCapMB   = '0'
-            Manifest    = 'true'
-            MinTrimMs   = [string]$AssetStoreMinTrimMs
-            MaxTrimMs   = [string]$AssetStoreMaxTrimMs
-        }
-        'long' = @{
-            VideoCopies             = [string]$LongCopiesPerSegment
-            ImageCopies             = '0'
-            Segment                 = 'true'
-            SizeCapMB               = [string]$LongMaxOutputSizeMB
-            SizeCapFallbackMaxWidth = [string]$LongSizeCapFallbackMaxWidth
-            MaxrateScale            = [string]$LongNvencPrimaryMaxrateScale
-            NvencCq                 = [string]$LongNvencCq
-            AmfQp                   = [string]$LongAmfQp
-        }
+        'default'    = @{ VideoCopies = '8';   ImageCopies = '8'; CopiesAlternate = '7' }
+        'videoclean' = @{ VideoCopies = '1';   ImageCopies = '0' }
+        'imageclean' = @{ VideoCopies = '0';   ImageCopies = '1' }
+        'images'     = @{ VideoCopies = '0';   ImageCopies = '20' }
+        'sets'       = @{ VideoCopies = '10';  ImageCopies = '10'; Grouping = 'PerSource'; SizeCapMB = '0' }
+        'setbatch'   = @{ VideoCopies = '1';   ImageCopies = '1';  Grouping = 'PerSet'; SetCount = '10'; Batch = 'PerGroup'; SizeCapMB = '0' }
+        'assetstore' = @{ VideoCopies = '1';   ImageCopies = '1';  Grouping = 'PerSet'; SetCount = '15'; Batch = 'PerGroup'; SizeCapMB = '0'; Manifest = 'true'; MinTrimMs = '10'; MaxTrimMs = '40' }
+        'long'       = @{ VideoCopies = '3';   ImageCopies = '0';  Segment = 'true'; NvencCq = '28'; AmfQp = '26' }
     }
 }
 
@@ -724,13 +676,13 @@ function Initialize-VideoEncoder {
     # encoder but cannot run it cleanly falls through to the next option.
     if ($PreferNvenc -and (Test-NvencEncoderAvailable)) {
         $script:UseNvenc = $true
-        Write-Log "Video encoder: h264_nvenc (NVIDIA GPU, preset $NvencPreset, CQ $NvencCq, long CQ $LongNvencCq)"
+        Write-Log "Video encoder: h264_nvenc (NVIDIA GPU, preset $NvencPreset, CQ $DefaultNvencCq)"
         return
     }
 
     if ($PreferAmf -and (Test-AmfEncoderAvailable)) {
         $script:UseAmf = $true
-        Write-Log "Video encoder: h264_amf (AMD GPU, quality $AmfQuality, QP $AmfQp, long QP $LongAmfQp)"
+        Write-Log "Video encoder: h264_amf (AMD GPU, quality $AmfQuality, QP $DefaultAmfQp)"
         return
     }
 
@@ -738,7 +690,7 @@ function Initialize-VideoEncoder {
         Write-Log "No usable GPU encoder (NVENC/AMF) found in FFmpeg; falling back to libx264 (CPU)." "WARN"
     }
 
-    Write-Log "Video encoder: libx264 (CPU, preset $X264Preset, CRF $Crf)"
+    Write-Log "Video encoder: libx264 (CPU, preset $X264Preset, CRF $DefaultCrf)"
 }
 
 function Get-VideoEncoderName {
@@ -865,8 +817,8 @@ function Get-OutputSizeCapQualityProfiles {
 
     if ($script:UseNvenc) {
         return @(
-            @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
-            @{ Quality = 32; MaxWidth = $MaxWidth; Bitrate = 0 },
+            @{ Quality = 30; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
+            @{ Quality = 32; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
             @{ Quality = 34; MaxWidth = $FallbackMaxWidth; Bitrate = 0 },
             @{ Quality = 36; MaxWidth = $FallbackMaxWidth; Bitrate = 0 }
         )
@@ -874,16 +826,16 @@ function Get-OutputSizeCapQualityProfiles {
 
     if ($script:UseAmf) {
         return @(
-            @{ Quality = 28; MaxWidth = $MaxWidth; Bitrate = 0 },
-            @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
+            @{ Quality = 28; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
+            @{ Quality = 30; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
             @{ Quality = 32; MaxWidth = $FallbackMaxWidth; Bitrate = 0 },
             @{ Quality = 34; MaxWidth = $FallbackMaxWidth; Bitrate = 0 }
         )
     }
 
     return @(
-        @{ Quality = 28; MaxWidth = $MaxWidth; Bitrate = 0 },
-        @{ Quality = 30; MaxWidth = $MaxWidth; Bitrate = 0 },
+        @{ Quality = 28; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
+        @{ Quality = 30; MaxWidth = $DefaultMaxWidth; Bitrate = 0 },
         @{ Quality = 32; MaxWidth = $FallbackMaxWidth; Bitrate = 0 },
         @{ Quality = 32; MaxWidth = $FallbackMaxWidth; Bitrate = 0 }
     )
@@ -1936,8 +1888,8 @@ function Get-TrimRange {
         [int]$ConfiguredMaxMs = -1
     )
 
-    if ($ConfiguredMinMs -lt 0) { $ConfiguredMinMs = $MinTrimMs }
-    if ($ConfiguredMaxMs -lt 0) { $ConfiguredMaxMs = $MaxTrimMs }
+    if ($ConfiguredMinMs -lt 0) { $ConfiguredMinMs = $DefaultMinTrimMs }
+    if ($ConfiguredMaxMs -lt 0) { $ConfiguredMaxMs = $DefaultMaxTrimMs }
 
     $durationMs = [int][Math]::Floor($DurationSeconds * 1000)
 
@@ -2051,12 +2003,26 @@ function New-VideoVariant {
         [Parameter(Mandatory = $true)]
         [string]$LogLabel,
 
+        # Encoder settings come from the caller's preset. Below zero, or empty, falls back to
+        # the global default, which is what the size-cap retry pass relies on.
+        [int]$QualityValue = -1,
+
+        [int]$MaxWidthValue = -1,
+
+        [string]$AudioBitrateValue = "",
+
         [int]$MaxVideoBitrateKbps = 0,
 
         [double]$MaxSizeMegabytes = 0,
 
         [int]$SizeCapFallbackMaxWidth = 0
     )
+
+    if ($QualityValue -lt 0) {
+        $QualityValue = if ($script:UseNvenc) { $DefaultNvencCq } elseif ($script:UseAmf) { $DefaultAmfQp } else { $DefaultCrf }
+    }
+    if ($MaxWidthValue -lt 0) { $MaxWidthValue = $DefaultMaxWidth }
+    if ([string]::IsNullOrWhiteSpace($AudioBitrateValue)) { $AudioBitrateValue = $DefaultAudioBitrate }
 
     $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension ".mp4"
     $trimSeconds = $TrimMs / 1000.0
@@ -2066,9 +2032,17 @@ function New-VideoVariant {
 
     Write-Log "$LogLabel trim: ${TrimMs}ms, target duration: ${targetDurationText}s"
 
-    $qualityValue = if ($script:UseNvenc) { $NvencCq } elseif ($script:UseAmf) { $AmfQp } else { $Crf }
+    $encodeArgs = @{
+        InputPath           = $InputPath
+        OutputPath          = $outputPath
+        QualityValue        = $QualityValue
+        MaxWidthValue       = $MaxWidthValue
+        AudioBitrateValue   = $AudioBitrateValue
+        DurationSeconds     = $targetDuration
+        MaxVideoBitrateKbps = $MaxVideoBitrateKbps
+    }
 
-    Invoke-VideoEncode -InputPath $InputPath -OutputPath $outputPath -QualityValue $qualityValue -MaxWidthValue $MaxWidth -DurationSeconds $targetDuration -MaxVideoBitrateKbps $MaxVideoBitrateKbps
+    Invoke-VideoEncode @encodeArgs
 
     Clear-Metadata -Path $outputPath
 
@@ -2127,8 +2101,8 @@ function New-ImageVariant {
         [switch]$RemoveOutputOnFailure
     )
 
-    if ($CropMinPermille -lt 0) { $CropMinPermille = $ImageBulkCropMinPermille }
-    if ($CropMaxPermille -lt 0) { $CropMaxPermille = $ImageBulkCropMaxPermille }
+    if ($CropMinPermille -lt 0) { $CropMinPermille = $DefaultCropMinPermille }
+    if ($CropMaxPermille -lt 0) { $CropMaxPermille = $DefaultCropMaxPermille }
 
     $outputPath = New-IPhoneRandomFilePath -Directory $OutputDirectory -Extension $OutputExtension
     $width = $Dimensions.Width
@@ -2207,7 +2181,7 @@ function New-ImageVariant {
 # Asset store manifest pipeline
 # ---------------------------------------------------------------------------
 # Treats everything dropped in assetstore\<workspace>\input as one batch. Produces
-# $AssetStoreSetCount randomly named sets, each holding one processed,
+# SetCount randomly named sets, each holding one processed,
 # metadata-stripped copy of every source file, then writes a
 # heatup.assetStoreMediaManifest.v1 manifest describing every generated variant.
 # Each video copy gets a tiny end-trim (tens of ms at most, see
@@ -2280,8 +2254,8 @@ function Get-LongSegmentPlan {
     )
 
     $durationMs = [int][Math]::Floor($DurationSeconds * 1000)
-    $targetMs = [int]($LongSegmentTargetSeconds * 1000)
-    $minMs = [int]($LongSegmentMinSeconds * 1000)
+    $targetMs = [int]($DefaultSegmentTargetSeconds * 1000)
+    $minMs = [int]($DefaultSegmentMinSeconds * 1000)
     $durations = New-Object System.Collections.Generic.List[int]
 
     if ($durationMs -le 0) {
@@ -2359,7 +2333,7 @@ function Get-TargetVideoBitrateKbps {
         return 0
     }
 
-    $audioBitrateText = ($AudioBitrate -replace "[^0-9.]", "")
+    $audioBitrateText = ($DefaultAudioBitrate -replace "[^0-9.]", "")
     $audioBitrateKbps = 128.0
     $parsedAudioBitrate = 0.0
     if (-not [string]::IsNullOrWhiteSpace($audioBitrateText)) {
@@ -2431,8 +2405,12 @@ function Invoke-VideoEncode {
 
         [double]$DurationSeconds = -1,
 
-        [int]$MaxVideoBitrateKbps = 0
+        [int]$MaxVideoBitrateKbps = 0,
+
+        [string]$AudioBitrateValue = ""
     )
+
+    if ([string]::IsNullOrWhiteSpace($AudioBitrateValue)) { $AudioBitrateValue = $DefaultAudioBitrate }
 
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
     $arguments = @(
@@ -2462,7 +2440,7 @@ function Invoke-VideoEncode {
     $arguments += New-VideoEncoderArguments -QualityValue $QualityValue -MaxWidthValue $MaxWidthValue -MaxVideoBitrateKbps $MaxVideoBitrateKbps
     $arguments += @(
         "-c:a", "aac",
-        "-b:a", $AudioBitrate,
+        "-b:a", $AudioBitrateValue,
         "-movflags", "+faststart",
         "-map_metadata", "-1",
         $OutputPath
@@ -2572,54 +2550,58 @@ function Invoke-OutputSizeCap {
     }
 }
 
-function Get-LongOutputRecompressTargets {
+# Maintenance mode (-RecompressOutputs): walks every preset that has a size cap and re-runs
+# the size-cap pass on any output that is over it. Useful after lowering a cap, since the
+# watcher only applies caps at creation time.
+function Get-OversizedOutputs {
     param(
-        [Parameter(Mandatory = $true)]
-        [string[]]$Directories
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][double]$MaxSizeMegabytes
     )
 
-    $maxBytes = [long]($LongMaxOutputSizeMB * 1024 * 1024)
-    $targets = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $Directory)) { return @() }
 
-    foreach ($directory in $Directories) {
-        if (-not (Test-Path -LiteralPath $directory)) {
-            continue
-        }
+    $maxBytes = [long]($MaxSizeMegabytes * 1024 * 1024)
 
-        Get-ChildItem -LiteralPath $directory -File -Filter "*.mp4" | ForEach-Object {
-            if ($_.Length -gt $maxBytes) {
-                $targets.Add($_.FullName)
+    return @(
+        Get-ChildItem -LiteralPath $Directory -File -Filter "*.mp4" -Recurse |
+            Where-Object { $_.Length -gt $maxBytes } |
+            ForEach-Object { $_.FullName }
+    )
+}
+
+function Start-OutputRecompressBatch {
+    $processed = 0
+    $failed = 0
+
+    foreach ($preset in Get-PipelinePresets) {
+        if ($preset.SizeCapMB -le 0) { continue }
+
+        foreach ($workspaceName in $WorkspaceNames) {
+            $paths = Get-PresetWorkspacePaths -PresetName $preset.Name -WorkspaceName $workspaceName
+            $targets = @(Get-OversizedOutputs -Directory $paths.OutputDir -MaxSizeMegabytes $preset.SizeCapMB)
+
+            if ($targets.Count -eq 0) { continue }
+
+            Write-Log "Recompress: $($targets.Count) file(s) over $($preset.SizeCapMB) MB in $($paths.OutputDir)"
+
+            foreach ($path in $targets) {
+                try {
+                    $before = (Get-Item -LiteralPath $path).Length
+                    Invoke-OutputSizeCap -OutputPath $path -MaxSizeMegabytes $preset.SizeCapMB -FallbackMaxWidth $preset.SizeCapFallbackMaxWidth
+                    $after = (Get-Item -LiteralPath $path).Length
+                    Write-Log "Recompressed: $path ($([math]::Round($before / 1MB, 2)) MB -> $([math]::Round($after / 1MB, 2)) MB)"
+                    $processed++
+                }
+                catch {
+                    Write-Log "Failed to recompress '$path': $($_.Exception.Message)" "ERROR"
+                    $failed++
+                }
             }
         }
     }
 
-    return $targets.ToArray()
-}
-
-function Start-LongOutputRecompressBatch {
-    $directories = @($LongOutputDir)
-    $targets = Get-LongOutputRecompressTargets -Directories $directories
-
-    Write-Log "Long output recompress: found $($targets.Count) file(s) over $LongMaxOutputSizeMB MB in $($directories -join ', ')"
-
-    $processed = 0
-    $failed = 0
-
-    foreach ($path in $targets) {
-        try {
-            $before = (Get-Item -LiteralPath $path).Length
-            Invoke-OutputSizeCap -OutputPath $path -MaxSizeMegabytes $LongMaxOutputSizeMB -FallbackMaxWidth $LongSizeCapFallbackMaxWidth
-            $after = (Get-Item -LiteralPath $path).Length
-            Write-Log "Recompressed long output: $path ($([math]::Round($before / 1MB, 2)) MB -> $([math]::Round($after / 1MB, 2)) MB)"
-            $processed++
-        }
-        catch {
-            Write-Log "Failed to recompress long output '$path': $($_.Exception.Message)" "ERROR"
-            $failed++
-        }
-    }
-
-    Write-Log "Long output recompress finished: $processed succeeded, $failed failed"
+    Write-Log "Recompress finished: $processed succeeded, $failed failed"
 }
 
 
@@ -3071,6 +3053,9 @@ function Invoke-PresetFileVariants {
     $totalVariants = $targets.Count * $segments.Count
     $variantsDone = 0
 
+    # Which quality knob applies depends on the encoder that was probed at startup.
+    $presetQuality = if ($script:UseNvenc) { $Preset.NvencCq } elseif ($script:UseAmf) { $Preset.AmfQp } else { $Preset.Crf }
+
     try {
         foreach ($segment in $segments) {
             $trimRange = Get-TrimRange -DurationSeconds $segment.DurationSeconds -ConfiguredMinMs $Preset.MinTrimMs -ConfiguredMaxMs $Preset.MaxTrimMs
@@ -3096,6 +3081,9 @@ function Invoke-PresetFileVariants {
                     DurationSeconds         = $segment.DurationSeconds
                     TrimMs                  = $trimMs
                     LogLabel                = "$($Preset.Name)$segmentLabel video variant $($index + 1)"
+                    QualityValue            = $presetQuality
+                    MaxWidthValue           = $Preset.MaxWidth
+                    AudioBitrateValue       = $Preset.AudioBitrate
                     MaxSizeMegabytes        = $Preset.SizeCapMB
                     SizeCapFallbackMaxWidth = $Preset.SizeCapFallbackMaxWidth
                 }
@@ -3678,11 +3666,11 @@ try {
         exit 0
     }
 
-    if ($RecompressLongOutputs) {
+    if ($RecompressOutputs) {
         foreach ($workspaceName in $WorkspaceNames) {
             Use-PipelineWorkspace -WorkspaceName $workspaceName
             try {
-                Start-LongOutputRecompressBatch
+                Start-OutputRecompressBatch
             }
             finally {
                 Save-PipelineWorkspaceState

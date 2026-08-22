@@ -154,50 +154,28 @@ $SandboxConfig = @'
 [General]
 PipelineRoot = {0}
 
-[Output Copies]
-DefaultPipelineAlternatingCopiesPerFile = 3
-DefaultPipelineMinCopiesPerFile = 2
-LongCopiesPerSegment = 2
-ImageBulkCopiesPerFile = 3
-SetCopiesPerFile = 2
-SetBatchCount = 2
-
-[Video Quality]
+[Video]
 Crf = 28
-Preset = ultrafast
+X264Preset = ultrafast
 AudioBitrate = 96k
 MaxWidth = 640
 PreferNvenc = false
 PreferAmf = false
-
-[Output Size Caps]
-DefaultMaxOutputSizeMB = 8
-DefaultSizeCapFallbackMaxWidth = 480
-LongMaxOutputSizeMB = 8
-LongSizeCapFallbackMaxWidth = 480
-
-[Images]
-ImageProcessingConcurrency = 1
-ImageBulkCropMinPermille = 5
-ImageBulkCropMaxPermille = 20
-ImageBulkConvertPngToJpeg = true
-ImageBulkConvertedJpegQuality = 12
-ImageBulkNativeJpegQuality = 4
-ImageBulkPngCompressionLevel = 6
-ImageCleanPngCompressionLevel = 1
-
-[Video Trim]
+SizeCapMB = 8
+SizeCapFallbackMaxWidth = 480
 MinTrimMs = 15
 MaxTrimMs = 95
+SegmentTargetSeconds = 4
+SegmentMinSeconds = 3
 
-[Long Video]
-LongSegmentTargetSeconds = 4
-LongSegmentMinSeconds = 3
-
-[Asset Store Manifest]
-AssetStoreSetCount = 2
-AssetStoreMinTrimMs = 10
-AssetStoreMaxTrimMs = 40
+[Images]
+; One at a time keeps the run deterministic and the fingerprint stable.
+ImageProcessingConcurrency = 1
+CropMinPermille = 5
+CropMaxPermille = 20
+JpegQuality = 4
+ConvertedJpegQuality = 12
+PngCompressionLevel = 6
 
 [Timing]
 StableSeconds = 0
@@ -209,6 +187,55 @@ ArchiveEnabled = false
 ArchiveAgeHours = 999
 ArchiveCheckIntervalMinutes = 999
 AssetRetentionDays = 0
+
+; Small copy counts keep a full run to a couple of minutes while still exercising every
+; loop. The default preset keeps two different counts so its alternation stays observable.
+[preset default]
+VideoCopies = 2
+ImageCopies = 2
+CopiesAlternate = 3
+
+[preset videoclean]
+VideoCopies = 1
+ImageCopies = 0
+
+[preset imageclean]
+VideoCopies = 0
+ImageCopies = 1
+
+[preset images]
+VideoCopies = 0
+ImageCopies = 3
+
+[preset sets]
+VideoCopies = 2
+ImageCopies = 2
+Grouping = PerSource
+SizeCapMB = 0
+
+[preset setbatch]
+VideoCopies = 1
+ImageCopies = 1
+Grouping = PerSet
+SetCount = 2
+Batch = PerGroup
+SizeCapMB = 0
+
+[preset assetstore]
+VideoCopies = 1
+ImageCopies = 1
+Grouping = PerSet
+SetCount = 2
+Batch = PerGroup
+SizeCapMB = 0
+Manifest = true
+MinTrimMs = 10
+MaxTrimMs = 40
+
+[preset long]
+VideoCopies = 2
+ImageCopies = 0
+Segment = true
 '@
 
 function New-Sandbox {
