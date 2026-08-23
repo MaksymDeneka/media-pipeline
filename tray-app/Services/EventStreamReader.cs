@@ -36,7 +36,15 @@ public sealed class EventStreamReader
     {
         var file = _paths.EventFileFor(DateTimeOffset.Now);
         _currentFile = file;
-        _offset = File.Exists(file) ? new FileInfo(file).Length : 0;
+
+        try
+        {
+            _offset = File.Exists(file) ? new FileInfo(file).Length : 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _offset = 0;
+        }
     }
 
     /// <summary>
@@ -59,7 +67,16 @@ public sealed class EventStreamReader
             return [];
         }
 
-        var length = new FileInfo(file).Length;
+        long length;
+
+        try
+        {
+            length = new FileInfo(file).Length;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return [];
+        }
         if (length < _offset)
         {
             // The file shrank, so it was replaced rather than appended to.
@@ -117,9 +134,9 @@ public sealed class EventStreamReader
 
             _offset = consumed;
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Locked or vanished mid-read; the next tick tries again.
+            // Locked, unreadable, or vanished mid-read; the next tick tries again.
         }
 
         return events;

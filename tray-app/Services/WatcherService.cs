@@ -60,10 +60,11 @@ public sealed class WatcherService
 
             return JsonSerializer.Deserialize<WatcherStatus>(stream, Options);
         }
-        catch (Exception ex) when (ex is IOException or JsonException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            // The watcher writes to a temp file and moves it, so a torn read is unlikely,
-            // but a miss just means we keep the previous snapshot for one more tick.
+            // The watcher writes to a temp file and moves it, but antivirus or inherited ACLs
+            // can still make the replacement briefly unreadable. Keep the previous snapshot
+            // and try again on the next tick instead of taking down the tray app.
             return null;
         }
     }
