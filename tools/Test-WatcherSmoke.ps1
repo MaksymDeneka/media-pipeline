@@ -41,7 +41,7 @@ PreferAmf = false
 SizeCapMB = 0
 
 [Images]
-ImageProcessingConcurrency = 2
+ImageProcessingConcurrency = 99
 JpegQuality = 8
 
 [Timing]
@@ -150,6 +150,9 @@ try {
     Assert-That "image outputs are .jpg" (@($produced | Where-Object { $_.Extension -eq '.JPG' }).Count -eq 2) "extensions: $(($produced.Extension | Sort-Object -Unique) -join ',')"
     Assert-That "sources moved to original" (@(Get-ChildItem -LiteralPath (Join-Path $pipelineRoot 'LC\quick\original') -File -ErrorAction SilentlyContinue).Count -eq 2) "original is not 2"
     Assert-That "input drained" (@(Get-ChildItem -LiteralPath $inputDir -File).Count -eq 0) "input not empty"
+
+    $watcherLog = Get-Content -LiteralPath (@(Get-ChildItem -LiteralPath (Join-Path $pipelineRoot 'logs') -Filter 'media-pipeline-*.log')[0].FullName) -Raw
+    Assert-That "caps unsafe image concurrency" ($watcherLog -match 'requested 99 workers; capped at \d+') "no concurrency cap warning"
 
     Write-Step "Event stream"
     $eventFile = @(Get-ChildItem -LiteralPath (Join-Path $pipelineRoot 'logs') -Filter 'events-*.jsonl' -ErrorAction SilentlyContinue)[0]

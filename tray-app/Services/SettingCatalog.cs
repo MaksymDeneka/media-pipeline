@@ -298,7 +298,7 @@ public static class SettingCatalog
         {
             Key = "ImageProcessingConcurrency",
             Label = "Files at once",
-            Help = "How many files are processed in parallel. Requires PowerShell 7. Use auto to pick from the CPU count.",
+            Help = "How many files are processed in parallel. Requires PowerShell 7. Use auto to pick a safe value. Manual values are capped at six workers.",
             Kind = SettingKind.Text,
             Group = "Images",
             PresetScoped = false,

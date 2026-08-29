@@ -3,9 +3,9 @@
     End-to-end check of the tray app's lifecycle.
 
 .DESCRIPTION
-    Covers the behaviours a tray app is judged on: it starts with Windows, closing the window
-    hides it rather than exiting, the icon is visible on the taskbar rather than buried in the
-    Windows 11 overflow, a single click brings the window back, and only the tray menu quits.
+    Covers the tray app lifecycle: Windows startup opens only the tray icon, closing the window
+    hides it rather than exiting, a single click brings the window back, and only the tray menu
+    quits.
 
     Drives the real UI. The context menu is operated by keyboard, because a WinForms menu
     hosted in a WPF app is not introspectable through UI Automation.
@@ -48,12 +48,14 @@ Write-Host "`n== Tray lifecycle"
 Get-Process MediaPipelineTray -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
 
-Start-Process $exe
+Start-Process $exe -ArgumentList '--startup'
 Start-Sleep -Seconds 6
 
 $app = Get-Process MediaPipelineTray -ErrorAction SilentlyContinue
 Check "the app starts" ($null -ne $app) "not running"
 if (-not $app) { exit 1 }
+Check "startup does not open the window" `
+    ($app.MainWindowHandle -eq [IntPtr]::Zero) "a window is visible"
 
 # --- autostart ---
 $run = Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue
@@ -63,15 +65,9 @@ Check "it registered itself to start with Windows" `
 if ($run.MediaPipelineTray) {
     Check "the startup entry points at this executable" `
         ($run.MediaPipelineTray -like "*MediaPipelineTray.exe*") $run.MediaPipelineTray
+    Check "the startup entry requests tray-only mode" `
+        ($run.MediaPipelineTray -like "*--startup*") $run.MediaPipelineTray
 }
-
-# --- close hides ---
-[void][W]::SendMessage($app.MainWindowHandle, [W]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
-Start-Sleep -Seconds 2
-$app.Refresh()
-
-Check "closing the window does not exit" (-not $app.HasExited) "process exited"
-Check "the window is hidden" (-not [W]::IsWindowVisible($app.MainWindowHandle)) "still visible"
 
 # --- find the tray icon ---
 $root = [System.Windows.Automation.AutomationElement]::RootElement
@@ -103,26 +99,20 @@ foreach ($b in $buttons) {
 Check "the tray icon exists" ($null -ne $icon) "not found in the automation tree"
 if (-not $icon) { exit 1 }
 
-# Whether Windows is showing it on the taskbar rather than in the overflow.
-$promoted = $false
-try {
-    $settings = Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue
-    foreach ($entry in $settings) {
-        $props = Get-ItemProperty $entry.PSPath -ErrorAction SilentlyContinue
-        if ($props.ExecutablePath -like '*MediaPipelineTray.exe') {
-            $promoted = ($props.IsPromoted -eq 1)
-        }
-    }
-} catch { }
-
-Check "the icon is promoted out of the hidden overflow" $promoted "IsPromoted is not 1"
-
 # --- single click reopens ---
 $icon.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
 Start-Sleep -Seconds 2
 $app.Refresh()
 
 Check "a single click reopens the window" ([W]::IsWindowVisible($app.MainWindowHandle)) "still hidden"
+
+# --- close hides ---
+[void][W]::SendMessage($app.MainWindowHandle, [W]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+Start-Sleep -Seconds 2
+$app.Refresh()
+
+Check "closing the window does not exit" (-not $app.HasExited) "process exited"
+Check "the window is hidden" (-not [W]::IsWindowVisible($app.MainWindowHandle)) "still visible"
 
 # --- right click offers quit ---
 # Re-find the icon: clicking it closed the overflow flyout, so the earlier element is stale

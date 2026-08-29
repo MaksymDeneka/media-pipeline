@@ -38,23 +38,14 @@ public partial class App : Application
         _shell.Start();
         RefreshTray();
 
-        // Windows 11 hides new tray icons in the overflow, which makes a tray-first app look
-        // like it never started. The registry entry only exists once the icon has been shown,
-        // so ask again shortly after startup; a first run promotes itself for the next one.
         StartupService.ApplyFirstRunDefault();
-        StartupService.PromoteTrayIcon();
-        _ = PromoteShortlyAsync();
 
-        // Launching straight to the tray would leave a first-time user with no idea the app
-        // started, so the window opens once and hides from then on.
-        ShowWindow();
-    }
-
-    private static async Task PromoteShortlyAsync()
-    {
-        await Task.Delay(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-        StartupService.ApplyFirstRunDefault();
-        StartupService.PromoteTrayIcon();
+        // Windows uses this flag for sign-in launches. Opening the app yourself should still
+        // show the window immediately.
+        if (!e.Args.Contains("--startup", StringComparer.OrdinalIgnoreCase))
+        {
+            ShowWindow();
+        }
     }
 
     private void ShowWindow()

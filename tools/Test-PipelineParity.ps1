@@ -38,11 +38,22 @@ param(
     # The watcher under test.
     [string]$ScriptPath,
 
+    # Legacy runs watch-media.ps1. Native runs the C# worker against the same sandbox.
+    [ValidateSet('Legacy', 'Native')]
+    [string]$Engine = 'Legacy',
+
+    [string]$WorkerProject,
+
+    [string]$DotnetPath,
+
     # Where -BuildCorpus harvests sample media from.
     [string]$CorpusSource = 'D:\MediaPipeline',
 
     # Harvest a fresh corpus before running. Needed on first use.
     [switch]$BuildCorpus,
+
+    # Generates a deterministic local corpus without reading the real pipeline tree.
+    [switch]$BuildSyntheticCorpus,
 
     # Leave the sandbox tree on disk for inspection.
     [switch]$KeepSandbox,
@@ -59,6 +70,11 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $ScriptPath)   { $ScriptPath   = Join-Path $repoRoot 'watch-media.ps1' }
 if (-not $BaselinePath) { $BaselinePath = Join-Path $PSScriptRoot 'parity-baseline.json' }
+if (-not $WorkerProject) { $WorkerProject = Join-Path $repoRoot 'src\MediaPipeline.Worker\MediaPipeline.Worker.csproj' }
+if (-not $DotnetPath) {
+    $dotnetCommand = Get-Command dotnet -ErrorAction SilentlyContinue
+    $DotnetPath = if ($dotnetCommand) { $dotnetCommand.Source } else { 'C:\Program Files\dotnet\dotnet.exe' }
+}
 
 $corpusDir  = Join-Path $SandboxRoot 'corpus'
 $appDir     = Join-Path $SandboxRoot 'app'
@@ -125,6 +141,87 @@ function Build-Corpus {
     $manifestPath = Join-Path $Destination 'corpus.json'
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
     Write-Host "Corpus built: $($manifest.Count) file(s) in $Destination"
+}
+
+function Build-SyntheticCorpus {
+    param([string]$Destination)
+
+    $ffmpegCandidates = @(
+        'C:\Tools\ffmpeg\bin\ffmpeg.exe',
+        (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\ffmpeg.exe')
+    )
+    $ffmpegCommand = Get-Command ffmpeg -ErrorAction SilentlyContinue
+    if ($ffmpegCommand) { $ffmpegCandidates += $ffmpegCommand.Source }
+    $ffmpeg = $ffmpegCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+    if (-not $ffmpeg) { throw 'FFmpeg is required to build the synthetic parity corpus.' }
+
+    if (Test-Path -LiteralPath $Destination) {
+        Remove-Item -LiteralPath $Destination -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+
+    function Invoke-CorpusFfmpeg {
+        param([string[]]$Arguments)
+        & $ffmpeg -y -hide_banner -loglevel error @Arguments
+        if ($LASTEXITCODE -ne 0) { throw "FFmpeg failed while building the parity corpus." }
+    }
+
+    $colors = @('red', 'green', 'blue')
+    for ($index = 1; $index -le 3; $index++) {
+        $target = Join-Path $Destination ('mp4-{0:D2}.mp4' -f $index)
+        Invoke-CorpusFfmpeg -Arguments @(
+            '-f', 'lavfi', '-i', "testsrc2=size=320x240:rate=24",
+            '-f', 'lavfi', '-i', "sine=frequency=$((400 + $index * 100)):sample_rate=44100",
+            '-t', [string](6 + $index), '-c:v', 'libx264', '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', $target
+        )
+    }
+
+    for ($index = 1; $index -le 2; $index++) {
+        $target = Join-Path $Destination ('mov-{0:D2}.mov' -f $index)
+        Invoke-CorpusFfmpeg -Arguments @(
+            '-f', 'lavfi', '-i', 'testsrc2=size=240x320:rate=24',
+            '-f', 'lavfi', '-i', "sine=frequency=$((700 + $index * 100)):sample_rate=44100",
+            '-t', [string](6 + $index), '-c:v', 'libx264', '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', $target
+        )
+    }
+
+    for ($index = 1; $index -le 3; $index++) {
+        Invoke-CorpusFfmpeg -Arguments @(
+            '-f', 'lavfi', '-i', "color=c=$($colors[$index - 1]):s=320x240",
+            '-frames:v', '1', (Join-Path $Destination ('jpg-{0:D2}.jpg' -f $index))
+        )
+    }
+
+    for ($index = 1; $index -le 2; $index++) {
+        Invoke-CorpusFfmpeg -Arguments @(
+            '-f', 'lavfi', '-i', "testsrc2=size=300x220",
+            '-frames:v', '1', (Join-Path $Destination ('png-{0:D2}.png' -f $index))
+        )
+    }
+
+    for ($index = 1; $index -le 2; $index++) {
+        $temporary = Join-Path $Destination ('heic-{0:D2}.avif' -f $index)
+        Invoke-CorpusFfmpeg -Arguments @(
+            '-f', 'lavfi', '-i', "color=c=$($colors[$index]):s=280x360",
+            '-frames:v', '1', '-c:v', 'libaom-av1', '-still-picture', '1',
+            '-f', 'avif', $temporary
+        )
+        Move-Item -LiteralPath $temporary -Destination (Join-Path $Destination ('heic-{0:D2}.heic' -f $index))
+    }
+
+    Get-ChildItem -LiteralPath $Destination -File | Sort-Object Name | ForEach-Object {
+        [ordered]@{
+            name = $_.Name
+            kind = $_.Extension.TrimStart('.').ToLowerInvariant()
+            sourcePath = 'synthetic'
+            bytes = $_.Length
+            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+        }
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Destination 'corpus.json') -Encoding UTF8
+
+    Write-Host "Synthetic corpus built in $Destination"
 }
 
 function Get-CorpusFiles {
@@ -416,6 +513,10 @@ if ($BuildCorpus) {
     New-Item -ItemType Directory -Path $SandboxRoot -Force | Out-Null
     Build-Corpus -Source $CorpusSource -Destination $corpusDir
 }
+elseif ($BuildSyntheticCorpus) {
+    New-Item -ItemType Directory -Path $SandboxRoot -Force | Out-Null
+    Build-SyntheticCorpus -Destination $corpusDir
+}
 
 if (-not (Test-Path -LiteralPath $corpusDir)) {
     throw "No corpus at $corpusDir. Run once with -BuildCorpus."
@@ -423,6 +524,7 @@ if (-not (Test-Path -LiteralPath $corpusDir)) {
 
 Write-Host "Sandbox:      $pipelineRoot"
 Write-Host "Under test:   $ScriptPath"
+Write-Host "Engine:       $Engine"
 Write-Host "Mode:         $Mode"
 Write-Host ''
 
@@ -434,6 +536,20 @@ New-Sandbox
 Initialize-Folders
 Test-ExternalTools
 $script:ProbePath = $script:FFprobePath
+
+$nativeWorker = $null
+if ($Engine -eq 'Native') {
+    if (-not (Test-Path -LiteralPath $DotnetPath)) { throw "dotnet not found: $DotnetPath" }
+    if (-not (Test-Path -LiteralPath $WorkerProject)) { throw "Worker project not found: $WorkerProject" }
+
+    $nativeOutput = Join-Path $appDir 'native-worker'
+    & $DotnetPath publish $WorkerProject -c Release --no-self-contained -o $nativeOutput --nologo | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Could not publish the native worker for parity testing.' }
+    $nativeWorker = Join-Path $nativeOutput 'media-pipeline-worker.exe'
+    if (-not (Test-Path -LiteralPath $nativeWorker)) {
+        throw "Published worker not found: $nativeWorker"
+    }
+}
 
 $scenarios = Get-Scenarios
 if ($Only) {
@@ -459,11 +575,17 @@ foreach ($scenario in $scenarios) {
             Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $paths.InputDir $file.Name) -Force
         }
 
-        # A batch preset needs two polls to settle: the first records the signature, the
-        # second sees it unchanged and processes.
-        Invoke-PresetPoll -Preset $preset -WorkspaceName $scenario.Workspace
-        if ($preset.Batch -eq 'PerGroup') {
+        if ($Engine -eq 'Native') {
+            & $nativeWorker once --config (Join-Path $appDir 'config.ini') --assume-stable | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "Native worker exited with $LASTEXITCODE." }
+        }
+        else {
+            # A batch preset needs two polls to settle: the first records the signature, the
+            # second sees it unchanged and processes.
             Invoke-PresetPoll -Preset $preset -WorkspaceName $scenario.Workspace
+            if ($preset.Batch -eq 'PerGroup') {
+                Invoke-PresetPoll -Preset $preset -WorkspaceName $scenario.Workspace
+            }
         }
     }
     catch {
@@ -518,14 +640,43 @@ else {
     }
 
     $baseline = Get-Content -LiteralPath $BaselinePath -Raw | ConvertFrom-Json
+    $comparisonBaseline = $baseline
+    $acceptedManifestFix = $false
+
+    # The legacy asset-store path currently drops every record before serializing the
+    # manifest. The native worker deliberately fixes that defect. Accept only that precise
+    # difference: the manifest must account for every generated media file and expose the
+    # contractual identity and path fields.
+    if ($Engine -eq 'Native') {
+        $beforeManifest = @($baseline.scenarios.assetstore.tree.output.manifests)[0]
+        $afterManifest = @($report.scenarios.assetstore.tree.output.manifests)[0]
+        $expectedVariants = $report.scenarios.assetstore.tree.output.fileCount - 1
+        $requiredFields = @('familyKey', 'variantKey', 'path', 'renditionSetKey', 'sourceOriginalName')
+        $hasRequiredFields = $requiredFields.Count -eq @(
+            $requiredFields | Where-Object { $afterManifest.variantFields -contains $_ }
+        ).Count
+
+        if ($beforeManifest.variantCount -eq 0 -and
+            $afterManifest.variantCount -eq $expectedVariants -and
+            $afterManifest.schema -eq $beforeManifest.schema -and
+            $hasRequiredFields) {
+            $comparisonBaseline = ($baseline | ConvertTo-Json -Depth 12 | ConvertFrom-Json)
+            $comparisonBaseline.scenarios.assetstore.tree.output.manifests =
+                $report.scenarios.assetstore.tree.output.manifests
+            $acceptedManifestFix = $true
+        }
+    }
 
     # Compare the scenario trees only. Timestamps and the script hash are expected to differ.
-    $baselineTrees = ($baseline.scenarios | ConvertTo-Json -Depth 12)
+    $baselineTrees = ($comparisonBaseline.scenarios | ConvertTo-Json -Depth 12)
     $currentTrees  = ($report.scenarios   | ConvertTo-Json -Depth 12)
 
     if ($baselineTrees -eq $currentTrees) {
         Write-Host ''
         Write-Host 'PARITY OK: every scenario matches the baseline.' -ForegroundColor Green
+        if ($acceptedManifestFix) {
+            Write-Host 'Accepted fix: asset-store manifests now contain one record per generated variant.' -ForegroundColor Green
+        }
         $exitCode = 0
     }
     else {
@@ -540,7 +691,7 @@ else {
 
         # Per-scenario summary so the offending lane is obvious without reading the JSON.
         foreach ($name in $results.Keys) {
-            $before = $baseline.scenarios.PSObject.Properties[$name]
+            $before = $comparisonBaseline.scenarios.PSObject.Properties[$name]
             $beforeJson = if ($before) { $before.Value | ConvertTo-Json -Depth 12 } else { '<missing>' }
             $afterJson  = $results[$name] | ConvertTo-Json -Depth 12
 

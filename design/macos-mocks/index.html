@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Media Pipeline macOS concepts</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      --bg: #101012;
+      --surface: #1a1a1d;
+      --surface-2: #202024;
+      --surface-3: #29292e;
+      --line: #34343a;
+      --line-soft: #29292f;
+      --ink: #f2f2f4;
+      --muted: #a0a0a8;
+      --faint: #707079;
+      --ok: #52b879;
+      --fail: #eb7064;
+      --blue: #0a84ff;
+      --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #060607; color: var(--ink); }
+    body { display: grid; place-items: center; }
+    .concept { display: none; width: 1152px; height: 720px; }
+    body[data-view="a"] #a, body[data-view="b"] #b, body[data-view="c"] #c { display: block; }
+    .window { width: 100%; height: 100%; border: 1px solid #3b3b40; border-radius: 14px; overflow: hidden; background: var(--bg); box-shadow: 0 28px 80px #000a; }
+    .titlebar { height: 52px; display: grid; grid-template-columns: 220px 1fr 220px; align-items: center; border-bottom: 1px solid var(--line); background: #202024e8; backdrop-filter: blur(18px); }
+    .lights { display: flex; gap: 8px; padding-left: 17px; }
+    .light { width: 12px; height: 12px; border-radius: 50%; }
+    .light.red { background: #ff5f57; } .light.yellow { background: #febc2e; } .light.green { background: #28c840; }
+    .title { text-align: center; font-size: 13px; font-weight: 600; }
+    .toolbar { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding-right: 12px; }
+    button, .button { border: 1px solid #45454c; border-radius: 7px; background: linear-gradient(#343439,#29292e); color: var(--ink); padding: 5px 11px; font: 12px inherit; line-height: 18px; }
+    .button.primary { border-color: #187ddc; background: linear-gradient(#198cff,#0876db); color: white; }
+    .icon-button { width: 30px; padding: 5px 0; text-align: center; font-weight: 600; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
+    .status-dot.working { background: var(--ink); box-shadow: 0 0 0 3px #f2f2f41f; }
+    .status-dot.fail { background: var(--fail); }
+    .mono { font-family: var(--mono); }
+    .muted { color: var(--muted); }
+    .faint { color: var(--faint); }
+    .ok { color: var(--ok); } .fail { color: var(--fail); }
+    .caption { font-size: 10px; font-weight: 650; letter-spacing: .055em; color: var(--faint); text-transform: uppercase; }
+    .hairline { border-bottom: 1px solid var(--line-soft); }
+    .progress { height: 4px; border-radius: 2px; background: #34343a; overflow: hidden; }
+    .progress > i { display: block; height: 100%; background: var(--ink); border-radius: inherit; }
+
+    /* A: native sidebar */
+    .split { display: grid; grid-template-columns: 238px 1fr; height: calc(100% - 52px); }
+    .sidebar { background: #242428; border-right: 1px solid var(--line); padding: 12px 10px; }
+    .side-section { margin: 13px 10px 6px; }
+    .nav { display: grid; grid-template-columns: 24px 1fr auto; align-items: center; height: 34px; border-radius: 7px; padding: 0 9px; font-size: 13px; color: #d5d5d8; }
+    .nav.selected { background: #52525a; color: white; }
+    .nav .symbol { font-size: 15px; text-align: center; margin-left: -4px; }
+    .badge { min-width: 20px; height: 18px; border-radius: 9px; padding: 1px 6px; background: #3a3a40; text-align: center; font-size: 11px; }
+    .nav.selected .badge { background: #686871; }
+    .sidebar-bottom { position: absolute; bottom: 16px; width: 218px; }
+    .detail { overflow: hidden; }
+    .detail-head { height: 73px; display: flex; justify-content: space-between; align-items: center; padding: 0 24px; border-bottom: 1px solid var(--line); background: #171719; }
+    h1 { margin: 0; font-size: 24px; letter-spacing: -.02em; }
+    .sub { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .summary { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); }
+    .metric { padding: 16px 18px 14px; border-right: 1px solid var(--line-soft); }
+    .metric:last-child { border-right: 0; }
+    .metric strong { display: block; font-size: 21px; margin-bottom: 3px; }
+    .activity { padding: 18px 24px; }
+    .section-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .row { display: grid; grid-template-columns: 18px 150px 1fr 110px 82px; align-items: center; min-height: 48px; border-bottom: 1px solid var(--line-soft); font-size: 12px; }
+    .row strong { font-size: 12.5px; }
+    .row .right { text-align: right; }
+    .row .progress { margin-top: 7px; width: 92%; }
+    .recent { margin-top: 22px; }
+    .recent .row { grid-template-columns: 18px 150px 1fr 90px 110px; min-height: 41px; }
+
+    /* B: dashboard */
+    .b-titlebar { grid-template-columns: 180px 1fr 260px; }
+    .segmented { margin: auto; display: flex; padding: 2px; border: 1px solid #3a3a40; border-radius: 8px; background: #171719; }
+    .segment { padding: 5px 17px; border-radius: 6px; color: var(--muted); font-size: 12px; }
+    .segment.on { background: #3a3a40; color: var(--ink); box-shadow: 0 1px 2px #0008; }
+    .dash-head { height: 68px; padding: 0 22px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); }
+    .worker-state { display: flex; align-items: center; gap: 10px; }
+    .dash-grid { height: calc(100% - 120px); display: grid; grid-template-columns: 1.35fr .65fr; }
+    .lanes { padding: 18px 20px; border-right: 1px solid var(--line); }
+    .lane-head, .lane-line { display: grid; grid-template-columns: 135px repeat(5, 1fr) 76px; align-items: center; }
+    .lane-head { height: 28px; border-bottom: 1px solid var(--line); }
+    .lane-line { min-height: 51px; border-bottom: 1px solid var(--line-soft); font-size: 12px; }
+    .cell { text-align: center; }
+    .queue-mark { display: inline-flex; min-width: 22px; height: 22px; border: 1px solid #45454b; border-radius: 5px; align-items: center; justify-content: center; font-family: var(--mono); font-size: 10px; }
+    .queue-mark.busy { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+    .side-feed { padding: 18px 19px; background: #141416; }
+    .feed-item { padding: 11px 0; border-bottom: 1px solid var(--line-soft); font-size: 12px; }
+    .feed-top { display: flex; justify-content: space-between; margin-bottom: 4px; }
+    .feed-detail { font-family: var(--mono); color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+
+    /* C: menu bar first */
+    .desktop { position: relative; width: 100%; height: 100%; background: linear-gradient(145deg,#202126,#101114 62%); }
+    .menubar { height: 28px; display: flex; justify-content: space-between; align-items: center; padding: 0 15px; background: #e8e8eacc; color: #171719; backdrop-filter: blur(16px); font-size: 12px; font-weight: 600; }
+    .menu-right { display: flex; gap: 15px; align-items: center; }
+    .app-window { position: absolute; left: 54px; top: 68px; width: 760px; height: 600px; border: 1px solid #424248; border-radius: 13px; overflow: hidden; box-shadow: 0 22px 60px #0009; background: var(--bg); }
+    .app-window .titlebar { grid-template-columns: 180px 1fr 180px; height: 48px; }
+    .uploads-layout { display: grid; grid-template-columns: 190px 1fr; height: calc(100% - 48px); }
+    .workspace-list { padding: 12px 8px; background: #222226; border-right: 1px solid var(--line); }
+    .workspace { display: flex; justify-content: space-between; padding: 8px 10px; border-radius: 6px; font-size: 12px; }
+    .workspace.on { background: #505058; }
+    .upload-detail { padding: 19px 20px; }
+    .file-line { display: grid; grid-template-columns: 1fr 80px 70px; align-items: center; min-height: 42px; border-bottom: 1px solid var(--line-soft); font-size: 11.5px; }
+    .transfer { margin-top: 25px; }
+    .transfer-head { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 12px; }
+    .chunks { display: flex; gap: 4px; margin-top: 12px; flex-wrap: wrap; }
+    .chunk { width: 14px; height: 14px; background: #393940; border-radius: 3px; }
+    .chunk.sent { background: var(--ok); } .chunk.now { background: var(--ink); }
+    .popover { position: absolute; right: 44px; top: 35px; width: 330px; border: 1px solid #55555b; border-radius: 13px; background: #232327f2; backdrop-filter: blur(26px); box-shadow: 0 18px 55px #000b; overflow: hidden; }
+    .popover:before { content: ""; position: absolute; right: 84px; top: -8px; width: 14px; height: 14px; transform: rotate(45deg); background: #29292df2; border-left: 1px solid #55555b; border-top: 1px solid #55555b; }
+    .pop-head { padding: 16px 16px 13px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+    .pop-head strong { font-size: 14px; }
+    .pop-actions { margin-left: auto; display: flex; gap: 6px; }
+    .pop-actions .icon-button { width: 27px; height: 27px; padding: 3px 0; }
+    .pop-body { padding: 5px 14px; }
+    .pop-row { padding: 10px 2px; border-bottom: 1px solid var(--line-soft); }
+    .pop-row-top { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 5px; }
+    .pop-detail { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+    .pop-foot { display: flex; justify-content: space-between; align-items: center; padding: 11px 14px; background: #1d1d20; font-size: 11px; color: var(--muted); }
+  </style>
+</head>
+<body data-view="a">
+  <section class="concept" id="a">
+    <div class="window">
+      <div class="titlebar">
+        <div class="lights"><i class="light red"></i><i class="light yellow"></i><i class="light green"></i></div>
+        <div class="title">Media Pipeline</div>
+        <div class="toolbar"><button class="icon-button">Ⅱ</button><button class="icon-button">↻</button><button class="icon-button">•••</button></div>
+      </div>
+      <div class="split">
+        <aside class="sidebar" style="position:relative">
+          <div class="side-section caption">Monitor</div>
+          <div class="nav selected"><span class="symbol">◉</span><span>Activity</span><span class="badge">3</span></div>
+          <div class="nav"><span class="symbol">⇧</span><span>Uploads</span><span class="badge">5</span></div>
+          <div class="side-section caption">Configure</div>
+          <div class="nav"><span class="symbol">⌘</span><span>Presets</span><span></span></div>
+          <div class="nav"><span class="symbol">⚙</span><span>Settings</span><span></span></div>
+          <div class="sidebar-bottom">
+            <div class="nav"><span class="status-dot"></span><span>Worker running</span><span></span></div>
+            <div class="nav"><span class="symbol">⌂</span><span>Open Pipeline Folder</span><span></span></div>
+          </div>
+        </aside>
+        <main class="detail">
+          <header class="detail-head">
+            <div><h1>Activity</h1><div class="sub">Watching 40 lanes across 5 workspaces</div></div>
+            <div><button>Pause All</button><button>Open Logs</button></div>
+          </header>
+          <div class="summary">
+            <div class="metric"><strong>3</strong><span class="caption">Working</span></div>
+            <div class="metric"><strong>12</strong><span class="caption">Queued</span></div>
+            <div class="metric"><strong class="ok">28</strong><span class="caption">Finished today</span></div>
+            <div class="metric"><strong>VideoToolbox</strong><span class="caption">Encoder</span></div>
+          </div>
+          <div class="activity">
+            <div class="section-title"><span class="caption">In progress</span><span class="mono muted" style="font-size:10px">updated just now</span></div>
+            <div class="row"><span class="status-dot working"></span><strong>LC · bulk</strong><div><span class="mono">summer-campaign.mov</span><div class="progress"><i style="width:64%"></i></div></div><span class="mono muted right">7 / 11</span><button>Pause</button></div>
+            <div class="row"><span class="status-dot working"></span><strong>MD · image-bulk</strong><div><span class="mono">launch-portrait.heic</span><div class="progress"><i style="width:38%"></i></div></div><span class="mono muted right">19 / 50</span><button>Pause</button></div>
+            <div class="row"><span class="status-dot working"></span><strong>YL · asset-store</strong><div><span class="mono">4 source files · 15 sets</span><div class="progress"><i style="width:82%"></i></div></div><span class="mono muted right">98 / 120</span><button>Pause</button></div>
+            <div class="recent">
+              <div class="section-title"><span class="caption">Recent</span><button>Show All</button></div>
+              <div class="row"><span class="status-dot"></span><strong>LC · video-clean</strong><span class="mono muted">interview-07.mp4</span><span class="ok mono right">1 output</span><span class="muted right">14:31</span></div>
+              <div class="row"><span class="status-dot"></span><strong>PL · sets</strong><span class="mono muted">2 source files</span><span class="ok mono right">20 outputs</span><span class="muted right">14:28</span></div>
+              <div class="row"><span class="status-dot fail"></span><strong>MD · bulk</strong><span class="mono muted">damaged-upload.mov</span><span class="fail mono right">failed</span><button>Requeue</button></div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </section>
+
+  <section class="concept" id="b">
+    <div class="window">
+      <div class="titlebar b-titlebar">
+        <div class="lights"><i class="light red"></i><i class="light yellow"></i><i class="light green"></i></div>
+        <div class="segmented"><span class="segment on">Dashboard</span><span class="segment">Presets</span><span class="segment">Uploads</span><span class="segment">Settings</span></div>
+        <div class="toolbar"><button>Open Folder</button><button class="icon-button">•••</button></div>
+      </div>
+      <div class="dash-head">
+        <div class="worker-state"><span class="status-dot"></span><div><strong style="font-size:14px">Worker running</strong><div class="mono muted" style="font-size:10.5px;margin-top:3px">VideoToolbox · poll 2s · root ~/MediaPipeline</div></div></div>
+        <div><button>Pause All</button><button>Restart</button><button>Logs</button></div>
+      </div>
+      <div class="dash-grid">
+        <main class="lanes">
+          <div class="section-title"><div><h1 style="font-size:20px">Queue map</h1><div class="sub">Every workspace and preset at a glance</div></div><span class="mono muted" style="font-size:11px">12 files waiting</span></div>
+          <div class="lane-head caption"><span>Preset</span><span class="cell">LC</span><span class="cell">MD</span><span class="cell">YL</span><span class="cell">PL</span><span class="cell">General</span><span class="cell">Total</span></div>
+          <div class="lane-line"><strong>bulk</strong><span class="cell"><i class="queue-mark busy">3</i></span><span class="cell"><i class="queue-mark">1</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">2</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell mono">6</span></div>
+          <div class="lane-line"><strong>video-clean</strong><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark busy">1</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell mono">1</span></div>
+          <div class="lane-line"><strong>image-clean</strong><span class="cell"><i class="queue-mark">2</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell mono">2</span></div>
+          <div class="lane-line"><strong>image-bulk</strong><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark busy">1</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell mono">1</span></div>
+          <div class="lane-line"><strong>sets</strong><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell mono">0</span></div>
+          <div class="lane-line"><strong>asset-store</strong><span class="cell"><i class="queue-mark busy">4</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell mono">4</span></div>
+          <div class="lane-line"><strong>video-long</strong><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell"><i class="queue-mark">0</i></span><span class="cell mono">0</span></div>
+        </main>
+        <aside class="side-feed">
+          <div class="section-title"><h1 style="font-size:20px">Live feed</h1><button>Clear</button></div>
+          <div class="feed-item"><div class="feed-top"><strong>LC · bulk</strong><span class="mono">64%</span></div><div class="feed-detail">summer-campaign.mov<br>variant 7 of 11</div></div>
+          <div class="feed-item"><div class="feed-top"><strong>MD · image-bulk</strong><span class="mono">38%</span></div><div class="feed-detail">launch-portrait.heic<br>variant 19 of 50</div></div>
+          <div class="feed-item"><div class="feed-top"><strong>YL · asset-store</strong><span class="mono">82%</span></div><div class="feed-detail">4 source files · 15 sets<br>variant 98 of 120</div></div>
+          <div class="feed-item"><div class="feed-top"><strong>PL · sets</strong><span class="ok mono">done</span></div><div class="feed-detail">20 outputs · 14:28</div></div>
+          <div class="feed-item"><div class="feed-top"><strong>MD · bulk</strong><span class="fail mono">failed</span></div><div class="feed-detail">damaged-upload.mov<br>invalid input data</div></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <section class="concept" id="c">
+    <div class="desktop">
+      <div class="menubar"><span>●&nbsp;&nbsp; Finder&nbsp;&nbsp;&nbsp; File&nbsp;&nbsp;&nbsp; Edit&nbsp;&nbsp;&nbsp; View&nbsp;&nbsp;&nbsp; Go&nbsp;&nbsp;&nbsp; Window&nbsp;&nbsp;&nbsp; Help</span><div class="menu-right"><span>◉ 3</span><span>⌁</span><span>◔</span><span>Sat Aug 29&nbsp; 14:33</span></div></div>
+      <div class="app-window">
+        <div class="titlebar"><div class="lights"><i class="light red"></i><i class="light yellow"></i><i class="light green"></i></div><div class="title">Uploads</div><div class="toolbar"><button>Refresh</button></div></div>
+        <div class="uploads-layout">
+          <aside class="workspace-list"><div class="side-section caption">Workspaces</div><div class="workspace on"><strong>LC</strong><span class="badge">3</span></div><div class="workspace"><span>MD</span><span class="badge">1</span></div><div class="workspace"><span>YL</span><span class="badge">1</span></div><div class="workspace"><span>PL</span><span class="faint">0</span></div><div class="workspace"><span>general</span><span class="faint">0</span></div></aside>
+          <main class="upload-detail">
+            <div class="section-title"><div><h1 style="font-size:21px">LC uploads</h1><div class="sub">3 files · 1.8 GB</div></div><button class="primary">Upload All</button></div>
+            <div class="file-line"><span class="mono">campaign-export.zip</span><span class="mono muted">1.2 GB</span><button>Upload</button></div>
+            <div class="file-line"><span class="mono">asset-store-20260829.zip</span><span class="mono muted">584 MB</span><button>Upload</button></div>
+            <div class="file-line"><span class="mono">review-clips.zip</span><span class="mono muted">86 MB</span><button>Upload</button></div>
+            <div class="transfer"><div class="caption" style="margin-bottom:12px">Current transfer</div><div class="transfer-head"><strong class="mono">campaign-export.zip</strong><span class="mono muted">Sending · 768 MB of 1.2 GB</span></div><div class="progress"><i style="width:62%"></i></div><div class="chunks"><i class="chunk sent"></i><i class="chunk sent"></i><i class="chunk sent"></i><i class="chunk sent"></i><i class="chunk sent"></i><i class="chunk sent"></i><i class="chunk now"></i><i class="chunk"></i><i class="chunk"></i><i class="chunk"></i></div></div>
+          </main>
+        </div>
+      </div>
+      <aside class="popover">
+        <div class="pop-head"><span class="status-dot"></span><div><strong>Media Pipeline</strong><div class="mono muted" style="font-size:10px;margin-top:2px">Worker running · VideoToolbox</div></div><div class="pop-actions"><button class="icon-button">Ⅱ</button><button class="icon-button">↻</button></div></div>
+        <div class="pop-body">
+          <div class="pop-row"><div class="pop-row-top"><strong>LC · bulk</strong><span class="mono">64%</span></div><div class="pop-detail">summer-campaign.mov · 7 of 11</div><div class="progress" style="margin-top:8px"><i style="width:64%"></i></div></div>
+          <div class="pop-row"><div class="pop-row-top"><strong>MD · image-bulk</strong><span class="mono">38%</span></div><div class="pop-detail">launch-portrait.heic · 19 of 50</div><div class="progress" style="margin-top:8px"><i style="width:38%"></i></div></div>
+          <div class="pop-row"><div class="pop-row-top"><strong>YL · asset-store</strong><span class="mono">82%</span></div><div class="pop-detail">4 files · 15 sets · 98 of 120</div><div class="progress" style="margin-top:8px"><i style="width:82%"></i></div></div>
+          <div class="pop-row"><div class="pop-row-top"><strong>12 files queued</strong><span class="muted">5 workspaces</span></div><div class="pop-detail">Click to open the full activity window</div></div>
+        </div>
+        <div class="pop-foot"><span>Open Media Pipeline</span><span>Open Logs&nbsp;&nbsp; · &nbsp;&nbsp;Quit</span></div>
+      </aside>
+    </div>
+  </section>
+  <script>
+    const view = new URLSearchParams(location.search).get('view');
+    document.body.dataset.view = ['a','b','c'].includes(view) ? view : 'a';
+  </script>
+</body>
+</html>

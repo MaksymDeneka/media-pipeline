@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AssemblyName>media-pipeline-worker</AssemblyName>
+    <RootNamespace>MediaPipeline.Worker</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MediaPipeline.Core\MediaPipeline.Core.csproj" />
+  </ItemGroup>
+
+</Project>
