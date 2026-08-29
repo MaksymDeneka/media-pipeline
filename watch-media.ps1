@@ -150,17 +150,55 @@ $script:ConfigPresetSections = $script:ConfigDocument.Presets
 # variables are prefixed Default so a preset object passed around as $Preset can never
 # shadow them, which PowerShell's scope resolution would otherwise allow.
 
-$PipelineRoot = Get-Setting 'PipelineRoot' 'D:\MediaPipeline'
+function Resolve-PipelineRootPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [string]$ConfigurationPath
+    )
 
-# How many files are processed at once. Requires PowerShell 7.
+    $expanded = $Root
+    if ($expanded -eq '~') {
+        $expanded = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    }
+    elseif ($expanded.StartsWith('~/') -or $expanded.StartsWith('~\')) {
+        $expanded = Join-Path `
+            -Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) `
+            -ChildPath ($expanded.Substring(2))
+    }
+
+    if ([IO.Path]::IsPathRooted($expanded)) {
+        return [IO.Path]::GetFullPath($expanded)
+    }
+    $baseDirectory = if ($ConfigurationPath) {
+        Split-Path -Parent ([IO.Path]::GetFullPath($ConfigurationPath))
+    }
+    else {
+        (Get-Location).Path
+    }
+    return [IO.Path]::GetFullPath($expanded, $baseDirectory)
+}
+
+$PipelineRoot = Resolve-PipelineRootPath `
+    -Root (Get-Setting 'PipelineRoot' 'D:\MediaPipeline') `
+    -ConfigurationPath $script:ConfigPath
+
+# How many files are processed at once. Requires PowerShell 7. Still-image encodes can
+# hold several full-resolution frames in memory, so do not let an explicit config value
+# exceed the same ceiling used by auto. FFmpeg gets its own single-thread limit below;
+# without both limits, N workers can each create N encoder threads and exhaust memory.
 # "auto" (or blank) = min(6, CPU count).
 $ImageProcessingConcurrencyRaw = Get-Setting 'ImageProcessingConcurrency' 'auto'
 $ImageProcessingConcurrencyParsed = 0
+$MaxImageProcessingConcurrency = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
+$script:ImageProcessingConcurrencyWarning = $null
 if ([int]::TryParse([string]$ImageProcessingConcurrencyRaw, [ref]$ImageProcessingConcurrencyParsed) -and $ImageProcessingConcurrencyParsed -ge 1) {
-    $ImageProcessingConcurrency = $ImageProcessingConcurrencyParsed
+    $ImageProcessingConcurrency = [Math]::Min($ImageProcessingConcurrencyParsed, $MaxImageProcessingConcurrency)
+    if ($ImageProcessingConcurrencyParsed -gt $MaxImageProcessingConcurrency) {
+        $script:ImageProcessingConcurrencyWarning = "ImageProcessingConcurrency requested $ImageProcessingConcurrencyParsed workers; capped at $MaxImageProcessingConcurrency to prevent image-encoder memory exhaustion."
+    }
 }
 else {
-    $ImageProcessingConcurrency = [Math]::Max(1, [Math]::Min(6, [Environment]::ProcessorCount))
+    $ImageProcessingConcurrency = $MaxImageProcessingConcurrency
 }
 
 # Image defaults
@@ -1705,9 +1743,11 @@ function Resolve-ImageProcessingSource {
         "-y",
         "-hide_banner",
         "-loglevel", "error",
+        "-threads", "1",
         "-i", $Path,
         "-frames:v", "1",
         "-map_metadata", "-1",
+        "-threads", "1",
         $tempPath
     )
 
@@ -1974,6 +2014,8 @@ function New-ImageVariant {
         "-y",
         "-hide_banner",
         "-loglevel", "error",
+        "-threads", "1",
+        "-filter_complex_threads", "1",
         "-i", $InputPath,
         "-frames:v", "1",
         "-map_metadata", "-1"
@@ -2006,7 +2048,9 @@ function New-ImageVariant {
         $arguments += @("-compression_level", ([string]$PngCompressionLevel))
     }
 
-    $arguments += @($outputPath)
+    # Each file already runs in a throttled PowerShell worker. Letting the MJPEG/PNG/WebP
+    # encoder create another pool per worker caused large batches to fail with ENOMEM.
+    $arguments += @("-threads", "1", $outputPath)
 
     try {
         Invoke-ExternalTool -Command $script:FFmpegPath -Arguments $arguments | Out-Null
@@ -2506,7 +2550,7 @@ $script:LaneSnapshot = New-Object 'System.Collections.Specialized.OrderedDiction
 function Get-WatcherMutexName {
     param([Parameter(Mandatory = $true)][string]$Root)
 
-    $normalized = $Root.TrimEnd('\', '/').ToLowerInvariant()
+    $normalized = ([IO.Path]::GetFullPath($Root)).TrimEnd('\', '/').ToLowerInvariant()
     if ($normalized -eq 'd:\mediapipeline') {
         return "Global\MediaPipelineWatcher"
     }
@@ -3466,6 +3510,10 @@ function Write-WatcherStartupBanner {
     Write-Log "Pipeline root: $PipelineRoot"
     Write-Log "Workspaces: $($WorkspaceNames -join ', ')"
     Write-Log "Polling every $PollSeconds seconds."
+    Write-Log "Image processing concurrency: $ImageProcessingConcurrency."
+    if ($script:ImageProcessingConcurrencyWarning) {
+        Write-Log $script:ImageProcessingConcurrencyWarning "WARN"
+    }
 
     foreach ($preset in Get-PipelinePresets) {
         $details = New-Object System.Collections.Generic.List[string]

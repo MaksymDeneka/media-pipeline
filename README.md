@@ -165,6 +165,10 @@ Images:
 .jpg, .jpeg, .png, .webp, .heic
 ```
 
+Image processing runs at a maximum of six files at once. Set `ImageProcessingConcurrency = auto`
+to choose that limit from the CPU count. Larger manual values are capped to prevent FFmpeg from
+exhausting memory on batches of full-resolution photos.
+
 Temporary browser download files are ignored:
 
 ```text
@@ -302,9 +306,9 @@ with the watcher about where things are.
 It starts with Windows and lives in the notification area. **Closing the window hides it**;
 the only way to exit is right-clicking the tray icon and choosing **Quit Media Pipeline**.
 
-Windows 11 hides new tray icons behind the `^` chevron by default, which makes a tray-first
-app look like it failed to start. The app asks Windows to show its icon on the taskbar
-instead, which takes effect the next time it starts. Startup can be turned off in Settings.
+At Windows sign-in, the app starts directly in the notification area without opening its
+window. Windows controls whether the icon stays on the taskbar or behind the `^` chevron, and
+the app respects that choice. Startup can be turned off in Settings.
 
 The status bar is always visible and can start, stop, restart, or pause the watcher. Stopping
 asks the watcher to finish the file it is on rather than killing it.
@@ -338,8 +342,9 @@ Put a file in `<workspace>\sync` and it uploads to that workspace on the remote.
 tab lists every workspace; expand one to upload a single file, or use **Upload all** for the
 whole folder. Files upload one at a time.
 
-With `DeleteAfterUpload` on, the local file is removed once the remote copy has been read back
-and confirmed the right size. It is off by default, because it cannot be undone.
+With `DeleteAfterUpload` on, the local file is released only after the remote copy has been read
+back and confirmed the right size. Windows deletes the verified local file. The macOS app moves
+it to Trash, where Finder can recover it until Trash is emptied. The setting is off by default.
 
 ---
 

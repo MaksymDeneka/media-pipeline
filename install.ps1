@@ -197,7 +197,7 @@ try {
         Set-ItemProperty `
             -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `
             -Name 'MediaPipelineTray' `
-            -Value ('"' + $trayExe + '"')
+            -Value ('"' + $trayExe + '" --startup')
 
         Write-Ok 'Tray app registered to start with Windows.'
     }

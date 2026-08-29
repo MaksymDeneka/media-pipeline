@@ -4,3 +4,10 @@ tray-app/bin/
 tray-app/obj/
 tray-app/SelfTest/bin/
 tray-app/SelfTest/obj/
+src/**/bin/
+src/**/obj/
+tests/**/bin/
+tests/**/obj/
+artifacts/
+macos-app/.build/
+macos-app/.swiftpm/
