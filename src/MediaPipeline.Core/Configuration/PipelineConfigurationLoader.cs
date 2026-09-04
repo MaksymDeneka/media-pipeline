@@ -164,6 +164,7 @@ public static class PipelineConfigurationLoader
             Manifest = reader.Bool("Manifest", false),
             ManifestSchema = reader.String("ManifestSchema", "heatup.assetStoreMediaManifest.v1"),
             Normalize = reader.Bool("Normalize", true),
+            EnhancedVariation = reader.Bool("EnhancedVariation", false),
             OnFailure = reader.Enum("OnFailure", defaultFailure),
             Parallel = reader.Enum("Parallel", ParallelMode.OverFiles),
             MaxWidth = Math.Max(2, reader.Int("MaxWidth", video.MaxWidth)),
@@ -208,9 +209,11 @@ public static class PipelineConfigurationLoader
                 ("VideoCopies", "1"), ("ImageCopies", "1"), ("Grouping", "PerSet"),
                 ("SetCount", "15"), ("Batch", "PerGroup"), ("SizeCapMB", "0"),
                 ("Manifest", "true"), ("MinTrimMs", "10"), ("MaxTrimMs", "40")),
+            // V2 ignores Segment (long videos use the bitrate ladder down to 160px
+            // instead of stream-copy splits) and Nvenc/Amf tuning (libx264 slow
+            // two-pass or VideoToolbox single-pass only).
             ["long"] = Values(
-                ("VideoCopies", "3"), ("ImageCopies", "0"), ("Segment", "true"),
-                ("NvencCq", "28"), ("AmfQp", "26")),
+                ("VideoCopies", "3"), ("ImageCopies", "0")),
         };
     }
 

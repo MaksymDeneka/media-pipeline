@@ -1,29 +1,48 @@
+using System.Diagnostics;
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text.RegularExpressions;
 using MediaPipeline.Core.Configuration;
 using MediaPipeline.Core.IO;
 using MediaPipeline.Core.Tools;
 
 namespace MediaPipeline.Core.Media;
 
-public sealed record PreparedSource(string SourcePath, string ProcessingPath, string? TemporaryPath);
+public sealed record PreparedSource(
+    string SourcePath,
+    string ProcessingPath,
+    string? TemporaryPath,
+    string DetectedKind,
+    string SourceHash);
 
 public sealed record CreatedVariant(
     string Path,
     MediaKind Kind,
     int TrimMs,
     double DurationSeconds,
-    MediaInfo MediaInfo);
+    MediaInfo MediaInfo,
+    string Profile,
+    string Seed,
+    int? SourceWidth = null,
+    int? SourceHeight = null);
 
+/// <summary>
+/// V2 media engine ported from heatup sidecar/media-transform (profiles.ts + executor.ts).
+/// Deterministic seeded recipes, no random, no ExifTool, no NVENC/AMF, no segmentation.
+/// - Image: rotation-aware recrop 2-5‰ (enhanced 4-8‰) + lanczos + eq(brightness/contrast/gamma/saturation).
+/// - Video: microtrim 10-40ms (enhanced 20-50ms) + eq + width ladder (1080..160, even dims,
+///   capped by preset MaxWidth) + quality floor + two-pass libx264 slow CBR or single-pass
+///   VideoToolbox, -fs fence + verification.
+/// Metadata is stripped with -map_metadata -1 only.
+/// Media kind for limits and routing comes from probed content (see MediaProbe.DetectIdentity),
+/// never from the filename.
+/// </summary>
 public sealed class FfmpegEngine(
     Toolchain tools,
-    VideoEncoder encoder,
-    VideoOptions videoOptions)
+    VideoEncoder encoder)
 {
     private readonly MediaProbe _probe = new(tools);
 
     public VideoEncoder Encoder { get; } = encoder;
+    public bool IsVideoToolbox => Encoder.Name == "h264_videotoolbox";
 
     public async Task<PreparedSource> PrepareAsync(
         PresetOptions preset,
@@ -32,50 +51,134 @@ public sealed class FfmpegEngine(
         MediaKind kind,
         CancellationToken cancellationToken = default)
     {
-        if (kind == MediaKind.Image && await IsHeicAsync(sourcePath, cancellationToken))
+        // Heatup validateRetainedMediaSource: probe + hash happen in parallel,
+        // enforce kind byte limits + decode dimensions, decode check one frame.
+        // Kind comes from probed content, never from the filename: bytes win.
+        // IO/parse failures are data failures (per-file isolation), never infra:
+        // wrap them so a vanishing or truncated input cannot discard siblings.
+        // The whole validation phase gets its own budget (heatup: 30s probe, 2min
+        // validate): a hung probe/decode/hash must fail the file, not the lane.
+        var outerToken = cancellationToken;
+        using var validationTimeout = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
+        validationTimeout.CancelAfter(TimeSpan.FromMinutes(5));
+        cancellationToken = validationTimeout.Token;
+
+        var probeTask = _probe.ReadAsync(sourcePath, cancellationToken);
+        var hashTask = MediaTransformSeed.HashFileAsync(sourcePath, cancellationToken);
+        // If one sibling fails fast, stop and settle the other before throwing: a
+        // background hash holding the file open can otherwise race the failed-move
+        // (sharing violation on Windows) or burn I/O pointlessly. The settle itself
+        // is bounded: a sibling hung in a synchronous open is abandoned (its fault
+        // observed so it cannot crash the process) rather than wedging the lane.
+        async Task QuiesceValidationAsync()
         {
-            var temporary = Path.Combine(
-                Path.GetTempPath(),
-                $"media-pipeline-heic-{Guid.NewGuid():n}.png");
             try
             {
-                await RunRequiredAsync(
-                    tools.FFmpeg,
-                    [
-                        "-y", "-hide_banner", "-loglevel", "error", "-threads", "1",
-                        "-i", sourcePath, "-frames:v", "1", "-map_metadata", "-1",
-                        "-threads", "1", temporary,
-                    ],
-                    cancellationToken);
-                return new PreparedSource(sourcePath, temporary, temporary);
+                validationTimeout.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            var settled = Task.WhenAll(probeTask, hashTask);
+            if (await Task.WhenAny(settled, Task.Delay(TimeSpan.FromSeconds(30), outerToken)) != settled)
+            {
+                _ = settled.ContinueWith(
+                    static task => _ = task.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+                return;
+            }
+
+            try
+            {
+                await settled;
             }
             catch
             {
-                TryDelete(temporary);
-                throw;
             }
         }
 
-        if (kind == MediaKind.Video && preset.Normalize && preset.Segment &&
-            Path.GetExtension(sourcePath).Equals(".mov", StringComparison.OrdinalIgnoreCase))
+        MediaInfo info;
+        string sourceHash;
+        try
         {
-            Directory.CreateDirectory(lane.Work);
-            var temporary = Path.Combine(
-                lane.Work,
-                Path.GetFileNameWithoutExtension(sourcePath) + $"-{Guid.NewGuid():n}.mp4");
-            try
+            await Task.WhenAll(probeTask, hashTask);
+            info = await probeTask;
+            sourceHash = await hashTask;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            await QuiesceValidationAsync();
+            throw new InvalidDataException(
+                $"Media preparation source is unreadable: '{sourcePath}'. {exception.Message}", exception);
+        }
+        catch (OperationCanceledException exception) when (!outerToken.IsCancellationRequested)
+        {
+            await QuiesceValidationAsync();
+            throw new InvalidDataException(
+                $"Media preparation validation timed out after 5 minutes: '{sourcePath}'.", exception);
+        }
+
+        if (info.Width is null or <= 0 || info.Height is null or <= 0)
+        {
+            throw new InvalidDataException($"Media preparation source has no readable video frame: '{sourcePath}'.");
+        }
+
+        if (info.Width > MediaTransformPlanner.MaxSourceDimension ||
+            info.Height > MediaTransformPlanner.MaxSourceDimension ||
+            (long)info.Width.Value * info.Height.Value > MediaTransformPlanner.MaxSourcePixels)
+        {
+            throw new InvalidDataException($"Media preparation source exceeds its safe decode dimensions: '{sourcePath}'.");
+        }
+
+        var (detectedKind, _) = MediaProbe.DetectIdentity(info);
+        long byteCount;
+        try
+        {
+            byteCount = new FileInfo(sourcePath).Length;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException(
+                $"Media preparation source is unreadable: '{sourcePath}'. {exception.Message}", exception);
+        }
+
+        var limit = detectedKind == "video"
+            ? MediaTransformPlanner.MaxVideoSourceBytes
+            : MediaTransformPlanner.MaxImageSourceBytes;
+        if (byteCount < 1 || byteCount > limit)
+        {
+            throw new InvalidDataException($"Media preparation source exceeds its kind-specific byte limit: '{sourcePath}'.");
+        }
+
+        if (detectedKind == "video")
+        {
+            var duration = info.DurationSeconds;
+            if (duration is null or <= 0.1)
             {
-                await RemuxAsync(sourcePath, temporary, cancellationToken);
-                return new PreparedSource(sourcePath, temporary, temporary);
-            }
-            catch
-            {
-                TryDelete(temporary);
-                throw;
+                throw new InvalidDataException($"Video preparation source has no usable duration: '{sourcePath}'.");
             }
         }
 
-        return new PreparedSource(sourcePath, sourcePath, null);
+        try
+        {
+            await RunRequiredAsync(
+                tools.FFmpeg,
+                ["-v", "error", "-i", sourcePath, "-frames:v", "1", "-f", "null", "-"],
+                cancellationToken);
+        }
+        catch (OperationCanceledException exception) when (!outerToken.IsCancellationRequested)
+        {
+            throw new InvalidDataException(
+                $"Media preparation validation timed out after 5 minutes: '{sourcePath}'.", exception);
+        }
+
+        // No HEIC temp PNG, no MOV remux – ffmpeg handles normalization directly
+        // via the planned output extension + filters, like heatup. The source hash
+        // is captured once here so variants never re-read the input for comparison.
+        return new PreparedSource(sourcePath, sourcePath, null, detectedKind, sourceHash);
     }
 
     public static void RemoveTemporarySource(PreparedSource source)
@@ -90,61 +193,73 @@ public sealed class FfmpegEngine(
         PreparedSource source,
         string outputDirectory,
         PresetOptions preset,
+        string seed,
+        int ordinal,
         CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(outputDirectory);
-        var info = await _probe.ReadAsync(source.ProcessingPath, cancellationToken);
+        var info = await WithFileBudgetAsync(
+            token => _probe.ReadAsync(source.ProcessingPath, token),
+            $"Image probe for '{source.SourcePath}'",
+            cancellationToken);
         if (info.Width is null or <= 0 || info.Height is null or <= 0)
         {
             throw new InvalidDataException($"Could not read image dimensions from '{source.SourcePath}'.");
         }
 
-        var extension = Path.GetExtension(source.SourcePath).Equals(".webp", StringComparison.OrdinalIgnoreCase)
-            ? ".webp"
-            : ".jpg";
-        var outputPath = OutputNameGenerator.NewFilePath(outputDirectory, extension);
-        var arguments = new List<string>
-        {
-            "-y", "-hide_banner", "-loglevel", "error", "-threads", "1",
-            "-filter_complex_threads", "1", "-i", source.ProcessingPath,
-            "-frames:v", "1", "-map_metadata", "-1",
-        };
+        var (_, probedExtension) = MediaProbe.DetectIdentity(info);
+        var sourceExtension = probedExtension;
+        var planned = MediaTransformPlanner.PlanImage(
+            seed,
+            source.ProcessingPath,
+            "__planning__",
+            sourceExtension,
+            info.Width.Value,
+            info.Height.Value,
+            info.RotationDegrees,
+            preset.EnhancedVariation);
 
-        if (info.Width >= 200 && info.Height >= 200)
-        {
-            var minCrop = Math.Min(preset.CropMinPermille, preset.CropMaxPermille);
-            var maxCrop = Math.Max(preset.CropMinPermille, preset.CropMaxPermille);
-            var cropPermille = RandomNumberGenerator.GetInt32(minCrop, maxCrop + 1);
-            var cropPixelsX = Math.Max(1, (int)Math.Floor(info.Width.Value * cropPermille / 1000.0));
-            var cropPixelsY = Math.Max(1, (int)Math.Floor(info.Height.Value * cropPermille / 1000.0));
-            var cropWidth = Math.Max(1, info.Width.Value - cropPixelsX * 2);
-            var cropHeight = Math.Max(1, info.Height.Value - cropPixelsY * 2);
-            var offsetX = RandomNumberGenerator.GetInt32(cropPixelsX * 2 + 1);
-            var offsetY = RandomNumberGenerator.GetInt32(cropPixelsY * 2 + 1);
-            var filter =
-                $"crop={cropWidth}:{cropHeight}:{offsetX}:{offsetY},scale={info.Width}:{info.Height}";
-            arguments.AddRange(["-filter_complex", $"[0:v:0]{filter}[v]", "-map", "[v]"]);
-        }
-
-        if (extension == ".jpg")
-        {
-            var quality = source.TemporaryPath is null
-                ? preset.JpegQuality
-                : preset.ConvertedJpegQuality;
-            arguments.AddRange(["-q:v", quality.ToString(CultureInfo.InvariantCulture)]);
-        }
-        else
-        {
-            arguments.AddRange(["-quality", "92"]);
-        }
-
-        arguments.AddRange(["-threads", "1", outputPath]);
+        var outputPath = OutputNameGenerator.NewFilePath(outputDirectory, planned.OutputExtension);
+        AssertOutputExtension(outputPath, planned.OutputExtension);
+        var args = ReplaceExactPath(planned.Args, "__planning__", outputPath);
+        // Heatup -fs fence: output must fit its kind limit.
+        var fenced = InsertFsFence(args, planned.OutputByteLimit, outputPath);
 
         try
         {
-            await RunRequiredAsync(tools.FFmpeg, arguments, cancellationToken);
-            await ClearMetadataAsync(outputPath, cancellationToken);
-            return new CreatedVariant(outputPath, MediaKind.Image, 0, 0, info);
+            // Per-invocation budgets like heatup's per-command timeouts.
+            await RunBoundedAsync(
+                "Image transform", fenced, TimeSpan.FromMinutes(5),
+                source.ProcessingPath, cancellationToken);
+            var outputStats = new FileInfo(outputPath);
+            if (!outputStats.Exists || outputStats.Length <= 0 || outputStats.Length > planned.OutputByteLimit)
+            {
+                throw new InvalidOperationException("Media transform output is empty, unreadable, or exceeds its size limit.");
+            }
+
+            var outputProbe = await WithFileBudgetAsync(
+                token => _probe.ReadAsync(outputPath, token),
+                $"Image output probe for '{outputPath}'",
+                cancellationToken);
+            if (outputProbe.Width is null or <= 0 || outputProbe.Height is null or <= 0)
+            {
+                throw new InvalidOperationException("Media transform output has no readable video frame.");
+            }
+
+            await RunBoundedAsync(
+                "Image decode check", ["-v", "error", "-i", outputPath, "-map", "0:v:0", "-f", "null", "-"],
+                TimeSpan.FromMinutes(5), outputPath, cancellationToken);
+
+            var outputHash = await WithFileBudgetAsync(
+                token => MediaTransformSeed.HashFileAsync(outputPath, token),
+                $"Image output hash for '{outputPath}'",
+                cancellationToken);
+            if (string.Equals(source.SourceHash, outputHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Media transform output is byte-identical to its immutable source.");
+            }
+
+            return new CreatedVariant(outputPath, MediaKind.Image, 0, 0, outputProbe, planned.Profile, seed, info.Width, info.Height);
         }
         catch
         {
@@ -158,59 +273,436 @@ public sealed class FfmpegEngine(
         string outputDirectory,
         PresetOptions preset,
         double sourceDurationSeconds,
-        int trimMs,
+        long sourceByteCount,
+        string seed,
+        int ordinal,
+        string? sourceHash = null,
         CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(outputDirectory);
-        var outputPath = OutputNameGenerator.NewFilePath(outputDirectory, ".mp4");
-        var targetDuration = Math.Max(0.1, sourceDurationSeconds - trimMs / 1000.0);
-        var quality = Encoder.Name switch
+        var probe = await WithFileBudgetAsync(
+            token => _probe.ReadAsync(inputPath, token),
+            $"Video input probe for '{inputPath}'",
+            cancellationToken);
+        if (probe.Width is null or <= 0 || probe.Height is null or <= 0)
         {
-            "h264_nvenc" => preset.NvencCq,
-            "h264_amf" => preset.AmfQp,
-            _ => preset.Crf,
+            throw new InvalidDataException($"Could not read video dimensions from '{inputPath}'.");
+        }
+
+        var outputPath = OutputNameGenerator.NewFilePath(outputDirectory, ".mp4");
+        // Overshoot retries: the recipe's 4% headroom (limit*0.96 target) usually
+        // absorbs CBR overshoot, but small files plus +faststart muxing overhead can
+        // still land over the -fs fence. Retry with the same seed (same trim/eq):
+        // first lower byte targets at the same rung, then lower rungs (each with
+        // its own [0.88, 0.80] targets, since a lower rung at 0.88 can still beat a
+        // same-rung 0.80 on quality per byte). Attempt 1 is heatup-identical when
+        // the preset cap is >= 1080 (preset cap, ratio 0.96). Plans that would
+        // encode byte-identical argv to an attempted plan are skipped without
+        // running ffmpeg. Bounded by maxAttempts.
+        static double[] RatiosForCap(int capIndex) => capIndex == 0 ? [0.96, 0.88, 0.80] : [0.88, 0.80];
+        const int maxAttempts = 24;
+        var attemptCaps = new List<int> { preset.MaxWidth };
+        var attemptedSignatures = new HashSet<string>(StringComparer.Ordinal);
+        OutputOvershootException? overshoot = null;
+        Exception? lastPlanningError = null;
+        var executions = 0;
+        var ratioIndex = 0;
+        var capIndex = 0;
+
+        // A quality-floor failure means this rung can never fit: skip the ratio
+        // phase (a lower target only lowers the bitrate further) and descend rungs.
+        bool AdvanceSchedule(int attemptedWidth, bool includeRatios = true)
+        {
+            if (includeRatios && ratioIndex + 1 < RatiosForCap(capIndex).Length)
+            {
+                ratioIndex++;
+                return true;
+            }
+
+            foreach (var rung in MediaTransformPlanner.VideoWidthLadderDescending(int.MaxValue))
+            {
+                if (rung < attemptedWidth && !attemptCaps.Contains(rung))
+                {
+                    attemptCaps.Add(rung);
+                }
+            }
+
+            if (attemptCaps.Count == capIndex + 1)
+            {
+                var next = attemptedWidth / 2 * 2 - 2;
+                if (next >= 32 && next < attemptedWidth)
+                {
+                    attemptCaps.Add(next);
+                }
+            }
+
+            capIndex++;
+            ratioIndex = 0;
+            return capIndex < attemptCaps.Count;
+        }
+
+        // Hash once up front: retries must never re-read a multi-GB input.
+        sourceHash ??= await WithFileBudgetAsync(
+            token => MediaTransformSeed.HashFileAsync(inputPath, token),
+            $"Video source hash for '{inputPath}'",
+            cancellationToken);
+
+        // Cumulative bound for the whole retry schedule: a persistently failing
+        // input (e.g. corrupt output landing at the fence every time) must surface
+        // its last error instead of re-encoding for days.
+        var retryStopwatch = Stopwatch.StartNew();
+        var maxRetryDuration = TimeSpan.FromMinutes(120);
+
+        while (executions < maxAttempts && capIndex < attemptCaps.Count)
+        {
+            var ratios = RatiosForCap(capIndex);
+            var ratio = ratioIndex < ratios.Length ? ratios[ratioIndex] : 0.88;
+            MediaTransformPlanner.PlannedVideoTransform planned;
+            try
+            {
+                planned = MediaTransformPlanner.PlanVideo(
+                    seed,
+                    ordinal,
+                    inputPath,
+                    "__planning__",
+                    probe.Width.Value,
+                    probe.Height.Value,
+                    probe.RotationDegrees,
+                    sourceDurationSeconds,
+                    sourceByteCount,
+                    IsVideoToolbox,
+                    preset.EnhancedVariation,
+                    attemptCaps[capIndex],
+                    ratio);
+            }
+            catch (VideoQualityFloorException exception)
+            {
+                lastPlanningError = exception;
+                if (ratio >= 0.96)
+                {
+                    // Missed at the selection ratio: no rung at/above this cap can
+                    // fit (the planner already tried them all), so jump straight
+                    // below the ladder instead of re-walking rungs that just failed.
+                    var next = Math.Min(attemptCaps[capIndex], 160) / 2 * 2 - 2;
+                    if (next >= 32 && !attemptCaps.Contains(next))
+                    {
+                        attemptCaps.Add(next);
+                        capIndex = attemptCaps.Count - 1;
+                    }
+                    else
+                    {
+                        capIndex++;
+                    }
+                }
+                else if (!AdvanceSchedule(attemptCaps[capIndex], includeRatios: false))
+                {
+                    // Missed only because this retry lowered the byte target: a
+                    // narrower rung may still fit, so descend rungs (skipping
+                    // further ratio cuts, which can only lower the bitrate more).
+                    break;
+                }
+
+                ratioIndex = 0;
+                if (capIndex >= attemptCaps.Count)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
+            if (!attemptedSignatures.Add(PlanSignature(planned)))
+            {
+                if (!AdvanceSchedule(PlannedWidth(planned)))
+                {
+                    break;
+                }
+
+                continue;
+            }
+
+            executions++;
+            try
+            {
+                return await ExecuteVideoPlanAsync(
+                    planned,
+                    inputPath,
+                    outputPath,
+                    seed,
+                    executions,
+                    sourceHash,
+                    cancellationToken);
+            }
+            catch (OutputOvershootException exception)
+            {
+                overshoot = exception;
+                if (retryStopwatch.Elapsed > maxRetryDuration ||
+                    !AdvanceSchedule(exception.AttemptedWidth))
+                {
+                    break;
+                }
+            }
+        }
+
+        throw (Exception?)overshoot ?? lastPlanningError
+            ?? new InvalidOperationException("Media transform output is empty, unreadable, or exceeds its size limit.");
+    }
+
+    private async Task<CreatedVariant> ExecuteVideoPlanAsync(
+        MediaTransformPlanner.PlannedVideoTransform planned,
+        string inputPath,
+        string outputPath,
+        string seed,
+        int attemptNumber,
+        string sourceHash,
+        CancellationToken cancellationToken)
+    {
+        AssertOutputExtension(outputPath, planned.OutputExtension);
+        // Placeholders are full argv elements, replaced by exact match so an input
+        // path that happens to contain the placeholder text is never rewritten.
+        // Suffix the passlog per attempt so a retry never reads the previous
+        // attempt's two-pass statistics.
+        var passlogPrefix = planned.PasslogPrefix is not null ? $"{outputPath}.passlog.{attemptNumber}" : null;
+        var args = ReplaceExactPath(planned.Args, "__planning__", outputPath);
+        if (planned.PasslogPrefix is not null && passlogPrefix is not null)
+        {
+            args = ReplaceExactPath(args, "__planning__.passlog", passlogPrefix);
+        }
+
+        var fenced = InsertFsFence(args, planned.OutputByteLimit, outputPath);
+        List<string>? firstPass = null;
+        if (planned.FirstPassArgs is not null && passlogPrefix is not null)
+        {
+            firstPass = ReplaceExactPath(planned.FirstPassArgs, "__planning__", outputPath);
+            firstPass = ReplaceExactPath(firstPass, "__planning__.passlog", passlogPrefix);
+        }
+
+        var trimMs = planned.Evidence.TryGetValue("trimMicroseconds", out var trimObj) switch
+        {
+            { } when trimObj is long trimUsLong => (int)(trimUsLong / 1000),
+            { } when trimObj is int trimUsInt => trimUsInt / 1000,
+            _ => 0,
         };
-        var maxBitrate = preset.SizeCapMB > 0
-            ? PrimaryMaxVideoBitrate(
-                targetDuration, preset.SizeCapMB, preset.AudioBitrate, preset.MaxrateScale)
-            : 0;
+        var attemptedWidth = PlannedWidth(planned);
 
         try
         {
-            await EncodeVideoAsync(
-                inputPath,
-                outputPath,
-                quality,
-                preset.MaxWidth,
-                preset.AudioBitrate,
-                durationSeconds: targetDuration,
-                maxVideoBitrateKbps: maxBitrate,
-                cancellationToken: cancellationToken);
-            await ClearMetadataAsync(outputPath, cancellationToken);
-
-            if (preset.SizeCapMB > 0)
+            // Per-invocation budgets like heatup's per-command timeouts (30min per
+            // pass, 5min decode): a hung ffmpeg fails the file, never the lane.
+            if (firstPass is not null)
             {
-                await EnforceSizeCapAsync(
-                    outputPath,
-                    preset.SizeCapMB,
-                    preset.MaxWidth,
-                    preset.SizeCapFallbackMaxWidth,
-                    preset.AudioBitrate,
-                    inputPath,
-                    sourceDurationSeconds,
-                    trimMs,
-                    cancellationToken);
+                await RunBoundedAsync(
+                    "Video transform first pass", firstPass, TimeSpan.FromMinutes(30),
+                    inputPath, cancellationToken);
             }
 
-            var info = await _probe.ReadAsync(outputPath, cancellationToken);
-            return new CreatedVariant(outputPath, MediaKind.Video, trimMs, targetDuration, info);
+            // Run the fenced pass directly: when -fs truncates, ffmpeg still exits
+            // 0 with a short file, so detect the fence hit from stderr (StandardError
+            // only: CombinedOutput could false-positive on a file path containing
+            // the phrase). The message text is ffmpeg's ("File size limit exceeded");
+            // if a future build rewords it, the size-near-fence rule below still
+            // catches truncations.
+            var secondPass = await RunBoundedProcessAsync(
+                fenced, TimeSpan.FromMinutes(30), inputPath, cancellationToken);
+            var fenceHit = secondPass.StandardError.Contains(
+                "File size limit exceeded", StringComparison.OrdinalIgnoreCase);
+            if (!secondPass.Succeeded && !fenceHit)
+            {
+                var detail = secondPass.CombinedOutput.Trim();
+                throw new InvalidOperationException(
+                    detail.Length > 0
+                        ? $"'{Path.GetFileName(tools.FFmpeg)}' exited with {secondPass.ExitCode}: {detail}"
+                        : $"'{Path.GetFileName(tools.FFmpeg)}' exited with {secondPass.ExitCode}.");
+            }
+
+            var outputStats = new FileInfo(outputPath);
+            if (!outputStats.Exists || outputStats.Length <= 0)
+            {
+                throw new InvalidOperationException("Media transform output is empty or unreadable.");
+            }
+
+            if (outputStats.Length > planned.OutputByteLimit)
+            {
+                throw new OutputOvershootException(
+                    planned.OutputByteLimit, outputStats.Length, attemptedWidth, fenceHit, null);
+            }
+
+            // Near-fence outputs (within 2% under the limit) with a bad duration
+            // window are far more likely truncated than genuinely broken: legit
+            // CBR encodes target at most 96% of the limit, so a file sitting at
+            // the fence with a short duration is a truncation. Decode failures
+            // only retry on an explicit fence hit – a corrupt encode must fail
+            // fast with its real error, not burn retries relabeled "overshoot".
+            var nearFence = outputStats.Length >= (long)(planned.OutputByteLimit * 0.98);
+            MediaInfo outputProbe;
+            try
+            {
+                outputProbe = await VerifyVideoProbeAndDurationAsync(outputPath, planned, cancellationToken);
+            }
+            catch (InvalidOperationException exception) when (fenceHit || nearFence)
+            {
+                throw new OutputOvershootException(
+                    planned.OutputByteLimit, outputStats.Length, attemptedWidth, fenceHit, exception);
+            }
+
+            // A corrupt encode must fail fast with its real error: only an explicit
+            // fence hit justifies relabeling a decode failure as truncation.
+            try
+            {
+                await RunBoundedAsync(
+                    "Video decode check",
+                    ["-v", "error", "-i", outputPath, "-map", "0:v:0", "-f", "null", "-"],
+                    TimeSpan.FromMinutes(5), outputPath, cancellationToken);
+            }
+            catch (InvalidOperationException exception) when (fenceHit)
+            {
+                throw new OutputOvershootException(
+                    planned.OutputByteLimit, outputStats.Length, attemptedWidth, fenceHit, exception);
+            }
+
+            var outputHash = await WithFileBudgetAsync(
+                token => MediaTransformSeed.HashFileAsync(outputPath, token),
+                $"Video output hash for '{outputPath}'",
+                cancellationToken);
+            if (string.Equals(sourceHash, outputHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Media transform output is byte-identical to its immutable source.");
+            }
+
+            int? sourceWidth = planned.Evidence.TryGetValue("sourceWidth", out var sourceWidthObj) && sourceWidthObj is int sw
+                ? sw
+                : null;
+            int? sourceHeight = planned.Evidence.TryGetValue("sourceHeight", out var sourceHeightObj) && sourceHeightObj is int sh
+                ? sh
+                : null;
+            return new CreatedVariant(
+                outputPath, MediaKind.Video, trimMs, planned.TargetDurationSeconds,
+                outputProbe, planned.Profile, seed, sourceWidth, sourceHeight);
         }
         catch
         {
             TryDelete(outputPath);
             throw;
         }
+        finally
+        {
+            if (passlogPrefix is not null)
+            {
+                RemovePasslogs(passlogPrefix);
+            }
+        }
     }
+
+    /// <summary>
+    /// Runs one ffmpeg invocation with its own budget. A timeout is a per-file
+    /// data failure, never a worker stop: it converts only when the outer token
+    /// is not cancelled, so genuine shutdown still flows as cancellation.
+    /// </summary>
+    private async Task RunBoundedAsync(
+        string description,
+        IEnumerable<string> arguments,
+        TimeSpan budget,
+        string pathForMessage,
+        CancellationToken outerToken)
+    {
+        using var budgetTimeout = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
+        budgetTimeout.CancelAfter(budget);
+        try
+        {
+            await RunRequiredAsync(tools.FFmpeg, arguments, budgetTimeout.Token);
+        }
+        catch (OperationCanceledException exception) when (!outerToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException(
+                $"{description} timed out after {budget.TotalMinutes:g} minute(s): '{pathForMessage}'.", exception);
+        }
+    }
+
+    private async Task<ProcessResult> RunBoundedProcessAsync(
+        IEnumerable<string> arguments,
+        TimeSpan budget,
+        string pathForMessage,
+        CancellationToken outerToken)
+    {
+        using var budgetTimeout = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
+        budgetTimeout.CancelAfter(budget);
+        try
+        {
+            return await ProcessRunner.RunAsync(tools.FFmpeg, arguments, budgetTimeout.Token);
+        }
+        catch (OperationCanceledException exception) when (!outerToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException(
+                $"Video transform pass timed out after {budget.TotalMinutes:g} minute(s): '{pathForMessage}'.", exception);
+        }
+    }
+
+    /// <summary>
+    /// Bounds a variant-phase file read (probe/hash) that otherwise runs on the
+    /// unbounded worker token: a hung network file must fail the file, not wedge
+    /// the lane. Timeouts convert to data failures; genuine shutdown still flows
+    /// as cancellation.
+    /// </summary>
+    private static async Task<T> WithFileBudgetAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        string description,
+        CancellationToken outerToken)
+    {
+        using var budgetTimeout = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
+        budgetTimeout.CancelAfter(TimeSpan.FromMinutes(5));
+        try
+        {
+            return await operation(budgetTimeout.Token);
+        }
+        catch (OperationCanceledException exception) when (!outerToken.IsCancellationRequested)
+        {
+            throw new InvalidDataException($"{description} timed out after 5 minutes.", exception);
+        }
+    }
+
+    private async Task<MediaInfo> VerifyVideoProbeAndDurationAsync(
+        string outputPath,
+        MediaTransformPlanner.PlannedVideoTransform planned,
+        CancellationToken cancellationToken)
+    {
+        var outputProbe = await WithFileBudgetAsync(
+            token => _probe.ReadAsync(outputPath, token),
+            $"Video output probe for '{outputPath}'",
+            cancellationToken);
+        if (outputProbe.Width is null or <= 0 || outputProbe.Height is null or <= 0)
+        {
+            throw new InvalidOperationException("Media transform output has no readable video frame.");
+        }
+
+        var targetDuration = planned.TargetDurationSeconds;
+        var minimumDuration = targetDuration - Math.Max(0.25, targetDuration * 0.02);
+        var outputDuration = outputProbe.DurationSeconds;
+        if (!double.IsFinite(targetDuration) ||
+            outputDuration is null ||
+            outputDuration < minimumDuration ||
+            outputDuration > targetDuration + 1)
+        {
+            throw new InvalidOperationException("Media transform video output is truncated or has an invalid duration.");
+        }
+
+        return outputProbe;
+    }
+
+    private static string PlanSignature(MediaTransformPlanner.PlannedVideoTransform planned)
+    {
+        static string Value(Dictionary<string, object?> evidence, string key) =>
+            evidence.TryGetValue(key, out var value) ? value?.ToString() ?? "" : "";
+        return string.Join("|",
+            Value(planned.Evidence, "outputWidth"),
+            Value(planned.Evidence, "outputHeight"),
+            Value(planned.Evidence, "videoBitrateBps"),
+            Value(planned.Evidence, "audioBitrateBps"),
+            Value(planned.Evidence, "targetOutputBytes"),
+            Value(planned.Evidence, "profile"));
+    }
+
+    private static int PlannedWidth(MediaTransformPlanner.PlannedVideoTransform planned) =>
+        planned.Evidence.TryGetValue("outputWidth", out var widthObj) && widthObj is int width ? width : 0;
 
     public async Task<IReadOnlyList<(SegmentPlan Plan, string Path)>> ExtractSegmentsAsync(
         PreparedSource source,
@@ -219,406 +711,122 @@ public sealed class FfmpegEngine(
         double durationSeconds,
         CancellationToken cancellationToken = default)
     {
-        Directory.CreateDirectory(lane.Work);
-        var plan = SegmentPlanner.Plan(
-            durationSeconds,
-            preset.SegmentTargetSeconds,
-            preset.SegmentMinSeconds);
-        var token = Guid.NewGuid().ToString("n")[..8];
-        var results = new List<(SegmentPlan Plan, string Path)>(plan.Count);
-        string? currentPath = null;
-
-        try
-        {
-            foreach (var segment in plan)
-            {
-                var path = Path.Combine(lane.Work, $"segment_{token}_{segment.Index:D3}.mp4");
-                currentPath = path;
-                await RunRequiredAsync(
-                    tools.FFmpeg,
-                    [
-                        "-y",
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-ss",
-                        Number(segment.StartSeconds),
-                        "-i",
-                        source.ProcessingPath,
-                        "-t",
-                        Number(segment.DurationSeconds),
-                        "-map",
-                        "0:v:0",
-                        "-map",
-                        "0:a:0?",
-                        "-dn",
-                        "-c",
-                        "copy",
-                        "-map_metadata",
-                        "-1",
-                        "-movflags",
-                        "+faststart",
-                        path,
-                    ],
-                    cancellationToken);
-                results.Add((segment, path));
-                currentPath = null;
-            }
-
-            return results;
-        }
-        catch
-        {
-            foreach (var result in results)
-            {
-                TryDelete(result.Path);
-            }
-            TryDelete(currentPath);
-
-            throw;
-        }
+        // Kept for backward compat but V2 no longer segments – heatup handles long
+        // videos with its bitrate ladder down to 160px instead of stream-copy splits.
+        await Task.CompletedTask;
+        return [(new SegmentPlan(1, -1, durationSeconds), source.ProcessingPath)];
     }
 
     public async Task<double> DurationAsync(string path, CancellationToken cancellationToken = default)
     {
-        var info = await _probe.ReadAsync(path, cancellationToken);
+        var info = await WithFileBudgetAsync(
+            token => _probe.ReadAsync(path, token),
+            $"Duration probe for '{path}'",
+            cancellationToken);
         return info.DurationSeconds is > 0
             ? info.DurationSeconds.Value
             : throw new InvalidDataException($"Could not read a valid duration from '{path}'.");
     }
 
-    public async Task<bool> RecompressIfOversizedAsync(
+    public Task<bool> RecompressIfOversizedAsync(
         string path,
         PresetOptions preset,
         CancellationToken cancellationToken = default)
     {
-        if (preset.SizeCapMB <= 0 || !File.Exists(path))
-        {
-            return false;
-        }
-
-        var maxBytes = (long)(preset.SizeCapMB * 1024 * 1024);
-        if (new FileInfo(path).Length <= maxBytes)
-        {
-            return false;
-        }
-
-        var duration = await DurationAsync(path, cancellationToken);
-        await EnforceSizeCapAsync(
-            path,
-            preset.SizeCapMB,
-            preset.MaxWidth,
-            preset.SizeCapFallbackMaxWidth,
-            preset.AudioBitrate,
-            path,
-            duration,
-            trimMs: 0,
-            cancellationToken);
-        return true;
+        // V2 precomputes its bitrate ladder to fit min(10MiB, sourceBytes); no post-hoc
+        // size-cap recompression passes. Kept as a no-op for CLI compat.
+        return Task.FromResult(false);
     }
 
-    private async Task RemuxAsync(
-        string inputPath,
-        string outputPath,
-        CancellationToken cancellationToken)
+    private sealed class OutputOvershootException(
+        long limitBytes,
+        long actualBytes,
+        int attemptedWidth,
+        bool fenceHit,
+        Exception? verificationError)
+        : InvalidOperationException(
+            actualBytes > limitBytes
+                ? $"Media transform output ({actualBytes} bytes) exceeds its size limit ({limitBytes} bytes). " +
+                  $"Fence hit: {fenceHit}." +
+                  (verificationError is null ? "" : $" Verification: {verificationError.Message}")
+                : $"Media transform output ({actualBytes} bytes) sits at its size limit ({limitBytes} bytes) " +
+                  $"with failed verification (truncation suspected). Fence hit: {fenceHit}." +
+                  (verificationError is null ? "" : $" Verification: {verificationError.Message}"),
+            verificationError)
     {
-        await RunRequiredAsync(
-            tools.FFmpeg,
-            [
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                inputPath,
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a:0?",
-                "-dn",
-                "-c",
-                "copy",
-                "-map_metadata",
-                "-1",
-                "-movflags",
-                "+faststart",
-                outputPath,
-            ],
-            cancellationToken);
+        public int AttemptedWidth { get; } = attemptedWidth;
     }
 
-    private async Task<bool> IsHeicAsync(string path, CancellationToken cancellationToken)
+    private static List<string> ReplaceExactPath(IReadOnlyList<string> args, string oldValue, string newValue)
     {
-        if (MediaClassifier.IsHeic(path))
+        // Exact-element match only: placeholders are full argv elements, and an
+        // input path that happens to contain the placeholder text must never be
+        // rewritten.
+        var result = new List<string>(args.Count);
+        foreach (var arg in args)
         {
-            return true;
+            result.Add(arg.Equals(oldValue, StringComparison.Ordinal) ? newValue : arg);
         }
 
-        var result = await ProcessRunner.RunAsync(
-            tools.FFprobe,
-            [
-                "-v",
-                "error",
-                "-show_entries",
-                "format_tags=major_brand,compatible_brands",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                path,
-            ],
-            cancellationToken);
-        return result.Succeeded && Regex.IsMatch(
-            result.StandardOutput,
-            @"(^|\s)(heic|heix|hevc|hevx|mif1|msf1)(\s|$)",
-            RegexOptions.IgnoreCase);
+        return result;
     }
 
-    private async Task EncodeVideoAsync(
-        string inputPath,
-        string outputPath,
-        int quality,
-        int maxWidth,
-        string audioBitrate,
-        double startSeconds = -1,
-        double durationSeconds = -1,
-        int maxVideoBitrateKbps = 0,
-        CancellationToken cancellationToken = default)
+    private static List<string> InsertFsFence(IReadOnlyList<string> args, long outputByteLimit, string outputPath)
     {
-        var arguments = new List<string> { "-y", "-hide_banner", "-loglevel", "error" };
-        if (startSeconds >= 0 && durationSeconds > 0)
+        // Heatup appends -fs <limit> before the output path. The planner always
+        // ends argv with the output path; a missing placeholder is a planning bug
+        // and must fail loudly instead of emitting "-fs <limit>" as a stray output.
+        var result = new List<string>(args);
+        var index = result.LastIndexOf(outputPath);
+        if (index < 0)
         {
-            arguments.AddRange(["-ss", Number(startSeconds), "-i", inputPath, "-t", Number(durationSeconds)]);
-        }
-        else
-        {
-            arguments.AddRange(["-i", inputPath]);
-            if (durationSeconds > 0)
-            {
-                arguments.AddRange(["-t", Number(durationSeconds)]);
-            }
+            throw new InvalidOperationException("Media output placeholder not found in planned ffmpeg argv.");
         }
 
-        arguments.AddRange(["-map", "0:v:0", "-map", "0:a:0?"]);
-        arguments.AddRange(EncoderArguments(quality, maxWidth, maxVideoBitrateKbps));
-        arguments.AddRange([
-            "-c:a",
-            "aac",
-            "-b:a",
-            audioBitrate,
-            "-movflags",
-            "+faststart",
-            "-map_metadata",
-            "-1",
-            outputPath,
-        ]);
-        await RunRequiredAsync(tools.FFmpeg, arguments, cancellationToken);
+        result.Insert(index, outputByteLimit.ToString(CultureInfo.InvariantCulture));
+        result.Insert(index, "-fs");
+        return result;
     }
 
-    private IReadOnlyList<string> EncoderArguments(int quality, int maxWidth, int maxVideoBitrateKbps)
+    private static void AssertOutputExtension(string outputPath, string plannedExtension)
     {
-        var scale = $"scale='trunc(min({maxWidth},iw)/2)*2':-2";
-        var arguments = Encoder.Name switch
+        // OutputNameGenerator emits uppercase (IMG_0001.MP4); compare case-insensitively
+        // like the reference assertTransformOutputExtension, modulo filesystem case.
+        if (!Path.GetExtension(outputPath).Equals(plannedExtension, StringComparison.OrdinalIgnoreCase))
         {
-            "h264_nvenc" => new List<string>
-            {
-                "-c:v", "h264_nvenc", "-preset", videoOptions.NvencPreset,
-                "-tune", "hq", "-rc", "vbr", "-cq", Number(quality), "-b:v", "0",
-                "-spatial_aq", "1", "-temporal_aq", "1",
-                "-vf", scale, "-pix_fmt", "yuv420p",
-            },
-            "h264_amf" when maxVideoBitrateKbps > 0 => new List<string>
-            {
-                "-c:v", "h264_amf", "-usage", "transcoding", "-quality", videoOptions.AmfQuality,
-                "-rc", "vbr_peak", "-b:v", $"{maxVideoBitrateKbps}k",
-                "-vf", scale, "-pix_fmt", "yuv420p",
-            },
-            "h264_amf" => new List<string>
-            {
-                "-c:v", "h264_amf", "-usage", "transcoding", "-quality", videoOptions.AmfQuality,
-                "-rc", "cqp", "-qp_i", Number(quality), "-qp_p", Number(quality),
-                "-qp_b", Number(quality), "-vf", scale, "-pix_fmt", "yuv420p",
-            },
-            "h264_videotoolbox" => new List<string>
-            {
-                "-c:v", "h264_videotoolbox", "-profile:v", "high", "-allow_sw", "0",
-                "-b:v", $"{(maxVideoBitrateKbps > 0 ? maxVideoBitrateKbps : videoOptions.VideoToolboxBitrateKbps)}k",
-                "-vf", scale, "-pix_fmt", "yuv420p",
-            },
-            _ => new List<string>
-            {
-                "-c:v", "libx264", "-crf", Number(quality), "-preset", videoOptions.X264Preset,
-                "-vf", scale, "-pix_fmt", "yuv420p",
-            },
-        };
-
-        if (maxVideoBitrateKbps > 0)
-        {
-            arguments.AddRange([
-                "-maxrate",
-                $"{maxVideoBitrateKbps}k",
-                "-bufsize",
-                $"{maxVideoBitrateKbps * 2}k",
-            ]);
+            throw new InvalidOperationException(
+                $"Media transform output extension '{Path.GetExtension(outputPath)}' does not match its recipe ('{plannedExtension}').");
         }
-
-        return arguments;
     }
 
-    private int PrimaryMaxVideoBitrate(
-        double durationSeconds,
-        double maxSizeMB,
-        string audioBitrate,
-        double maxrateScale)
+    private static void RemovePasslogs(string? passlogPrefix)
     {
-        if (Encoder.Name == "libx264" || maxSizeMB <= 0 || durationSeconds <= 0)
-        {
-            return 0;
-        }
-
-        return Math.Max(200, (int)Math.Floor(
-            TargetVideoBitrate(durationSeconds, maxSizeMB, audioBitrate) * maxrateScale));
-    }
-
-    private static int TargetVideoBitrate(
-        double durationSeconds,
-        double maxSizeMB,
-        string audioBitrate)
-    {
-        var digits = Regex.Replace(audioBitrate, "[^0-9.]", "");
-        var audioKbps = double.TryParse(digits, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
-            ? parsed
-            : 128;
-        var totalKbps = maxSizeMB * 8192 / durationSeconds;
-        var videoKbps = Math.Max(200, totalKbps - audioKbps);
-        return (int)Math.Floor(videoKbps * 0.90);
-    }
-
-    private async Task EnforceSizeCapAsync(
-        string outputPath,
-        double maxSizeMB,
-        int primaryMaxWidth,
-        int fallbackMaxWidth,
-        string audioBitrate,
-        string sourceInputPath,
-        double sourceDuration,
-        int trimMs,
-        CancellationToken cancellationToken)
-    {
-        var maxBytes = (long)(maxSizeMB * 1024 * 1024);
-        if (new FileInfo(outputPath).Length <= maxBytes)
-        {
-            return;
-        }
-
-        var duration = Math.Max(0.1, sourceDuration - trimMs / 1000.0);
-        var targetBitrate = TargetVideoBitrate(duration, maxSizeMB, audioBitrate);
-        var profiles = SizeCapProfiles(primaryMaxWidth, fallbackMaxWidth, targetBitrate);
-        string? chosenPath = null;
-        long chosenSize = long.MaxValue;
-
+        // Cleanup must never mask the transform error it follows in finally.
         try
         {
-            foreach (var profile in profiles)
+            if (string.IsNullOrWhiteSpace(passlogPrefix))
             {
-                var temporary = Path.Combine(
-                    Path.GetDirectoryName(outputPath)!,
-                    $"sizecap_{Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant()}.mp4");
-                try
-                {
-                    await EncodeVideoAsync(
-                        sourceInputPath,
-                        temporary,
-                        profile.Quality,
-                        profile.MaxWidth,
-                        audioBitrate,
-                        durationSeconds: duration,
-                        maxVideoBitrateKbps: profile.Bitrate,
-                        cancellationToken: cancellationToken);
-                    var size = new FileInfo(temporary).Length;
-                    if (size < chosenSize)
-                    {
-                        if (chosenPath is not null)
-                        {
-                            TryDelete(chosenPath);
-                        }
-
-                        chosenPath = temporary;
-                        chosenSize = size;
-                        temporary = "";
-                    }
-
-                    if (size <= maxBytes)
-                    {
-                        break;
-                    }
-                }
-                finally
-                {
-                    TryDelete(temporary);
-                }
+                return;
             }
 
-            if (chosenPath is not null)
+            var directory = Path.GetDirectoryName(passlogPrefix);
+            var prefix = Path.GetFileName(passlogPrefix);
+            if (directory is null || !Directory.Exists(directory))
             {
-                File.Move(chosenPath, outputPath, overwrite: true);
-                chosenPath = null;
-                await ClearMetadataAsync(outputPath, cancellationToken);
+                return;
+            }
+
+            foreach (var entry in Directory.EnumerateFiles(directory, prefix + "*"))
+            {
+                TryDelete(entry);
             }
         }
-        finally
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
         {
-            if (chosenPath is not null)
-            {
-                TryDelete(chosenPath);
-            }
         }
     }
 
-    private IReadOnlyList<(int Quality, int MaxWidth, int Bitrate)> SizeCapProfiles(
-        int primaryMaxWidth,
-        int fallbackMaxWidth,
-        int targetBitrate)
-    {
-        var clampedFallbackWidth = Math.Min(primaryMaxWidth, fallbackMaxWidth);
-        return Encoder.Name switch
-        {
-            "h264_nvenc" =>
-            [
-                (30, primaryMaxWidth, 0),
-                (32, primaryMaxWidth, 0),
-                (34, clampedFallbackWidth, 0),
-                (36, clampedFallbackWidth, targetBitrate),
-            ],
-            "h264_amf" =>
-            [
-                (28, primaryMaxWidth, 0),
-                (30, primaryMaxWidth, 0),
-                (32, clampedFallbackWidth, 0),
-                (34, clampedFallbackWidth, targetBitrate),
-            ],
-            "h264_videotoolbox" =>
-            [
-                (0, primaryMaxWidth, targetBitrate),
-                (0, clampedFallbackWidth, Math.Max(200, (int)(targetBitrate * 0.92))),
-            ],
-            _ =>
-            [
-                (28, primaryMaxWidth, 0),
-                (30, primaryMaxWidth, 0),
-                (32, clampedFallbackWidth, 0),
-                (32, clampedFallbackWidth, targetBitrate),
-            ],
-        };
-    }
-
-    private async Task ClearMetadataAsync(string path, CancellationToken cancellationToken)
-    {
-        await RunRequiredAsync(
-            tools.ExifTool,
-            ["-all=", "-overwrite_original", path],
-            cancellationToken);
-    }
-
-    private static async Task RunRequiredAsync(
+    private async Task RunRequiredAsync(
         string executable,
         IEnumerable<string> arguments,
         CancellationToken cancellationToken)
@@ -633,8 +841,6 @@ public sealed class FfmpegEngine(
         }
     }
 
-    private static string Number(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
-
     private static void TryDelete(string? path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -646,7 +852,7 @@ public sealed class FfmpegEngine(
         {
             File.Delete(path);
         }
-        catch (IOException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
         {
         }
     }

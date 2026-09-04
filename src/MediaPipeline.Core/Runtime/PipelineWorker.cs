@@ -248,9 +248,13 @@ public sealed class PipelineWorker(
             return [];
         }
 
+        // Admit every file of a known media kind regardless of what this preset
+        // accepts: routing runs on probed content, and a file no preset accepts
+        // must fail visibly into failed/ instead of looping in input/ forever.
+        // Temporary and unknown extensions stay excluded, as before.
         return new DirectoryInfo(lane.Input)
             .EnumerateFiles()
-            .Where(file => Accepts(preset, MediaClassifier.Classify(file.FullName)))
+            .Where(file => MediaClassifier.Classify(file.FullName) is MediaKind.Video or MediaKind.Image)
             .OrderBy(file => file.LastWriteTimeUtc)
             .ThenBy(file => file.FullName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -350,13 +354,6 @@ public sealed class PipelineWorker(
             Directory.CreateDirectory(directory);
         }
     }
-
-    private static bool Accepts(PresetOptions preset, MediaKind kind) => kind switch
-    {
-        MediaKind.Video => preset.VideoCopies > 0,
-        MediaKind.Image => preset.ImageCopies > 0,
-        _ => false,
-    };
 
     private static string LaneKey(string preset, string workspace) => $"{preset}/{workspace}";
 

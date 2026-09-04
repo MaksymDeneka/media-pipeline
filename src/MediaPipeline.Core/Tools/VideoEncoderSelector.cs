@@ -8,23 +8,15 @@ public static class VideoEncoderSelector
 {
     public static IReadOnlyList<string> Candidates(VideoOptions options)
     {
+        // Heatup approach: capability decides – VideoToolbox is probed with a real
+        // test encode where allowed, otherwise CPU libx264. NVENC/AMF paths were
+        // removed: V2 uses a precomputed bitrate ladder with two-pass libx264
+        // (slow) or single-pass VideoToolbox, no CRF/CQ/QP tuning.
+        // PreferVideoToolbox=false is an explicit opt-out (forces libx264).
         var candidates = new List<string>();
-        if (OperatingSystem.IsMacOS() && options.PreferVideoToolbox)
+        if (options.PreferVideoToolbox)
         {
             candidates.Add("h264_videotoolbox");
-        }
-
-        if (OperatingSystem.IsWindows())
-        {
-            if (options.PreferNvenc)
-            {
-                candidates.Add("h264_nvenc");
-            }
-
-            if (options.PreferAmf)
-            {
-                candidates.Add("h264_amf");
-            }
         }
 
         candidates.Add("libx264");
@@ -80,8 +72,6 @@ public static class VideoEncoderSelector
     private static string Description(string encoder) => encoder switch
     {
         "h264_videotoolbox" => "Apple VideoToolbox",
-        "h264_nvenc" => "NVIDIA NVENC",
-        "h264_amf" => "AMD AMF",
         "libx264" => "CPU libx264",
         _ => encoder,
     };

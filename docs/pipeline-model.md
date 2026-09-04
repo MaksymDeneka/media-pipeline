@@ -67,6 +67,14 @@ Quality settings (`MaxWidth`, `SizeCapMB`, `Crf`, `NvencCq`, `AmfQp`, `AudioBitr
 `JpegQuality`, `PngCompressionLevel`, trim range, crop range) are all overridable per preset
 and otherwise inherit the global value.
 
+> V2 engine note (heatup port): transforms are now deterministic seeded recipes –
+> image recrop 2-5 permille + eq, video microtrim 10-40ms + eq + width ladder
+> 1080..160 + two-pass libx264 slow or single-pass VideoToolbox, fenced at
+> min(10MiB, source size) with metadata stripped via `-map_metadata -1`.
+> `MaxWidth` caps the ladder and `EnhancedVariation` selects the stronger recipe;
+> `Segment`/`Normalize`/CRF/NVENC/AMF/size-cap/trim/crop/quality knobs are parsed
+> for compatibility but no longer drive encoding.
+
 ### How today's nine map onto it
 
 | Today | Preset options |

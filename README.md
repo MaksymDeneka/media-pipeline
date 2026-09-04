@@ -186,9 +186,13 @@ step and no convert folder. Drop them anywhere.
 2. A file must stop changing for `StableSeconds` before it is touched, which lets browser downloads
    finish. A `PerGroup` preset waits for the whole folder to settle instead.
 3. `.mov` and `.heic` sources are normalized first.
-4. Video is re-encoded to H.264 MP4 with AAC audio, capped at `MaxWidth`, with a tiny random amount
-   trimmed off the end of each copy. Images get a tiny random crop scaled back to the original
-   dimensions. Both have all metadata stripped.
+4. Video is re-encoded to H.264 MP4 with AAC audio from the V2 width ladder
+   (1080 down to 160, capped by `MaxWidth`), with a deterministic 10-40 ms microtrim
+   per copy (seeded from the source hash, so reruns plan identically). Images get a
+   deterministic 2-5 permille recrop scaled back to the original dimensions with
+   lanczos, plus subtle eq variation. Both have all metadata stripped
+   (`-map_metadata -1`). Video that overshoots its `min(10MiB, source size)` fence
+   retries automatically at a lower byte target, then a lower rung.
 5. Outputs land in `output`, arranged according to `Grouping`.
 6. The source moves to `original`, or to `failed` if anything went wrong.
 

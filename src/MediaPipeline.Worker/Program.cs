@@ -65,7 +65,7 @@ internal static class Program
 
         Console.WriteLine($"FFmpeg         {context.Tools.FFmpeg}");
         Console.WriteLine($"FFprobe        {context.Tools.FFprobe}");
-        Console.WriteLine($"ExifTool       {context.Tools.ExifTool}");
+        Console.WriteLine($"ExifTool       {context.Tools.ExifTool ?? "(optional, not used – metadata stripped with -map_metadata -1)"}");
         Console.WriteLine($"Encoder        {context.Encoder.Name} ({context.Encoder.Description})");
         Console.WriteLine("Check passed.");
         return 0;
@@ -223,8 +223,11 @@ internal static class Program
                     continue;
                 }
 
+                // Outputs are named IMG_####.MP4 (uppercase); match case-insensitively
+                // so case-sensitive filesystems still find them.
                 foreach (var path in Directory.EnumerateFiles(
-                    output, "*.mp4", SearchOption.AllDirectories))
+                    output, "*", SearchOption.AllDirectories)
+                    .Where(candidate => candidate.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)))
                 {
                     if (await context.Engine.RecompressIfOversizedAsync(path, preset))
                     {
@@ -235,7 +238,11 @@ internal static class Program
             }
         }
 
-        Console.WriteLine($"Recompressed {changed} oversized output(s).");
+        // V2 fences every encode at min(10MiB, source size), so there is nothing
+        // post-hoc to enforce; SizeCapMB is legacy. Say so instead of implying a cap.
+        Console.WriteLine(changed == 0
+            ? "Recompressed 0 oversized output(s). (V2 outputs are fenced at encode time; recompress is a no-op.)"
+            : $"Recompressed {changed} oversized output(s).");
         return 0;
     }
 
@@ -340,7 +347,7 @@ internal static class Program
         var (configuration, paths) = LoadBaseContext(configPath);
         var tools = Toolchain.Discover();
         var encoder = await VideoEncoderSelector.SelectAsync(tools, configuration.Video);
-        var engine = new FfmpegEngine(tools, encoder, configuration.Video);
+        var engine = new FfmpegEngine(tools, encoder);
         var events = new EventWriter(paths);
         var logger = new PipelineLogger(paths);
         var processor = new PresetProcessor(engine, events, logger);

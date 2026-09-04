@@ -105,6 +105,7 @@ public sealed record PresetOptions
     public bool Manifest { get; init; }
     public string ManifestSchema { get; init; } = "heatup.assetStoreMediaManifest.v1";
     public bool Normalize { get; init; } = true;
+    public bool EnhancedVariation { get; init; }
     public FailureMode OnFailure { get; init; }
     public ParallelMode Parallel { get; init; }
     public int MaxWidth { get; init; }

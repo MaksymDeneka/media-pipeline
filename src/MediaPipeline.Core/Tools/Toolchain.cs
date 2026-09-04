@@ -6,7 +6,7 @@ public sealed record Toolchain
 {
     public required string FFmpeg { get; init; }
     public required string FFprobe { get; init; }
-    public required string ExifTool { get; init; }
+    public string? ExifTool { get; init; }
 
     public static Toolchain Discover(string? applicationDirectory = null)
     {
@@ -16,8 +16,21 @@ public sealed record Toolchain
         {
             FFmpeg = FindRequired("ffmpeg", applicationDirectory),
             FFprobe = FindRequired("ffprobe", applicationDirectory),
-            ExifTool = FindRequired("exiftool", applicationDirectory),
+            // Heatup approach strips metadata with -map_metadata -1; ExifTool is legacy/optional.
+            ExifTool = FindOptional("exiftool", applicationDirectory),
         };
+    }
+
+    public static string? FindOptional(string name, string? applicationDirectory = null)
+    {
+        try
+        {
+            return FindRequired(name, applicationDirectory);
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
     }
 
     public static string FindRequired(string name, string? applicationDirectory = null)

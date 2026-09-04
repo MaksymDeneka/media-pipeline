@@ -117,7 +117,17 @@ public static class SettingCatalog
             Key = "Segment",
             Default = "false",
             Label = "Split long videos",
-            Help = "Splits a long video into segments first, then makes the copy count of each segment.",
+            Help = "Legacy: the V2 engine no longer splits videos (its bitrate ladder handles long videos down to 160px). This flag is ignored.",
+            Kind = SettingKind.Boolean,
+            Group = "Output",
+            GlobalScoped = false,
+        },
+        new()
+        {
+            Key = "EnhancedVariation",
+            Default = "false",
+            Label = "Stronger variation",
+            Help = "Uses the stronger V2 variation: wider eq ranges, a 4-8 permille recrop, and alternate x264 parameters.",
             Kind = SettingKind.Boolean,
             Group = "Output",
             GlobalScoped = false,
@@ -148,7 +158,7 @@ public static class SettingCatalog
         {
             Key = "MaxWidth",
             Label = "Maximum width",
-            Help = "Videos are shrunk so their width is at most this many pixels. They are never enlarged.",
+            Help = "Caps the V2 width ladder (1080 down to 160): videos never exceed this width and are never enlarged.",
             Kind = SettingKind.Integer,
             Group = "Video",
         },
@@ -156,7 +166,7 @@ public static class SettingCatalog
         {
             Key = "SizeCapMB",
             Label = "Size cap, MB",
-            Help = "Caps each output video at this many megabytes. Zero means no cap and no retry pass.",
+            Help = "Legacy: the V2 engine targets min(10MB, source size) with its own bitrate ladder. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Decimal,
             Group = "Video",
         },
@@ -164,7 +174,7 @@ public static class SettingCatalog
         {
             Key = "SizeCapFallbackMaxWidth",
             Label = "Size cap fallback width",
-            Help = "If a video still will not fit under the cap, shrink its width to this as a last resort.",
+            Help = "Legacy: the V2 ladder descends to 160px on its own. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Video",
         },
@@ -172,7 +182,7 @@ public static class SettingCatalog
         {
             Key = "Crf",
             Label = "CPU quality (CRF)",
-            Help = "Used when encoding on the CPU. Lower is better quality and bigger files. Roughly 18 to 28.",
+            Help = "Legacy: the V2 engine uses two-pass libx264 slow CBR from its bitrate ladder. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Video",
         },
@@ -180,7 +190,7 @@ public static class SettingCatalog
         {
             Key = "NvencCq",
             Label = "NVIDIA quality (CQ)",
-            Help = "Used when the NVIDIA encoder is active. Lower is better quality.",
+            Help = "Legacy: NVENC support was removed (VideoToolbox or libx264 only). Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Video",
         },
@@ -188,7 +198,7 @@ public static class SettingCatalog
         {
             Key = "AmfQp",
             Label = "AMD quality (QP)",
-            Help = "Used when the AMD encoder is active. Lower is better quality.",
+            Help = "Legacy: AMF support was removed (VideoToolbox or libx264 only). Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Video",
         },
@@ -196,7 +206,7 @@ public static class SettingCatalog
         {
             Key = "AudioBitrate",
             Label = "Audio bitrate",
-            Help = "For example 96k, 128k, or 192k.",
+            Help = "Legacy: the V2 engine picks 128/96/64/48/32/16/0k from its audio ladder. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Text,
             Group = "Video",
         },
@@ -204,7 +214,7 @@ public static class SettingCatalog
         {
             Key = "MinTrimMs",
             Label = "Minimum trim, ms",
-            Help = "Each video copy trims a small random amount off the end, which is what makes the copies differ.",
+            Help = "Legacy: the V2 engine trims a deterministic 10-40ms per copy. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Video",
         },
@@ -212,7 +222,7 @@ public static class SettingCatalog
         {
             Key = "MaxTrimMs",
             Label = "Maximum trim, ms",
-            Help = "The upper end of that random trim.",
+            Help = "Legacy: see Minimum trim. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Video",
         },
@@ -220,7 +230,7 @@ public static class SettingCatalog
         {
             Key = "SegmentTargetSeconds",
             Label = "Segment length, seconds",
-            Help = "Target length of each segment, for presets that split long videos.",
+            Help = "Legacy: the V2 engine never segments. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Video",
         },
@@ -228,7 +238,7 @@ public static class SettingCatalog
         {
             Key = "SegmentMinSeconds",
             Label = "Shortest segment, seconds",
-            Help = "A segment is never shorter than this.",
+            Help = "Legacy: the V2 engine never segments. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Video",
         },
@@ -236,7 +246,7 @@ public static class SettingCatalog
         {
             Key = "X264Preset",
             Label = "CPU encoder speed",
-            Help = "Slower settings produce smaller files and take longer.",
+            Help = "Legacy: the V2 engine always uses two-pass slow (CPU) or VideoToolbox. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Choice,
             Choices = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"],
             Group = "Video",
@@ -244,9 +254,18 @@ public static class SettingCatalog
         },
         new()
         {
+            Key = "PreferVideoToolbox",
+            Label = "Use Apple hardware encoding",
+            Help = "Probes the VideoToolbox encoder first and falls back to CPU libx264 when unavailable. Off forces libx264.",
+            Kind = SettingKind.Boolean,
+            Group = "Video",
+            PresetScoped = false,
+        },
+        new()
+        {
             Key = "PreferNvenc",
             Label = "Use the NVIDIA encoder",
-            Help = "The watcher only uses a GPU encoder if a real test encode succeeds, so this is safe to leave on.",
+            Help = "Legacy: NVENC support was removed. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Boolean,
             Group = "Video",
             PresetScoped = false,
@@ -255,7 +274,7 @@ public static class SettingCatalog
         {
             Key = "PreferAmf",
             Label = "Use the AMD encoder",
-            Help = "Same as above, for AMD hardware.",
+            Help = "Legacy: AMF support was removed. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Boolean,
             Group = "Video",
             PresetScoped = false,
@@ -266,7 +285,7 @@ public static class SettingCatalog
         {
             Key = "JpegQuality",
             Label = "JPEG quality",
-            Help = "Lower is better quality and larger files. 4 is a high-quality middle ground for photos.",
+            Help = "Legacy: the V2 engine always uses q:v 2 (JPEG) / quality 92 (WebP) / level 6 (PNG). Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Images",
         },
@@ -274,7 +293,7 @@ public static class SettingCatalog
         {
             Key = "ConvertedJpegQuality",
             Label = "JPEG quality, converted",
-            Help = "For sources that had to be decoded first, such as HEIC. That round trip is already a re-encode, so it gets more headroom.",
+            Help = "Legacy: the V2 engine uses the same quality for all images. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Images",
         },
@@ -282,7 +301,7 @@ public static class SettingCatalog
         {
             Key = "CropMinPermille",
             Label = "Minimum crop, permille",
-            Help = "Every image copy gets a tiny random crop scaled back to the original size, which is what makes the copies differ. 5 is 0.5 percent.",
+            Help = "Legacy: the V2 engine recrops a deterministic 2-5 permille per copy. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Images",
         },
@@ -290,7 +309,7 @@ public static class SettingCatalog
         {
             Key = "CropMaxPermille",
             Label = "Maximum crop, permille",
-            Help = "The upper end of that random crop. Keep it small.",
+            Help = "Legacy: see Minimum crop. Kept for config compatibility; has no effect.",
             Kind = SettingKind.Integer,
             Group = "Images",
         },

@@ -30,7 +30,7 @@ internal static class Program
             StageInputs(configuration, paths, image, video);
 
             var encoder = new VideoEncoder("libx264", "integration test CPU encoder");
-            var engine = new FfmpegEngine(tools, encoder, configuration.Video);
+            var engine = new FfmpegEngine(tools, encoder);
             var events = new EventWriter(paths);
             var logger = new PipelineLogger(paths);
             var processor = new PresetProcessor(engine, events, logger);
@@ -212,11 +212,11 @@ internal static class Program
         Check("moves both batch sources", Directory.GetFiles(setsLane.Original).Length == 2,
             Directory.GetFiles(setsLane.Original).Length);
 
-        Section("Segmented video preset");
+        Section("Long video preset (V2: no segmentation, bitrate ladder instead)");
         var longLane = paths.Lane("video-long", "test");
-        Check("creates two segment variants", Directory.GetFiles(longLane.Output, "*.MP4").Length == 2,
+        Check("creates one ladder variant", Directory.GetFiles(longLane.Output, "*.MP4").Length == 1,
             Directory.GetFiles(longLane.Output).Length);
-        Check("cleans segment working files", Directory.GetFiles(longLane.Work).Length == 0,
+        Check("leaves no working files behind", Directory.GetFiles(longLane.Work).Length == 0,
             Directory.GetFiles(longLane.Work).Length);
 
         Section("Runtime contracts");
@@ -243,7 +243,7 @@ internal static class Program
         var paths = new PipelinePaths(configuration.PipelineRoot);
         var events = new EventWriter(paths);
         var logger = new PipelineLogger(paths);
-        var engine = new FfmpegEngine(tools, encoder, configuration.Video);
+        var engine = new FfmpegEngine(tools, encoder);
         var control = new WorkerControl(paths);
         var worker = new PipelineWorker(
             configuration,
@@ -286,7 +286,7 @@ internal static class Program
         var paths = new PipelinePaths(configuration.PipelineRoot);
         var events = new EventWriter(paths);
         var logger = new PipelineLogger(paths);
-        var engine = new FfmpegEngine(tools, encoder, configuration.Video);
+        var engine = new FfmpegEngine(tools, encoder);
         var lane = paths.Lane("image-clean", "test");
         Directory.CreateDirectory(lane.Input);
         await File.WriteAllBytesAsync(Path.Combine(lane.Input, "stuck.jpg"), []);
@@ -377,14 +377,15 @@ internal static class Program
         {
             _ = await engine.PrepareAsync(
                 imagePreset, imageLane, invalidHeic, MediaKind.Image);
+            Check("rejects an invalid HEIC source", false, "PrepareAsync did not throw");
         }
-        catch (InvalidOperationException)
+        catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException)
         {
         }
         var leakedHeicTemps = Directory.GetFiles(Path.GetTempPath(), "media-pipeline-heic-*.png")
             .Where(path => !priorHeicTemps.Contains(path))
             .ToArray();
-        Check("removes a failed HEIC conversion temp", leakedHeicTemps.Length == 0,
+        Check("leaves no HEIC conversion temp behind", leakedHeicTemps.Length == 0,
             string.Join(", ", leakedHeicTemps));
 
         var invalidMov = Path.Combine(root, "invalid.mov");
@@ -396,25 +397,23 @@ internal static class Program
         {
             _ = await engine.PrepareAsync(
                 videoPreset, videoLane, invalidMov, MediaKind.Video);
+            Check("rejects an invalid MOV source", false, "PrepareAsync did not throw");
         }
-        catch (InvalidOperationException)
+        catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException)
         {
         }
-        try
-        {
-            _ = await engine.ExtractSegmentsAsync(
-                new PreparedSource(invalidMov, invalidMov, null),
-                videoLane,
-                videoPreset,
-                durationSeconds: 6);
-        }
-        catch (InvalidOperationException)
-        {
-        }
+        // V2 has no segmentation: the stub passes the source through without
+        // touching the work directory.
+        var segments = await engine.ExtractSegmentsAsync(
+            new PreparedSource(invalidMov, invalidMov, null, "video", "deadbeef"),
+            videoLane,
+            videoPreset,
+            durationSeconds: 6);
+        Check("segment stub passes a single plan through", segments.Count == 1, segments.Count);
         var leakedWork = Directory.GetFiles(videoLane.Work)
             .Where(path => !beforeWork.Contains(path))
             .ToArray();
-        Check("removes failed remux and current segment temps", leakedWork.Length == 0,
+        Check("leaves no remux or segment temps behind", leakedWork.Length == 0,
             string.Join(", ", leakedWork));
     }
 
@@ -423,20 +422,26 @@ internal static class Program
         PipelineConfiguration configuration,
         FfmpegEngine engine)
     {
-        Section("Size-cap preset overrides");
+        Section("Preset width cap (V2 ladder)");
         var preset = configuration.Presets.Single(item => item.Name == "video-clean") with
         {
             MaxWidth = 160,
-            // Exercise the inherited global fallback being wider than this preset override.
-            SizeCapFallbackMaxWidth = 720,
-            SizeCapMB = 0.005,
         };
         var output = Path.Combine(root, "size-cap-output");
         var source = Path.Combine(root, "corpus", "source.mp4");
+        var sourceBytes = new FileInfo(source).Length;
+        var sourceHash = MediaTransformSeed.HashFile(source);
         var variant = await engine.CreateVideoVariantAsync(
-            source, output, preset, sourceDurationSeconds: 6, trimMs: 0);
+            source,
+            output,
+            preset,
+            sourceDurationSeconds: 6,
+            sourceByteCount: sourceBytes,
+            seed: MediaTransformSeed.Derive(sourceHash, 0),
+            ordinal: 0,
+            sourceHash: sourceHash);
 
-        Check("size-cap retries never exceed the preset width",
+        Check("ladder-capped output never exceeds the preset width",
             variant.MediaInfo.Width is > 0 and <= 160, variant.MediaInfo.Width ?? 0);
     }
 
