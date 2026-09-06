@@ -57,8 +57,14 @@ public sealed class PipelineWorker(
                     cancellationToken);
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || control.StopRequested)
         {
+            // Console cancel and the control/stop flag converge here: per-file and
+            // per-copy interruption checks inside batch processing throw a
+            // LaneInterruption (re-raised above for stop), so in-flight work has
+            // already preserved its finished files. Any other cancellation source
+            // is unexpected and propagates past this handler instead of exiting
+            // cleanly.
         }
         finally
         {
@@ -217,6 +223,13 @@ public sealed class PipelineWorker(
         {
             foreach (var file in ready)
             {
+                // A pause aborts the in-flight file with job.cancelled; stop here
+                // instead of emitting a start+cancelled pair for every remainder.
+                if (control.IsPaused(preset.Name, workspace))
+                {
+                    break;
+                }
+
                 await processor.ProcessGroupAsync(preset, lane, [file], cancellationToken);
                 _fileStability.Forget(file.FullName);
             }
@@ -230,11 +243,16 @@ public sealed class PipelineWorker(
             await throttle.WaitAsync(cancellationToken);
             try
             {
-                await processor.ProcessGroupAsync(preset, lane, [file], cancellationToken);
+                // Files that never started stay quietly queued: skip processing
+                // but keep their stability observations, unlike the abort path.
+                if (!control.IsPaused(preset.Name, workspace))
+                {
+                    await processor.ProcessGroupAsync(preset, lane, [file], cancellationToken);
+                    _fileStability.Forget(file.FullName);
+                }
             }
             finally
             {
-                _fileStability.Forget(file.FullName);
                 throttle.Release();
             }
         });

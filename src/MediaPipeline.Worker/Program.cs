@@ -350,8 +350,8 @@ internal static class Program
         var engine = new FfmpegEngine(tools, encoder);
         var events = new EventWriter(paths);
         var logger = new PipelineLogger(paths);
-        var processor = new PresetProcessor(engine, events, logger);
         var control = new WorkerControl(paths);
+        var processor = new PresetProcessor(engine, events, logger, control);
         var status = new StatusWriter(paths);
         var archive = new ArchiveManager(configuration, paths, logger);
         var worker = new PipelineWorker(

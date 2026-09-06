@@ -52,18 +52,29 @@ public static class PipelineConfigurationLoader
             MaxrateScale = globals.Double("MaxrateScale", 0.92),
         };
 
-        var maxImageWorkers = Math.Clamp(Environment.ProcessorCount, 1, 6);
+        // "auto" stays at the safe default (at most six files at once) so batches of
+        // full-resolution photos cannot exhaust memory with FFmpeg. An explicit whole
+        // number opts into more workers, capped at the CPU count: each worker holds
+        // decoded full-resolution frames while it runs, so the machine's cores are
+        // the sensible ceiling and anything above warns instead of silently applying.
+        var cpuWorkers = Math.Max(1, Environment.ProcessorCount);
+        var autoWorkers = Math.Min(cpuWorkers, 6);
         var requestedWorkers = globals.String("ImageProcessingConcurrency", "auto");
-        var imageWorkers = maxImageWorkers;
+        var imageWorkers = autoWorkers;
         if (int.TryParse(requestedWorkers, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedWorkers) &&
             parsedWorkers >= 1)
         {
-            imageWorkers = Math.Min(parsedWorkers, maxImageWorkers);
-            if (parsedWorkers > maxImageWorkers)
+            imageWorkers = Math.Min(parsedWorkers, cpuWorkers);
+            if (parsedWorkers > cpuWorkers)
             {
                 warnings.Add(
-                    $"ImageProcessingConcurrency requested {parsedWorkers} workers; capped at {maxImageWorkers}.");
+                    $"ImageProcessingConcurrency requested {parsedWorkers} workers; capped at {cpuWorkers}.");
             }
+        }
+        else if (!requestedWorkers.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            warnings.Add(
+                $"ImageProcessingConcurrency '{requestedWorkers}' is not auto or a whole number 1 or above. Using {imageWorkers}.");
         }
 
         var images = new ImageOptions
@@ -148,7 +159,7 @@ public static class PipelineConfigurationLoader
             ? FailureMode.PreservePartial
             : FailureMode.DeleteContainer;
 
-        return new PresetOptions
+        var options = new PresetOptions
         {
             Name = name,
             Enabled = reader.Bool("Enabled", true),
@@ -186,6 +197,14 @@ public static class PipelineConfigurationLoader
             PngCompressionLevel = Math.Clamp(
                 reader.Int("PngCompressionLevel", images.PngCompressionLevel), 0, 9),
         };
+
+        if (options.Manifest && options.Grouping != OutputGrouping.PerSet)
+        {
+            warnings.Add(
+                $"preset '{name}': Manifest needs PerSet grouping and is ignored for {options.Grouping}.");
+        }
+
+        return options;
     }
 
     private static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> BuiltInPresets()
@@ -209,6 +228,9 @@ public static class PipelineConfigurationLoader
                 ("VideoCopies", "1"), ("ImageCopies", "1"), ("Grouping", "PerSet"),
                 ("SetCount", "15"), ("Batch", "PerGroup"), ("SizeCapMB", "0"),
                 ("Manifest", "true"), ("MinTrimMs", "10"), ("MaxTrimMs", "40")),
+            ["flat-batch"] = Values(
+                ("VideoCopies", "1"), ("ImageCopies", "1"), ("Grouping", "Flat"),
+                ("Batch", "PerGroup"), ("SizeCapMB", "0")),
             // V2 ignores Segment (long videos use the bitrate ladder down to 160px
             // instead of stream-copy splits) and Nvenc/Amf tuning (libx264 slow
             // two-pass or VideoToolbox single-pass only).

@@ -11,6 +11,21 @@ public sealed class WorkerControl(PipelinePaths paths)
     public bool IsPaused(string preset, string workspace) =>
         PausedAll || Exists($"pause.{preset}") || Exists($"pause.{preset}.{workspace}");
 
+    /// <summary>
+    /// Aborts the current file or copy when the operator paused this lane or asked
+    /// the worker to stop. Checked per file and per copy inside batch processing so
+    /// pause/stop take effect within one encode instead of after the whole backlog.
+    /// Throws <see cref="LaneInterruption"/> (not a bare cancellation) so engine
+    /// timeouts and genuine shutdown stay distinguishable downstream.
+    /// </summary>
+    public void ThrowIfInterrupted(string preset, string workspace)
+    {
+        if (StopRequested || IsPaused(preset, workspace))
+        {
+            throw new LaneInterruption();
+        }
+    }
+
     public void ClearStopRequest()
     {
         var path = ControlPath("stop");
@@ -98,3 +113,12 @@ public sealed class WorkerControl(PipelinePaths paths)
 
     private string ControlPath(string name) => Path.Combine(paths.Control, name);
 }
+
+/// <summary>
+/// Operator-requested interruption (pause flag or stop request) surfacing from
+/// inside batch processing. Distinct from <see cref="OperationCanceledException"/>
+/// so engine-internal timeouts (converted to data failures) and genuine shutdown
+/// (console token) can never be mistaken for a pause.
+/// </summary>
+public sealed class LaneInterruption(string? message = null)
+    : OperationCanceledException(message ?? "Processing was interrupted.");

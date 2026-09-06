@@ -213,6 +213,10 @@ public sealed class PipelineMonitor
             case "job.failed":
                 FailJob(pipelineEvent);
                 break;
+
+            case "job.cancelled":
+                CancelJob(pipelineEvent);
+                break;
         }
     }
 
@@ -326,5 +330,18 @@ public sealed class PipelineMonitor
         job.Error = pipelineEvent.Error ?? "unknown error";
 
         _failed[jobId] = job;
+    }
+
+    private void CancelJob(PipelineEvent pipelineEvent)
+    {
+        // Pause/stop interrupts the job after the current copy: finished files
+        // are kept, so this is neither progress nor failure. Drop it from the
+        // active list so it cannot linger as a running row.
+        if (pipelineEvent.JobId is not { Length: > 0 } jobId)
+        {
+            return;
+        }
+
+        _active.Remove(jobId);
     }
 }

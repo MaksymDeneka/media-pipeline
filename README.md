@@ -53,6 +53,7 @@ The shipped presets:
 | `image-bulk` | 100 variants from a single photo |
 | `sets` | Every source file gets its own output folder holding its copies |
 | `sets-batch` | Treats the whole folder as one batch, produces 10 complete sets |
+| `flat-batch` | Treats the whole folder as one batch, all outputs in a single folder |
 | `asset-store` | Like `sets-batch`, plus a `manifest.json` describing every file |
 | `video-long` | Splits long videos into segments, then makes copies of each |
 
@@ -81,7 +82,7 @@ ImageCopies = 100     ; <- change this
 | `SetCount` | How many sets, when `Grouping = PerSet`. |
 | `Batch` | `PerFile` processes each file as it settles. `PerGroup` waits for the whole folder. |
 | `Segment` | `true` splits long videos into segments first. |
-| `Manifest` | `true` writes a `manifest.json` next to the output. |
+| `Manifest` | `true` writes a `manifest.json` next to the output (grouped `PerSet` presets). |
 | `Normalize` | `true` converts `.mov` and `.heic` before processing. Default `true`. |
 | `OnFailure` | `PreservePartial`, `DeleteFiles`, or `DeleteContainer`. |
 | `Parallel` | `OverFiles` (default) or `Sequential`. |
@@ -165,9 +166,10 @@ Images:
 .jpg, .jpeg, .png, .webp, .heic
 ```
 
-Image processing runs at a maximum of six files at once. Set `ImageProcessingConcurrency = auto`
-to choose that limit from the CPU count. Larger manual values are capped to prevent FFmpeg from
-exhausting memory on batches of full-resolution photos.
+Image processing runs up to six files at once on `ImageProcessingConcurrency = auto`.
+Set it to a whole number up to your CPU count to use more workers; larger values are
+capped at the CPU count, since each worker holds full-resolution photos in memory
+while FFmpeg runs.
 
 Temporary browser download files are ignored:
 
@@ -261,7 +263,7 @@ are processed at once:
 {"ts":"2026-08-22T09:27:11Z","ev":"job.variant","jobId":"eb631a92","preset":"long","workspace":"LC","file":"clip.mp4","n":4,"total":6}
 ```
 
-Events are `watcher.start`, `watcher.stop`, `job.start`, `job.variant`, `job.done`, `job.failed`.
+Events are `watcher.start`, `watcher.stop`, `job.start`, `job.variant`, `job.done`, `job.cancelled`, `job.failed`.
 
 **`status\watcher.json`** is rewritten after each sweep with the process id, active encoder, every
 preset's resolved options, and the queue depth of each lane.
@@ -274,8 +276,8 @@ Drop an empty file into `D:\MediaPipeline\control\`:
 
 | File | Effect |
 | --- | --- |
-| `stop` | Finish the current file, then exit cleanly. |
-| `pause` | Stop picking up new work. Nothing queued is lost. |
+| `stop` | Cancel after the current copy and exit. Finished files are kept, the rest stay in `input`. |
+| `pause` | Interrupt after the current copy. Nothing is lost: finished files are kept and the remainder resumes when the flag is removed. |
 | `pause.<preset>` | Pause one preset across all workspaces. |
 | `pause.<preset>.<workspace>` | Pause a single lane. |
 
@@ -315,7 +317,7 @@ window. Windows controls whether the icon stays on the taskbar or behind the `^`
 the app respects that choice. Startup can be turned off in Settings.
 
 The status bar is always visible and can start, stop, restart, or pause the watcher. Stopping
-asks the watcher to finish the file it is on rather than killing it.
+asks the watcher to finish the copy it is on rather than killing it.
 
 It is monochrome on purpose. Green means a job finished and red means one failed, and those are
 the only two places colour appears, so anything coloured is worth looking at. Work in progress

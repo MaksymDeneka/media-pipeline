@@ -398,7 +398,7 @@ enum SettingCatalog {
         .init(key: "PreferVideoToolbox", label: "Use Apple hardware encoding", help: "Use VideoToolbox when its real test encode succeeds.", group: "Video", defaultValue: "true", kind: .boolean, presetScoped: false),
         .init(key: "VideoToolboxBitrateKbps", label: "VideoToolbox bitrate", help: "Legacy: the V2 ladder sets the hardware bitrate from the byte target. No effect.", group: "Video", defaultValue: "6000", kind: .integer, presetScoped: false),
         .init(key: "MaxrateScale", label: "Size-cap bitrate scale", help: "Legacy: V2 uses maxrate 1.15x and bufsize 2x internally. No effect.", group: "Video", defaultValue: "0.92", kind: .decimal, presetScoped: true),
-        .init(key: "ImageProcessingConcurrency", label: "Files at once", help: "Use auto or a whole number up to six.", group: "Images", defaultValue: "auto", kind: .text, presetScoped: false),
+        .init(key: "ImageProcessingConcurrency", label: "Files at once", help: "Auto uses up to six; a whole number up to your CPU count uses more.", group: "Images", defaultValue: "auto", kind: .text, presetScoped: false),
         .init(key: "CropMinPermille", label: "Minimum crop", help: "Legacy: V2 recrops a deterministic 2-5 permille per copy. No effect.", group: "Images", defaultValue: "5", kind: .integer, presetScoped: true),
         .init(key: "CropMaxPermille", label: "Maximum crop", help: "Legacy: see Minimum crop. No effect.", group: "Images", defaultValue: "20", kind: .integer, presetScoped: true),
         .init(key: "JpegQuality", label: "JPEG quality", help: "Legacy: V2 always uses q:v 2 / quality 92 / level 6. No effect.", group: "Images", defaultValue: "4", kind: .integer, presetScoped: true),

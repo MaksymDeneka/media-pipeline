@@ -13,6 +13,9 @@ namespace MediaPipeline.Core.Runtime;
 /// good siblings keep their outputs. In that case Succeeded is false but Outputs
 /// still lists the kept files and a terminal job.done is emitted. On outer
 /// (batch-wide) failure Outputs is empty: everything was rolled back.
+/// Interruption (pause/stop) also returns Succeeded false with the kept outputs
+/// and a terminal job.cancelled: finished files move to original/, the
+/// interrupted file's partials are deleted, and the remainder stays in input/.
 /// </summary>
 public sealed record JobResult(
     string JobId,
@@ -23,7 +26,8 @@ public sealed record JobResult(
 public sealed class PresetProcessor(
     FfmpegEngine engine,
     EventWriter events,
-    PipelineLogger logger)
+    PipelineLogger logger,
+    WorkerControl control)
 {
     private static readonly JsonSerializerOptions ManifestOptions = new()
     {
@@ -68,6 +72,12 @@ public sealed class PresetProcessor(
         IReadOnlyList<string> setDirectories = [];
         IReadOnlyList<string> setNames = ["."];
 
+        // Method scope so the interruption handler below can trim exactly the
+        // interrupted file's partials while keeping finished files.
+        var currentOutputMark = outputs.Count;
+        var currentDirectoryMark = createdDirectories.Count;
+        var currentVariantMark = variants?.Count ?? 0;
+
         try
         {
             if (preset.Grouping == OutputGrouping.PerSet)
@@ -97,6 +107,12 @@ public sealed class PresetProcessor(
                 var outputMark = outputs.Count;
                 var directoryMark = createdDirectories.Count;
                 var variantMark = variants?.Count ?? 0;
+                currentOutputMark = outputMark;
+                currentDirectoryMark = directoryMark;
+                currentVariantMark = variantMark;
+                // Check after the snapshot: an interruption here must trim nothing,
+                // since this file has not produced anything yet.
+                control.ThrowIfInterrupted(preset.Name, lane.Workspace);
                 try
                 {
                     prepared = await engine.PrepareAsync(
@@ -105,6 +121,7 @@ public sealed class PresetProcessor(
                         file.FullName,
                         MediaClassifier.Classify(file.FullName),
                         cancellationToken);
+                    control.ThrowIfInterrupted(preset.Name, lane.Workspace);
 
                     // Route by probed content, never by filename: bytes win. A file
                     // whose content kind the preset does not accept fails visibly
@@ -213,12 +230,20 @@ public sealed class PresetProcessor(
                 }
             }
 
+            // Marks now cover the whole batch: an interruption during the manifest
+            // write below must keep every finished file, not trim the last one.
+            currentOutputMark = outputs.Count;
+            currentDirectoryMark = createdDirectories.Count;
+            currentVariantMark = variants?.Count ?? 0;
+
             // Per-file job.variant progress events for rolled-back copies cannot be
             // retracted; the terminal job.done (with the true output count) and any
             // per-file job.failed entries tell the final truth.
             if (preset.Manifest && batchDirectory is not null && variants is not null && outputs.Count > 0)
             {
-                await WriteManifestAsync(preset, batchDirectory, variants, cancellationToken);
+                // Uncancellable: a partial manifest.json next to good outputs would
+                // read as corruption. The write is a local sub-second serialize.
+                await WriteManifestAsync(preset, batchDirectory, variants, CancellationToken.None);
             }
             else if (batchDirectory is not null && outputs.Count == 0)
             {
@@ -254,17 +279,79 @@ public sealed class PresetProcessor(
                     outputs,
                     string.Join("; ", failed.Select(entry => $"{entry.File.Name}: {entry.Error}")));
         }
-        catch (OperationCanceledException)
+        catch (LaneInterruption)
         {
-            Rollback(preset, outputs, createdDirectories);
+            // Pause/stop lands here: keep every finished file (its outputs stay on
+            // disk and its source moves to original/), drop only the interrupted
+            // file's partials, and leave that source plus the untouched remainder
+            // in input/ for the next sweep. A stop (or console cancel) rethrows so
+            // the worker exits; a pause returns so the lane loop can idle until
+            // the flag is removed.
+            for (var index = outputs.Count - 1; index >= currentOutputMark; index--)
+            {
+                TryDelete(outputs[index]);
+                outputs.RemoveAt(index);
+            }
+
+            for (var index = createdDirectories.Count - 1; index >= currentDirectoryMark; index--)
+            {
+                TryDeleteDirectory(createdDirectories[index]);
+                createdDirectories.RemoveAt(index);
+            }
+
+            if (variants is not null)
+            {
+                while (variants.Count > currentVariantMark)
+                {
+                    variants.RemoveAt(variants.Count - 1);
+                }
+            }
+
+            if (outputs.Count == 0 && batchDirectory is not null)
+            {
+                // An interrupted batch with nothing kept must not leave an empty
+                // container behind, same as the all-failed path above.
+                TryDeleteDirectory(batchDirectory);
+                createdDirectories.Remove(batchDirectory);
+            }
+
+            foreach (var file in processed)
+            {
+                try
+                {
+                    MoveInput(file.FullName, lane.Original);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                }
+            }
+
+            var interrupted = control.StopRequested
+                ? "Worker stopped before the job completed."
+                : "Paused before the job completed.";
             await events.AppendAsync(new PipelineEvent
             {
                 Name = "job.cancelled",
                 JobId = jobId,
                 Preset = preset.Name,
                 Workspace = lane.Workspace,
-                Error = "Worker stopped before the job completed.",
+                Outputs = outputs.Count,
+                Error = interrupted,
             }, CancellationToken.None);
+            await logger.InfoAsync(
+                $"Preset '{preset.Name}' [{lane.Workspace}] {interrupted} Kept {outputs.Count} output(s).",
+                CancellationToken.None);
+            if (cancellationToken.IsCancellationRequested || control.StopRequested)
+            {
+                throw;
+            }
+
+            return new JobResult(jobId, false, outputs, interrupted);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Genuine shutdown (console token) that is not an operator pause/stop:
+            // exit without touching inputs, so the next start resumes cleanly.
             throw;
         }
         catch (Exception exception)
@@ -339,6 +426,7 @@ public sealed class PresetProcessor(
         // The source hash was captured once in PrepareAsync; never re-read the input here.
         for (var index = 0; index < targets.Count; index++)
         {
+            control.ThrowIfInterrupted(preset.Name, lane.Workspace);
             var seed = MediaTransformSeed.Derive(source.SourceHash, index);
             var variant = await engine.CreateImageVariantAsync(
                 source, targets[index], preset, seed, index, cancellationToken);
@@ -389,6 +477,7 @@ public sealed class PresetProcessor(
 
         for (var index = 0; index < targets.Count; index++)
         {
+            control.ThrowIfInterrupted(preset.Name, lane.Workspace);
             var seed = MediaTransformSeed.Derive(source.SourceHash, index);
             var variant = await engine.CreateVideoVariantAsync(
                 source.ProcessingPath,

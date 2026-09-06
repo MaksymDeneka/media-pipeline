@@ -10,7 +10,11 @@ struct ActivityView: View {
                 if !model.activity.failures.isEmpty {
                     sectionHeader("Failures", count: model.activity.failures.count)
                     ForEach(model.activity.failures) { job in
-                        FailureJobRow(job: job)
+                        // Section-scoped identity: a job moves between failures /
+                        // running / recent as it progresses. Without it, the lazy
+                        // stack can recycle a row view across sections and keep
+                        // showing stale running content for a finished job.
+                        FailureJobRow(job: job).id("failed-\(job.id)")
                         Divider()
                     }
                 }
@@ -19,7 +23,7 @@ struct ActivityView: View {
                     EmptySection(text: "No jobs are running.")
                 } else {
                     ForEach(model.activity.running) { job in
-                        RunningJobRow(job: job)
+                        RunningJobRow(job: job).id("running-\(job.id)")
                         Divider()
                     }
                 }
@@ -34,7 +38,7 @@ struct ActivityView: View {
                 }
                 sectionHeader("Recent", count: model.activity.recent.count)
                 ForEach(model.activity.recent.prefix(40)) { job in
-                    CompletedJobRow(job: job)
+                    CompletedJobRow(job: job).id("recent-\(job.id)")
                     Divider()
                 }
             }

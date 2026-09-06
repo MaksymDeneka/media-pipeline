@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using MediaPipeline.Core.IO;
 using MediaPipeline.Core.Tools;
@@ -270,7 +271,7 @@ public sealed class UploadService(PipelinePaths paths)
             job.TransferDirectoryName);
         var result = await SshAsync(
             job.Target,
-            EncodePowerShell(BuildRemoteScript(remoteParts, job.ManifestSha256)),
+            BuildRemoteCommand(remoteParts, job.ManifestSha256),
             cancellationToken);
         if (!result.Succeeded)
         {
@@ -327,8 +328,37 @@ public sealed class UploadService(PipelinePaths paths)
     }
 
     private static string EncodePowerShell(string script) =>
-        $"powershell -NoProfile -NonInteractive -EncodedCommand " +
-        Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        BuildRemoteCommandFromScript(script);
+
+    /// <summary>
+    /// Wraps the assembly script for a remote powershell -EncodedCommand call.
+    /// The remote sshd runs commands through cmd, whose command line caps at 8191
+    /// characters: the raw script would encode to ~12.5k and always fail with
+    /// "The command line is too long." Deflating first keeps the real command
+    /// around 2k. The bootstrap only embeds base64, so no quoting can break it.
+    /// </summary>
+    public static string BuildRemoteCommandFromScript(string script)
+    {
+        var utf8 = Encoding.UTF8.GetBytes(script);
+        using var output = new MemoryStream();
+        using (var compressor = new DeflateStream(output, CompressionLevel.SmallestSize, leaveOpen: true))
+        {
+            compressor.Write(utf8, 0, utf8.Length);
+        }
+
+        var payload = Convert.ToBase64String(output.ToArray());
+        var bootstrap =
+            "$ErrorActionPreference='Stop';" +
+            "$d=[Convert]::FromBase64String('" + payload + "');" +
+            "$m=New-Object IO.MemoryStream(,$d);" +
+            "$z=New-Object IO.Compression.DeflateStream($m,[IO.Compression.CompressionMode]::Decompress);" +
+            "$r=New-Object IO.StreamReader($z);iex $r.ReadToEnd()";
+        return "powershell -NoProfile -NonInteractive -EncodedCommand " +
+            Convert.ToBase64String(Encoding.Unicode.GetBytes(bootstrap));
+    }
+
+    public static string BuildRemoteCommand(string remotePartsDirectory, string manifestSha256) =>
+        BuildRemoteCommandFromScript(BuildRemoteScript(remotePartsDirectory, manifestSha256));
 
     private static string EscapePowerShellLiteral(string value) => value.Replace("'", "''");
 

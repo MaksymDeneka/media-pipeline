@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using MediaPipeline.Core.Configuration;
@@ -121,8 +123,15 @@ internal static class Program
 
         Check("reads the pipeline root", configuration.PipelineRoot == root, configuration.PipelineRoot);
         Check("falls back after an invalid integer", configuration.Video.Crf == 24, configuration.Video.Crf);
-        Check("caps image concurrency", configuration.Images.ProcessingConcurrency <= 6,
+        Check("caps explicit image concurrency at the CPU count",
+            configuration.Images.ProcessingConcurrency == Math.Min(99, Math.Max(1, Environment.ProcessorCount)),
             configuration.Images.ProcessingConcurrency);
+        var autoConfiguration = PipelineConfigurationLoader.Resolve(
+            IniDocument.Parse([$"PipelineRoot = {root}"]));
+        Check("keeps auto image concurrency at the safe default",
+            autoConfiguration.Images.ProcessingConcurrency ==
+                Math.Min(Math.Max(1, Environment.ProcessorCount), 6),
+            autoConfiguration.Images.ProcessingConcurrency);
         Check("resolves enum values", preset.Grouping == OutputGrouping.PerSet, preset.Grouping);
         Check("resolves boolean aliases", preset.Manifest, preset.Manifest);
         Check("keeps separate media counts", preset.VideoCopies == 0 && preset.ImageCopies == 12,
@@ -609,10 +618,14 @@ internal static class Program
             !remoteScript.Contains("Get-Content", StringComparison.Ordinal) &&
             !remoteScript.Contains("PSScriptRoot", StringComparison.Ordinal), remoteScript);
         var encodedCommandLength =
-            "powershell -NoProfile -NonInteractive -EncodedCommand ".Length +
-            Convert.ToBase64String(Encoding.Unicode.GetBytes(remoteScript)).Length;
-        Check("keeps the remote command below the Windows command-line limit",
-            encodedCommandLength < 32_767, encodedCommandLength);
+            UploadService.BuildRemoteCommand(@"D:\parts\LC\transfer.parts", new string('A', 64)).Length;
+        Check("keeps the remote command below the cmd.exe command-line limit",
+            encodedCommandLength < 8191, encodedCommandLength);
+        Check("decompresses the remote command back to the exact assembly script",
+            InflateRemoteCommand(
+                UploadService.BuildRemoteCommand(@"D:\parts\LC\transfer.parts", new string('A', 64))) ==
+                remoteScript,
+            encodedCommandLength);
 
         uploadJob.RemoteVerified = true;
         await UploadService.ClaimSourceForDeletionAsync(uploadJob);
@@ -813,6 +826,19 @@ internal static class Program
             File.Exists(destinationPath) &&
             await FileChunker.HashAsync(destinationPath) == sourceHash,
             result.CombinedOutput);
+    }
+
+    private static string InflateRemoteCommand(string command)
+    {
+        var bootstrap = Encoding.Unicode.GetString(
+            Convert.FromBase64String(command.Split(' ').Last()));
+        var payload = Convert.FromBase64String(
+            Regex.Match(bootstrap, @"FromBase64String\('([^']+)'\)").Groups[1].Value);
+        using var input = new MemoryStream(payload);
+        using var inflater = new DeflateStream(input, CompressionMode.Decompress);
+        using var output = new MemoryStream();
+        inflater.CopyTo(output);
+        return Encoding.UTF8.GetString(output.ToArray());
     }
 
     private static void Section(string title) => Console.WriteLine($"\n== {title}");
