@@ -171,8 +171,10 @@ final class AppModel: ObservableObject {
 
     func togglePauseAll() async {
         do {
-            try await worker.setPaused(!(status?.pausedAll ?? false))
+            let paused = !(status?.pausedAll ?? false)
+            try await worker.setPaused(paused)
             await refresh()
+            notice = paused ? "Worker paused." : "Worker resumed."
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -180,12 +182,20 @@ final class AppModel: ObservableObject {
 
     func togglePauseLane(_ lane: LaneStatus) async {
         do {
+            let paused = !lane.paused
             try await worker.setPaused(
-                !lane.paused,
+                paused,
                 preset: lane.preset,
                 workspace: lane.workspace
             )
             await refresh()
+            if paused {
+                notice = "Paused \(lane.workspace) · \(lane.preset)."
+            } else if status?.pausedAll == true {
+                notice = "Lane resumed, but Pause All is still on."
+            } else {
+                notice = "Resumed \(lane.workspace) · \(lane.preset)."
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
