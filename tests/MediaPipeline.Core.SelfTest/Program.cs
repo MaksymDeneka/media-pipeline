@@ -31,6 +31,7 @@ internal static class Program
             PathsRejectEscapingSegments(root);
             ControlFlagsRespectScope(root);
             JobArchiveStaysInsideItsLane(root);
+            MediaRequestsKeepIndependentSourcesAndExactCounts(root);
             FileClassificationMatchesTheWatcher();
             FileStabilityRequiresAnUnchangedWindow(root);
             TrimPlanningProtectsShortVideos();
@@ -63,6 +64,62 @@ internal static class Program
             : $"MEDIA PIPELINE CORE SELF-TEST FAILED: {_failures} check(s)");
 
         return _failures == 0 ? 0 : 1;
+    }
+
+    private static void MediaRequestsKeepIndependentSourcesAndExactCounts(string root)
+    {
+        Section("Saved media requests");
+        var configuration = PipelineConfigurationLoader.Resolve(IniDocument.Parse(
+        [
+            $"PipelineRoot = {Path.Combine(root, "requests-test")}",
+            "[preset bulk]", "ImageCopies = 100", "VideoCopies = 0",
+            "CopiesAlternate = 50", "SetCount = 12", "Grouping = PerSet", "Manifest = true",
+            "JpegQuality = 7", "MaxWidth = 640",
+        ]));
+        var paths = new PipelinePaths(configuration.PipelineRoot);
+        var source = Path.Combine(root, "saved photo.JPG");
+        File.WriteAllBytes(source, [1, 2, 3]);
+        var queue = new MediaRequestQueue();
+        var id = queue.Enqueue(configuration, paths, "BULK", "lc", source, 3);
+        var lane = paths.Lane("bulk", "LC");
+        var pending = MediaRequestQueue.Pending(lane);
+        Check("publishes one complete request", pending.Count == 1, pending.Count);
+        var (request, staged) = MediaRequestQueue.Read(pending.Single());
+        Check("keeps the requested count and source name", request.Copies == 3 && staged.Name == "saved photo.JPG", request);
+        File.WriteAllBytes(source, [9]);
+        Check("staged source is independent of the saved original",
+            File.ReadAllBytes(staged.FullName).SequenceEqual(new byte[] { 1, 2, 3 }), staged.FullName);
+        queue.Enqueue(configuration, paths, "bulk", "LC", source, 2);
+        Check("repeated runs have independent requests", MediaRequestQueue.Pending(lane).Count == 2, id);
+        var preset = configuration.Presets.Single();
+        var overridden = MediaRequestQueue.WithCopies(preset, 3);
+        Check("count overrides alternating and set multiplication",
+            overridden.ImageCopies == 3 && overridden.VideoCopies == 3 &&
+            overridden.CopiesAlternate == 0 && overridden.SetCount == 1, overridden);
+        Check("preserves transforms, grouping, and manifest",
+            overridden.JpegQuality == 7 && overridden.MaxWidth == 640 &&
+            overridden.Grouping == OutputGrouping.PerSet && overridden.Manifest, overridden);
+        Check("does not edit the preset", preset.ImageCopies == 100 && preset.SetCount == 12, preset);
+        foreach (var invalid in new[] { 0, -1, 10000 })
+        {
+            try
+            {
+                queue.Enqueue(configuration, paths, "bulk", "LC", source, invalid);
+                Check("rejects invalid copy counts", false, invalid);
+            }
+            catch (ArgumentException) { Check("rejects invalid copy counts", true, invalid); }
+        }
+        foreach (var scope in new[] { ("missing", "LC"), ("bulk", "../escape") })
+        {
+            try
+            {
+                queue.Enqueue(configuration, paths, scope.Item1, scope.Item2, source, 1);
+                Check("rejects unknown request scopes", false, scope);
+            }
+            catch (ArgumentException) { Check("rejects unknown request scopes", true, scope); }
+        }
+        Check("rejected requests leave no published or staging directories",
+            Directory.GetDirectories(MediaRequestQueue.QueueDirectory(lane)).Length == 2, lane.Root);
     }
 
     private static void ConfigurationExpandsHomePaths()
@@ -344,6 +401,22 @@ internal static class Program
 
         var directory = OutputNameGenerator.NewDirectory(output);
         Check("creates a human-named output directory", Directory.Exists(directory), directory);
+
+        var full = Path.Combine(root, "full-output");
+        Directory.CreateDirectory(full);
+        for (var index = 1; index <= 9999; index++)
+        {
+            File.WriteAllBytes(Path.Combine(full, $"IMG_{index:D4}.JPG"), []);
+        }
+        try
+        {
+            OutputNameGenerator.NewFilePath(full, ".jpg");
+            Check("reports a full output directory instead of hanging", false, full);
+        }
+        catch (IOException)
+        {
+            Check("reports a full output directory instead of hanging", true, full);
+        }
     }
 
     private static void FileClassificationMatchesTheWatcher()

@@ -99,6 +99,23 @@ NvencCq = 28
 
 ---
 
+## Reusing saved media on macOS
+
+In the Mac app, open **Saved Media**, save an image or video, and select it. Enter the number of
+copies, choose a workspace and preset, then click **Make Copies**. The app keeps the original
+for later runs and applies the preset's usual media transformations to each output. See the
+[macOS guide](docs/macos-app.md#saved-media) for storage and queue details.
+
+The native worker also accepts requests from the command line:
+
+```sh
+media-pipeline-worker queue-media --config config.ini --file photo.jpg --copies 25 --preset image-bulk --workspace LC
+```
+
+The request waits for the running native worker, or its next `run` or `once` command. The count
+overrides preset copy counts for this request only. Set presets use one set so the total stays
+equal to the requested amount.
+
 ## Workspaces
 
 Workspaces keep different clients or projects apart. Each preset has one folder per workspace:

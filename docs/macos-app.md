@@ -6,7 +6,7 @@ conversion, archiving, and uploads. PowerShell is not part of the Mac runtime.
 
 ## What is included
 
-- Native Activity, Uploads, Presets, and Settings views
+- Native Activity, Saved Media, Uploads, Presets, and Settings views
 - Menu bar status, live progress, pause, restart, logs, and quick access to the main window
 - Apple VideoToolbox detection with libx264 fallback
 - Failure notifications through macOS Notification Center
@@ -19,6 +19,27 @@ conversion, archiving, and uploads. PowerShell is not part of the Mac runtime.
 
 The app supports macOS 13 or newer on Apple silicon. The source is a Swift package, so it can be
 opened directly in Xcode by opening `macos-app/Package.swift`.
+
+## Saved media
+
+Open **Saved Media** and choose **Save Media…** to keep images or videos in the app's library.
+Select an item, enter a whole number from 1 to 9999, choose a workspace and preset, and click
+**Make Copies**. The worker starts if needed. Activity shows progress and provides the usual
+archive, upload, and retry actions.
+
+Each run uses the selected preset's saved image or video transformations, normalization,
+metadata removal, output grouping, and manifest settings. The entered amount is the exact
+number of outputs. Alternating counts are disabled for that run, and set presets use one set.
+The preset configuration stays unchanged. Save pending preset changes before making copies.
+
+The app copies saved originals into
+`~/Library/Application Support/Media Pipeline/saved-media`. You can move or delete the file
+you imported and keep using its saved copy. **Remove** moves the library entry to Trash.
+Already queued runs keep their own source copies and continue independently.
+
+Requests wait in `<workspace>/<preset>/requests` under the pipeline root. Pausing or stopping
+keeps unfinished requests for the next run. Failed requests retain their source and copy count
+in `requests-failed`; Retry in Activity queues them again with that amount.
 
 ## Build the app on the Mac
 
@@ -115,3 +136,13 @@ The C# core and integration suites, Windows build, native parity harness, and cr
 are runnable from Windows. SwiftUI and the final `.app` bundle require Apple's SDK and are verified
 by `swift test`, `plutil`, `codesign`, and a bundled-worker check inside `Build-MacApp.sh` and
 `Test-MacPackage.sh` on the Mac.
+
+With Command Line Tools alone, `Build-MacApp.sh` runs the standalone saved-media self-test
+instead of the XCTest suite. Full Mac unit tests require Xcode. The standalone check covers
+library persistence, independent originals, invalid imports, corrupt entries, and queue arguments.
+If the selected SDK is missing the `SwiftUIMacros` plugin, choose an installed compatible SDK
+for the build, for example:
+
+```zsh
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk zsh tools/Build-MacApp.sh
+```

@@ -121,6 +121,7 @@ public sealed class PipelineWorker(
     {
         var lane = paths.Lane(preset.Name, workspace);
         var files = CandidateFiles(preset, lane);
+        var requests = MediaRequestQueue.Pending(lane);
         _fileStability.ForgetMissingFilesInDirectory(
             lane.Input,
             files.Select(file => file.FullName));
@@ -129,17 +130,52 @@ public sealed class PipelineWorker(
         {
             Preset = preset.Name,
             Workspace = workspace,
-            Queued = files.Count,
+            Queued = files.Count + requests.Count,
             Paused = paused,
         };
 
-        if (paused || files.Count == 0)
+        if (paused)
         {
-            if (files.Count == 0)
-            {
-                _batchObservations.Remove(LaneKey(preset.Name, workspace));
-            }
+            return;
+        }
 
+        foreach (var directory in requests)
+        {
+            if (control.IsPaused(preset.Name, workspace) || control.StopRequested) { return; }
+            MediaRequest request;
+            FileInfo source;
+            try
+            {
+                (request, source) = MediaRequestQueue.Read(directory);
+            }
+            catch (Exception exception) when (exception is System.Text.Json.JsonException or
+                ArgumentException or IOException or InvalidDataException)
+            {
+                // Preserve malformed requests for inspection without blocking normal input.
+                MediaRequestQueue.PreserveFailed(lane, directory);
+                await logger.ErrorAsync($"Rejected media request [{workspace}/{preset.Name}]: {exception.Message}", cancellationToken);
+                continue;
+            }
+            if (source.Exists)
+            {
+                await processor.ProcessGroupAsync(
+                    MediaRequestQueue.WithCopies(preset, request.Copies),
+                    lane with { Failed = Path.Combine(directory, "failed") }, [source], cancellationToken);
+            }
+            // Keep failed requests with their count so Retry does not use the preset count.
+            if (File.Exists(Path.Combine(directory, "failed", request.FileName)))
+            {
+                MediaRequestQueue.PreserveFailed(lane, directory);
+                continue;
+            }
+            // Processing moves completed sources to the normal lane originals folder.
+            // Paused sources stay staged, so the request survives a worker restart.
+            if (!File.Exists(source.FullName)) { Directory.Delete(directory, recursive: true); }
+        }
+
+        if (files.Count == 0)
+        {
+            _batchObservations.Remove(LaneKey(preset.Name, workspace));
             return;
         }
 

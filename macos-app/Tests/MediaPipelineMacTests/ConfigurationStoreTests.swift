@@ -88,6 +88,7 @@ final class ConfigurationStoreTests: XCTestCase {
         XCTAssertEqual(document.globals()["PipelineRoot"], "/Users/me/Media #2")
     }
 
+    @MainActor
     func testRelativePipelineRootResolvesBesideConfig() throws {
         let base = URL(fileURLWithPath: "/tmp/media-pipeline-config", isDirectory: true)
         let store = ConfigurationStore(configURL: base.appendingPathComponent("config.ini"))

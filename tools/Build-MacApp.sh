@@ -10,6 +10,11 @@ app="$artifact_root/Media Pipeline.app"
 worker_entitlements="$package_dir/Worker.entitlements"
 configuration=${CONFIGURATION:-release}
 sign_identity=${SIGN_IDENTITY:--}
+build_jobs=${HEATUP_LOCAL_TEST_WORKERS:-2}
+swift_sdk_args=()
+if [[ -n "${SDKROOT:-}" ]]; then
+    swift_sdk_args=(--sdk "$SDKROOT")
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "Build-MacApp.sh must run on macOS."
@@ -43,10 +48,17 @@ dotnet publish "$repo_root/src/MediaPipeline.Worker/MediaPipeline.Worker.csproj"
     -o "$worker_output" \
     --nologo
 
-swift test --package-path "$package_dir"
-swift build --package-path "$package_dir" -c "$configuration" --arch arm64
+developer_dir=$(xcode-select -p)
+if [[ -d "$developer_dir/Platforms/MacOSX.platform/Developer/Library/Frameworks/XCTest.framework" || \
+      -d "$developer_dir/Library/Developer/Frameworks/XCTest.framework" ]]; then
+    swift test --package-path "$package_dir" --jobs "$build_jobs" "${swift_sdk_args[@]}"
+else
+    echo "XCTest is unavailable. Running the saved-media self-test; full Mac tests require Xcode."
+    zsh "$repo_root/tools/Test-MacSavedMedia.sh"
+fi
+swift build --package-path "$package_dir" -c "$configuration" --arch arm64 --jobs "$build_jobs" "${swift_sdk_args[@]}"
 
-binary_path=$(swift build --package-path "$package_dir" -c "$configuration" --arch arm64 --show-bin-path)
+binary_path=$(swift build --package-path "$package_dir" -c "$configuration" --arch arm64 --jobs "$build_jobs" "${swift_sdk_args[@]}" --show-bin-path)
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
 cp "$binary_path/MediaPipelineMac" "$app/Contents/MacOS/MediaPipelineMac"

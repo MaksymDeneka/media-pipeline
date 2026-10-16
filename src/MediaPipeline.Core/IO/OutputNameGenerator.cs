@@ -101,15 +101,17 @@ public static class OutputNameGenerator
         var normalizedExtension = extension.StartsWith('.') ? extension : "." + extension;
         normalizedExtension = normalizedExtension.ToUpperInvariant();
 
-        while (true)
+        var first = RandomNumberGenerator.GetInt32(1, 10_000);
+        for (var attempt = 0; attempt < 9_999; attempt++)
         {
-            var number = RandomNumberGenerator.GetInt32(1, 10_000);
+            var number = (first - 1 + attempt) % 9_999 + 1;
             var path = Path.Combine(directory, $"IMG_{number:D4}{normalizedExtension}");
             if (!File.Exists(path))
             {
                 return path;
             }
         }
+        throw new IOException($"No unused IMG_####{normalizedExtension} names remain in '{directory}'. Archive outputs before making more copies.");
     }
 
     public static string NewDirectory(string parent)

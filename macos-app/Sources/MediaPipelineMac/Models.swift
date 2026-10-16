@@ -2,6 +2,7 @@ import Foundation
 
 enum AppSection: String, CaseIterable, Identifiable {
     case activity
+    case savedMedia
     case uploads
     case presets
     case settings
@@ -11,6 +12,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .activity: "Activity"
+        case .savedMedia: "Saved Media"
         case .uploads: "Uploads"
         case .presets: "Presets"
         case .settings: "Settings"
@@ -20,6 +22,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .activity: "chart.bar.xaxis"
+        case .savedMedia: "photo.on.rectangle.angled"
         case .uploads: "arrow.up.circle"
         case .presets: "slider.horizontal.3"
         case .settings: "gearshape"

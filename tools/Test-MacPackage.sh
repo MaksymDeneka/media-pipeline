@@ -40,4 +40,12 @@ sed "s|PipelineRoot = ~/MediaPipeline|PipelineRoot = $scratch/root|" \
     > "$scratch/config.ini"
 
 "$worker" check --config "$scratch/config.ini"
+printf 'queue smoke test' > "$scratch/saved.jpg"
+"$worker" queue-media --config "$scratch/config.ini" --file "$scratch/saved.jpg" \
+    --copies 3 --preset image-bulk --workspace LC
+request_count=$(find "$scratch/root/LC/image-bulk/requests" -name request.json | wc -l | tr -d ' ')
+if [[ "$request_count" != "1" ]]; then
+    echo "The bundled worker did not persist the media request."
+    exit 1
+fi
 echo "macOS package checks passed."
