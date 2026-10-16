@@ -14,6 +14,7 @@ struct RootView: View {
                     )
                 }
                 Section("Configure") {
+                    sidebarRow(.savedMedia)
                     sidebarRow(.presets)
                     sidebarRow(.settings)
                 }
@@ -26,6 +27,8 @@ struct RootView: View {
             switch model.selection ?? .activity {
             case .activity:
                 ActivityView()
+            case .savedMedia:
+                SavedMediaView(store: model.savedMedia, configuration: model.configuration)
             case .uploads:
                 UploadsView()
             case .presets:

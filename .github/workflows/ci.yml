@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native-worker:
+    name: Native worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Build worker
+        run: dotnet build src/MediaPipeline.Worker -c Release
+      - name: Core self-tests
+        run: dotnet run --project tests/MediaPipeline.Core.SelfTest -c Release
+      - name: Image and video integration tests
+        run: dotnet run --project tests/MediaPipeline.Integration.SelfTest -c Release
+
+  macos-app:
+    name: macOS app
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      HEATUP_LOCAL_TEST_WORKERS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install FFmpeg
+        run: command -v ffmpeg || brew install ffmpeg
+      - name: Saved media self-test
+        run: zsh tools/Test-MacSavedMedia.sh
+      - name: Test and package Mac app
+        run: zsh tools/Build-MacApp.sh

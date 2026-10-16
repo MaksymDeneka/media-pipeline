@@ -59,13 +59,13 @@ public sealed class WorkerControl(PipelinePaths paths)
         ValidateScope(preset, nameof(preset));
         ValidateScope(workspace, nameof(workspace));
         var lane = paths.Lane(preset, workspace);
+        var moved = MediaRequestQueue.RequeueFailed(lane);
         if (!Directory.Exists(lane.Failed))
         {
-            return 0;
+            return moved;
         }
 
         Directory.CreateDirectory(lane.Input);
-        var moved = 0;
         foreach (var source in Directory.EnumerateFiles(lane.Failed))
         {
             try

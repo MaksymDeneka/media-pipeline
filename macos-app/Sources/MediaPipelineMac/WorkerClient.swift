@@ -107,6 +107,14 @@ final class WorkerClient {
         ])
     }
 
+    func queueMedia(file: URL, copies: Int, preset: String, workspace: String) async throws -> CommandResult {
+        try await run([
+            "queue-media", "--config", configURL.path,
+            "--file", file.path, "--copies", String(copies),
+            "--preset", preset, "--workspace", workspace,
+        ])
+    }
+
     func archive(
         preset: String,
         workspace: String,

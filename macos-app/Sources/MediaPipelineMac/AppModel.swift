@@ -17,6 +17,7 @@ final class AppModel: ObservableObject {
     let worker: WorkerClient
     let activity: ActivityStore
     let uploads: UploadStore
+    let savedMedia: SavedMediaStore
     let loginItem = LoginItemController()
     let notifications = NotificationController()
 
@@ -41,6 +42,9 @@ final class AppModel: ObservableObject {
             let uploads = UploadStore(worker: worker)
             self.activity = activity
             self.uploads = uploads
+            self.savedMedia = try SavedMediaStore(
+                directory: paths.applicationSupport.appendingPathComponent("saved-media", isDirectory: true)
+            )
             activePipelineRoot = configuration.pipelineRoot
 
             // Child stores publish their fast-moving rows independently. Forward those changes
@@ -210,6 +214,30 @@ final class AppModel: ObservableObject {
             activity.dismissFailure(id: job.id)
             await refresh()
             notice = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func queueSavedMedia(_ item: SavedMedia, copies: Int, preset: String, workspace: String) async {
+        guard !workerBusy else { return }
+        workerBusy = true
+        defer { workerBusy = false }
+        do {
+            let result = try await worker.queueMedia(
+                file: savedMedia.sourceURL(for: item), copies: copies, preset: preset, workspace: workspace
+            )
+            guard result.succeeded else { throw WorkerClientError.commandFailed(result.standardError) }
+            notice = "Queued \(copies) copies of \(item.name). Follow progress in Activity."
+            if !workerRunning {
+                do { try await startWorkerOperation() }
+                catch {
+                    throw WorkerClientError.commandFailed(
+                        "Your copies are queued. The worker could not start: \(error.localizedDescription)"
+                    )
+                }
+            }
+            await refresh()
         } catch {
             errorMessage = error.localizedDescription
         }

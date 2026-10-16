@@ -34,6 +34,7 @@ internal static class Program
                 "resume" => SetPause(configPath, args, paused: false),
                 "stop" => Stop(configPath),
                 "requeue" => Requeue(configPath, args),
+                "queue-media" => QueueMedia(configPath, args),
                 "archive" => await ArchiveAsync(configPath, args),
                 "upload" => await UploadAsync(configPath, args),
                 "upload-all" => await UploadAllAsync(configPath, args),
@@ -118,6 +119,21 @@ internal static class Program
         var workspace = RequiredOption(args, "--workspace");
         var moved = new WorkerControl(paths).RequeueFailed(preset, workspace);
         Console.WriteLine($"Requeued {moved} file(s).");
+        return 0;
+    }
+
+    private static int QueueMedia(string configPath, string[] args)
+    {
+        var (configuration, paths) = LoadBaseContext(configPath);
+        if (!int.TryParse(RequiredOption(args, "--copies"), out var copies))
+        {
+            throw new ArgumentException("Copies must be a whole number.");
+        }
+        var id = new MediaRequestQueue().Enqueue(
+            configuration, paths,
+            RequiredOption(args, "--preset"), RequiredOption(args, "--workspace"),
+            RequiredOption(args, "--file"), copies);
+        Console.WriteLine(JsonSerializer.Serialize(new { id, copies }, JsonOptions));
         return 0;
     }
 
@@ -468,6 +484,7 @@ internal static class Program
         Console.WriteLine("  media-pipeline-worker pause|resume [--preset <name>] [--workspace <name>]");
         Console.WriteLine("  media-pipeline-worker stop [--config <path>]");
         Console.WriteLine("  media-pipeline-worker requeue --preset <name> --workspace <name>");
+        Console.WriteLine("  media-pipeline-worker queue-media --file <path> --copies <count> --preset <name> --workspace <name>");
         Console.WriteLine("  media-pipeline-worker archive --preset <name> --workspace <name> --output <path>...");
         Console.WriteLine("  media-pipeline-worker upload --file <path> [--workspace <name>] [--json]");
         Console.WriteLine("  media-pipeline-worker upload-all [--workspace <name>] [--json]");

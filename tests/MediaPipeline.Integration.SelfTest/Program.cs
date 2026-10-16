@@ -47,6 +47,7 @@ internal static class Program
 
             await worker.RunOnceAsync(assumeStable: true);
             await VerifyAsync(paths);
+            await VerifyMediaRequestsAsync(root, tools, encoder, image, video);
             await VerifySizeCapKeepsPresetWidthAsync(root, configuration, engine);
             await VerifyTemporaryCleanupAsync(root, configuration, paths, engine);
             await VerifyReadinessTimeoutAsync(root, tools, encoder);
@@ -68,6 +69,83 @@ internal static class Program
             ? "MEDIA PIPELINE INTEGRATION SELF-TEST OK"
             : $"MEDIA PIPELINE INTEGRATION SELF-TEST FAILED: {_failures} check(s)");
         return _failures == 0 ? 0 : 1;
+    }
+
+    private static async Task VerifyMediaRequestsAsync(
+        string root, Toolchain tools, VideoEncoder encoder, string image, string video)
+    {
+        Section("Saved media request processing");
+        var configuration = PipelineConfigurationLoader.Resolve(IniDocument.Parse(
+        [
+            $"PipelineRoot = {Path.Combine(root, "saved-media-runs")}",
+            "ArchiveEnabled = false", "AssetRetentionDays = 0", "X264Preset = ultrafast",
+            "[preset bulk]", "ImageCopies = 100", "VideoCopies = 100", "CopiesAlternate = 50",
+            "[preset sets]", "ImageCopies = 100", "VideoCopies = 100",
+            "Grouping = PerSet", "SetCount = 10", "Manifest = true",
+        ]));
+        var paths = new PipelinePaths(configuration.PipelineRoot);
+        var events = new EventWriter(paths);
+        var logger = new PipelineLogger(paths);
+        var control = new WorkerControl(paths);
+        var engine = new FfmpegEngine(tools, encoder);
+        PipelineWorker CreateWorker() => new(configuration, paths, engine,
+            new PresetProcessor(engine, events, logger, control), control,
+            new StatusWriter(paths), events, logger, new ArchiveManager(configuration, paths, logger));
+        var queue = new MediaRequestQueue();
+        queue.Enqueue(configuration, paths, "bulk", "LC", image, 3);
+        queue.Enqueue(configuration, paths, "bulk", "LC", video, 2);
+        queue.Enqueue(configuration, paths, "sets", "LC", image, 2);
+        control.SetPaused(true, "bulk", "LC");
+        await CreateWorker().RunOnceAsync(assumeStable: true);
+        var lane = paths.Lane("bulk", "LC");
+        Check("paused requests remain queued", MediaRequestQueue.Pending(lane).Count == 2, lane.Root);
+        Check("paused requests produce no outputs", Directory.GetFiles(lane.Output).Length == 0, lane.Output);
+        control.SetPaused(false, "bulk", "LC");
+        // A fresh worker reads the durable queue, as it would after an app restart.
+        await CreateWorker().RunOnceAsync(assumeStable: true);
+        var images = Directory.GetFiles(lane.Output, "*.JPG");
+        var videos = Directory.GetFiles(lane.Output, "*.MP4");
+        Check("uses exact image count instead of preset/alternate count", images.Length == 3, images.Length);
+        Check("uses exact video count instead of preset/alternate count", videos.Length == 2, videos.Length);
+        Check("image copies have distinct bytes", images.Select(path =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))))
+            .Distinct().Count() == 3, images.Length);
+        Check("video copies have distinct bytes", videos.Select(path =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))))
+            .Distinct().Count() == 2, videos.Length);
+        Check("saved originals stay available", File.Exists(image) && File.Exists(video), image);
+        Check("completed requests leave the queue", MediaRequestQueue.Pending(lane).Count == 0, lane.Root);
+        var setLane = paths.Lane("sets", "LC");
+        Check("set presets still produce the exact requested count",
+            Directory.GetFiles(setLane.Output, "*.JPG", SearchOption.AllDirectories).Length == 2, setLane.Output);
+        Check("set preset keeps its manifest",
+            Directory.GetFiles(setLane.Output, "manifest.json", SearchOption.AllDirectories).Length == 1, setLane.Output);
+        queue.Enqueue(configuration, paths, "bulk", "LC", image, 1);
+        await CreateWorker().RunOnceAsync(assumeStable: true);
+        Check("saved media can run again with a different amount",
+            Directory.GetFiles(lane.Output, "*.JPG").Length == 4, lane.Output);
+        var broken = Path.Combine(root, "broken.jpg");
+        File.WriteAllText(broken, "not an image");
+        var failedId = queue.Enqueue(configuration, paths, "bulk", "LC", broken, 2);
+        await CreateWorker().RunOnceAsync(assumeStable: true);
+        var failedRequest = Path.Combine(MediaRequestQueue.FailedDirectory(lane), failedId);
+        Check("failed requests retain their source and count",
+            File.Exists(Path.Combine(failedRequest, "failed", "broken.jpg")) &&
+            MediaRequestQueue.Read(failedRequest).Request.Copies == 2, failedRequest);
+        // Repair the failed source and retry through the same command used by Activity.
+        File.Copy(image, Path.Combine(failedRequest, "failed", "broken.jpg"), overwrite: true);
+        Check("retries saved media requests", control.RequeueFailed("bulk", "LC") == 1, failedId);
+        await CreateWorker().RunOnceAsync(assumeStable: true);
+        Check("retry keeps the requested amount instead of using the preset amount",
+            Directory.GetFiles(lane.Output, "*.JPG").Length == 6, lane.Output);
+        var malformed = Path.Combine(MediaRequestQueue.QueueDirectory(lane), "malformed");
+        Directory.CreateDirectory(malformed);
+        File.WriteAllText(Path.Combine(malformed, "request.json"), "{broken");
+        queue.Enqueue(configuration, paths, "bulk", "LC", image, 1);
+        await CreateWorker().RunOnceAsync(assumeStable: true);
+        Check("malformed requests do not block valid media",
+            Directory.GetFiles(lane.Output, "*.JPG").Length == 7 &&
+            Directory.Exists(Path.Combine(MediaRequestQueue.FailedDirectory(lane), "malformed")), malformed);
     }
 
     private static PipelineConfiguration CreateConfiguration(string root)
