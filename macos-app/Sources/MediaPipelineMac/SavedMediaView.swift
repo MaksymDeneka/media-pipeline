@@ -131,8 +131,19 @@ struct SavedMediaView: View {
             if presetNames.isEmpty {
                 Text("Enable a preset in Presets to make copies.").font(.caption).foregroundStyle(.secondary)
             }
-            Text("Applies the preset's image or video modifications to each copy. Outputs go to \(workspace)/\(preset)/output. Set and alternating counts do not apply.")
-                .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 18) {
+                Text("Applies the preset's image or video modifications to each copy. Outputs go to \(workspace)/\(preset)/output. Set and alternating counts do not apply.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(2, reservesSpace: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    model.openOutputFolder(preset: preset, workspace: workspace)
+                } label: {
+                    Label("Open Output Folder", systemImage: "folder")
+                }
+                .disabled(!configuration.workspaces.contains(workspace) || !presetNames.contains(preset))
+                .help("Open \(workspace)/\(preset)/output in Finder")
+            }
             if configuration.hasUnsavedChanges {
                 Text("Uses saved settings. Save changes in Presets or Settings before making copies.")
                     .font(.caption).foregroundStyle(.secondary)
