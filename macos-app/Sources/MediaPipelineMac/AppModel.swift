@@ -340,6 +340,21 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func openOutputFolder(preset: String, workspace: String) {
+        let url = activePipelineRoot
+            .appendingPathComponent(workspace, isDirectory: true)
+            .appendingPathComponent(preset, isDirectory: true)
+            .appendingPathComponent("output", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            if !NSWorkspace.shared.open(url) {
+                errorMessage = "Could not open output folder at \(url.path)."
+            }
+        } catch {
+            errorMessage = "Could not open output folder: \(error.localizedDescription)"
+        }
+    }
+
     private func ensureDirectory(_ url: URL) {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }

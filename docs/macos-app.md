@@ -27,6 +27,10 @@ Select an item, enter a whole number from 1 to 9999, choose a workspace and pres
 **Make Copies**. The worker starts if needed. Activity shows progress and provides the usual
 archive, upload, and retry actions.
 
+Click **Open Output Folder** beside the output path to open the selected workspace and preset's
+`output` folder in Finder, for example `general/video-clean/output`. The app creates the folder
+if it does not exist yet.
+
 Each run uses the selected preset's saved image or video transformations, normalization,
 metadata removal, output grouping, and manifest settings. The entered amount is the exact
 number of outputs. Alternating counts are disabled for that run, and set presets use one set.
