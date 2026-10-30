@@ -34,6 +34,12 @@ final class WorkerClient {
     var hasExecutable: Bool { executableURL != nil }
     var managedWorkerIsRunning: Bool { workerProcess?.isRunning == true }
 
+    func isRunning(_ status: WorkerStatus) -> Bool {
+        managedWorkerIsRunning || WorkerProcessIdentity.isRunning(
+            pid: status.pid, startedUtc: status.startedUtc, executableURL: executableURL
+        )
+    }
+
     func check() async throws -> CommandResult {
         try await run(["check", "--config", configURL.path])
     }
@@ -345,5 +351,27 @@ final class WorkerClient {
         }
         self.workerErrorURL = nil
         if workerProcess === process { workerProcess = nil }
+    }
+}
+
+enum WorkerProcessIdentity {
+    static func isRunning(pid: Int32, startedUtc: String, executableURL: URL?) -> Bool {
+        guard pid > 0, let executableURL else { return false }
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0,
+              URL(fileURLWithPath: String(cString: path)).resolvingSymlinksInPath() ==
+                executableURL.resolvingSymlinksInPath() else { return false }
+
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return false }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let started = formatter.date(from: startedUtc)
+        formatter.formatOptions = [.withInternetDateTime]
+        guard let started = started ?? formatter.date(from: startedUtc) else { return false }
+        let processStarted = Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1_000_000
+        // A reused PID can point at another worker too. Its process must predate this run's status.
+        return processStarted <= started.timeIntervalSince1970
     }
 }

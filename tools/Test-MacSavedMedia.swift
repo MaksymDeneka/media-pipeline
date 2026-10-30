@@ -47,6 +47,7 @@ struct SavedMediaSelfTest {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mock.path)
         let config = root.appendingPathComponent("config.ini")
         let worker = WorkerClient(configURL: config, executableURL: mock)
+        try testWorkerIdentity()
         let saved = reloaded.items[0]
         let result = try await worker.queueMedia(
             file: reloaded.sourceURL(for: saved), copies: 3, preset: "bulk", workspace: "LC"
@@ -56,6 +57,37 @@ struct SavedMediaSelfTest {
             "--copies", "3", "--preset", "bulk", "--workspace", "LC",
         ], "submits exact count, scope, and paths with spaces to the worker")
         print("SAVED MEDIA SELF-TEST OK")
+    }
+
+    @MainActor
+    static func testWorkerIdentity() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        try process.run()
+        defer {
+            if process.isRunning { process.terminate() }
+            process.waitUntilExit()
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let currentRun = formatter.string(from: Date())
+        let oldRun = formatter.string(from: Date().addingTimeInterval(-86_400))
+        check(WorkerProcessIdentity.isRunning(
+            pid: process.processIdentifier, startedUtc: currentRun, executableURL: process.executableURL
+        ), "recognizes a live process even when its status timestamp grows old")
+        check(!WorkerProcessIdentity.isRunning(
+            pid: process.processIdentifier, startedUtc: currentRun,
+            executableURL: URL(fileURLWithPath: "/media-pipeline-worker")
+        ), "rejects a stale worker PID reused by an unrelated executable")
+        check(!WorkerProcessIdentity.isRunning(
+            pid: process.processIdentifier, startedUtc: oldRun, executableURL: process.executableURL
+        ), "rejects a stale worker PID reused by the same executable")
+        process.terminate()
+        process.waitUntilExit()
+        check(!WorkerProcessIdentity.isRunning(
+            pid: process.processIdentifier, startedUtc: currentRun, executableURL: process.executableURL
+        ), "rejects an exited worker")
     }
 
     static func check(_ passed: Bool, _ label: String) {
