@@ -116,7 +116,7 @@ final class AppModel: ObservableObject {
             status = decoded
             // The status snapshot is intentionally only rewritten between queue scans. A long
             // encode can therefore make its timestamp old even though the worker is healthy.
-            workerRunning = worker.managedWorkerIsRunning || processExists(decoded.pid)
+            workerRunning = worker.isRunning(decoded)
         } else {
             status = nil
             workerRunning = worker.managedWorkerIsRunning
@@ -229,6 +229,7 @@ final class AppModel: ObservableObject {
             )
             guard result.succeeded else { throw WorkerClientError.commandFailed(result.standardError) }
             notice = "Queued \(copies) copies of \(item.name). Follow progress in Activity."
+            await refresh()
             if !workerRunning {
                 do { try await startWorkerOperation() }
                 catch {
@@ -386,12 +387,6 @@ final class AppModel: ObservableObject {
         throw WorkerClientError.commandFailed(
             "The worker did not stop within two minutes. It was left running."
         )
-    }
-
-    private func processExists(_ pid: Int32) -> Bool {
-        guard pid > 0 else { return false }
-        if Darwin.kill(pid, 0) == 0 { return true }
-        return errno == EPERM
     }
 
 }
