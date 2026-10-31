@@ -49,6 +49,7 @@ internal static class Program
             await VerifyAsync(paths);
             await VerifyMediaRequestsAsync(root, tools, encoder, image, video);
             await VerifySizeCapKeepsPresetWidthAsync(root, configuration, engine);
+            await VerifyAuxiliaryAudioAsync(root, tools, configuration, paths, engine);
             await VerifyTemporaryCleanupAsync(root, configuration, paths, engine);
             await VerifyReadinessTimeoutAsync(root, tools, encoder);
             await VerifyInitialStatusAsync(root, tools, encoder);
@@ -433,6 +434,55 @@ internal static class Program
         Check("waits normally for a later file that reuses a rejected path",
             File.Exists(reusedPath) && !File.Exists(Path.Combine(lane.Failed, "reused.jpg")),
             reusedPath);
+    }
+
+    private static async Task VerifyAuxiliaryAudioAsync(
+        string root, Toolchain tools, PipelineConfiguration configuration, PipelinePaths paths, FfmpegEngine engine)
+    {
+        Section("MOV with unsupported auxiliary audio");
+        var mov = Path.Combine(root, "spatial-audio.mov");
+        await RunRequiredAsync(tools.FFmpeg,
+            ["-y", "-v", "error",
+             "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10",
+             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+             "-f", "lavfi", "-i", "anullsrc=r=48000:cl=quad",
+             "-t", "1", "-map", "0:v", "-map", "1:a", "-map", "2:a",
+             "-c:v", "libx264", "-preset", "ultrafast", "-c:a:0", "aac", "-c:a:1", "pcm_s16le",
+             "-disposition:a:0", "0", "-disposition:a:1", "default", mov]);
+        // Label the auxiliary sample entry as APAC to reproduce decoder selection
+        // without storing a private iPhone recording or needing an APAC encoder.
+        var bytes = await File.ReadAllBytesAsync(mov);
+        var entry = bytes.AsSpan().LastIndexOf("sowt"u8);
+        if (entry < 0) entry = bytes.AsSpan().LastIndexOf("lpcm"u8);
+        if (entry < 0) throw new InvalidDataException("Synthetic MOV has no audio sample entry.");
+        "apac"u8.CopyTo(bytes.AsSpan(entry, 4));
+        await File.WriteAllBytesAsync(mov, bytes);
+        var automatic = await ProcessRunner.RunAsync(tools.FFmpeg,
+            ["-v", "error", "-i", mov, "-frames:v", "1", "-f", "null", "-"]);
+        Check("fixture reproduces unsupported automatic audio selection",
+            !automatic.Succeeded && automatic.CombinedOutput.Contains("decoder", StringComparison.OrdinalIgnoreCase),
+            automatic.CombinedOutput);
+
+        var preset = configuration.Presets.Single(item => item.Name == "video-clean");
+        var source = await engine.PrepareAsync(preset, paths.Lane(preset.Name, "test"), mov, MediaKind.Video);
+        try
+        {
+            var variant = await engine.CreateVideoVariantAsync(source.ProcessingPath,
+                Path.Combine(root, "spatial-audio-output"), preset, await engine.DurationAsync(mov),
+                new FileInfo(mov).Length, new string('b', 64), 1, source.SourceHash);
+            Check("MOV with unsupported auxiliary audio produces video", File.Exists(variant.Path), variant.Path);
+            var audio = Path.Combine(root, "spatial-audio-output.pcm");
+            await RunRequiredAsync(tools.FFmpeg,
+                ["-y", "-v", "error", "-i", variant.Path, "-map", "0:a:0",
+                 "-c:a", "pcm_s16le", "-f", "s16le", audio]);
+            var samples = await File.ReadAllBytesAsync(audio);
+            Check("MOV output retains audible primary audio",
+                samples.Length > 0 && samples.Any(value => value != 0), samples.Length);
+        }
+        finally
+        {
+            FfmpegEngine.RemoveTemporarySource(source);
+        }
     }
 
     private static async Task VerifyTemporaryCleanupAsync(

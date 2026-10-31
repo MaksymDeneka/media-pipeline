@@ -164,9 +164,12 @@ public sealed class FfmpegEngine(
 
         try
         {
+            // Validate the video frame only. Automatic stream selection can pick
+            // an unsupported auxiliary audio track, such as iPhone APAC, even
+            // when the first audio track used by the encoder is valid AAC.
             await RunRequiredAsync(
                 tools.FFmpeg,
-                ["-v", "error", "-i", sourcePath, "-frames:v", "1", "-f", "null", "-"],
+                ["-v", "error", "-i", sourcePath, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
                 cancellationToken);
         }
         catch (OperationCanceledException exception) when (!outerToken.IsCancellationRequested)
