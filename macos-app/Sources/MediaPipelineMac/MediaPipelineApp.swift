@@ -27,7 +27,10 @@ struct MediaPipelineApp: App {
             RootView()
                 .environmentObject(model)
                 .frame(minWidth: 860, minHeight: 560)
-                .onAppear { model.startMonitoring() }
+                .onAppear {
+                    appDelegate.model = model
+                    model.startMonitoring()
+                }
         }
         .defaultSize(width: 1120, height: 720)
         .commands {
@@ -52,7 +55,10 @@ struct MediaPipelineApp: App {
         MenuBarExtra {
             MenuBarPanel()
                 .environmentObject(model)
-                .onAppear { model.startMonitoring() }
+                .onAppear {
+                    appDelegate.model = model
+                    model.startMonitoring()
+                }
         } label: {
             Image(systemName: model.menuBarSymbol)
                 .accessibilityLabel("Media Pipeline")
@@ -61,7 +67,22 @@ struct MediaPipelineApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var model: AppModel?
+    private var terminationTask: Task<Void, Never>?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let model else { return .terminateNow }
+        if terminationTask == nil {
+            terminationTask = Task {
+                await model.shutdown()
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }

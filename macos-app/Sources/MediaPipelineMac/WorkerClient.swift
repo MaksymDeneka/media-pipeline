@@ -25,6 +25,8 @@ final class WorkerClient {
     private var lastWorkerError = ""
     private var uploadProcess: Process?
     private var uploadBuffer = ""
+    private var isShuttingDown = false
+    private var commandProcesses: [ObjectIdentifier: Process] = [:]
 
     init(configURL: URL, executableURL: URL?) {
         self.configURL = configURL
@@ -45,6 +47,7 @@ final class WorkerClient {
     }
 
     func start() async throws {
+        guard !isShuttingDown else { throw CancellationError() }
         guard let executableURL else { throw WorkerClientError.executableMissing }
         if workerProcess?.isRunning == true { return }
 
@@ -154,6 +157,7 @@ final class WorkerClient {
         workspace: String,
         onProgress: @escaping @MainActor (UploadProgressEvent) -> Void
     ) async throws -> UploadProgressEvent {
+        guard !isShuttingDown else { throw CancellationError() }
         guard let executableURL else { throw WorkerClientError.executableMissing }
         guard uploadProcess == nil else {
             throw WorkerClientError.commandFailed("Another upload is already running.")
@@ -265,7 +269,64 @@ final class WorkerClient {
         Darwin.kill(uploadProcess.processIdentifier, SIGINT)
     }
 
+    func shutdown(existingWorkerPID: Int32? = nil) async {
+        isShuttingDown = true
+        var processes = Array(commandProcesses.values)
+        if let workerProcess { processes.append(workerProcess) }
+        if let uploadProcess { processes.append(uploadProcess) }
+        var pids = Set(processes.filter(\.isRunning).map(\.processIdentifier))
+        if let pid = existingWorkerPID, !pids.contains(pid), isConfiguredWorker(pid) {
+            pids.insert(pid)
+        }
+
+        // Foundation launches each Process in its own process group. Keep the group IDs
+        // even if a worker exits first, so FFmpeg/rclone/SSH cannot outlive the app.
+        let groups = Set(pids.filter { getpgid($0) == $0 })
+        for pid in pids { Darwin.kill(pid, SIGINT) }
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if !pids.contains(where: Self.processExists) &&
+                !groups.contains(where: { Darwin.kill(-$0, 0) == 0 }) { return }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        for group in groups { Darwin.kill(-group, SIGKILL) }
+        for process in processes where process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+        }
+        // A recovered worker may not have a Process object in this app instance.
+        if let pid = existingWorkerPID, !groups.contains(pid), isConfiguredWorker(pid) {
+            Darwin.kill(pid, SIGKILL)
+        }
+        while processes.contains(where: \.isRunning) ||
+            groups.contains(where: { Darwin.kill(-$0, 0) == 0 }) {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    private static func processExists(_ pid: Int32) -> Bool {
+        Darwin.kill(pid, 0) == 0 || errno == EPERM
+    }
+
+    private func isConfiguredWorker(_ pid: Int32) -> Bool {
+        guard pid > 0, let executableURL else { return false }
+        // Never signal an unrelated process just because watcher.json contains its PID.
+        let query = Process()
+        let output = Pipe()
+        query.executableURL = URL(fileURLWithPath: "/bin/ps")
+        query.arguments = ["-p", String(pid), "-o", "command="]
+        query.standardOutput = output
+        query.standardError = FileHandle.nullDevice
+        guard (try? query.run()) != nil else { return false }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        query.waitUntilExit()
+        let command = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.terminationStatus == 0 &&
+            command == "\(executableURL.path) run --config \(configURL.path)"
+    }
+
     func run(_ arguments: [String]) async throws -> CommandResult {
+        guard !isShuttingDown else { throw CancellationError() }
         guard let executableURL else { throw WorkerClientError.executableMissing }
         let outputURL = temporaryOutputURL(extension: "stdout")
         let errorURL = temporaryOutputURL(extension: "stderr")
@@ -327,7 +388,11 @@ final class WorkerClient {
     }
 
     private func launchAndWait(_ process: Process) async throws -> Int32 {
-        try await withCheckedThrowingContinuation { continuation in
+        guard !isShuttingDown else { throw CancellationError() }
+        let identifier = ObjectIdentifier(process)
+        commandProcesses[identifier] = process
+        defer { commandProcesses.removeValue(forKey: identifier) }
+        return try await withCheckedThrowingContinuation { continuation in
             process.terminationHandler = { finished in
                 continuation.resume(returning: finished.terminationStatus)
             }

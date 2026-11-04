@@ -20,6 +20,10 @@ conversion, archiving, and uploads. PowerShell is not part of the Mac runtime.
 The app supports macOS 13 or newer on Apple silicon. The source is a Swift package, so it can be
 opened directly in Xcode by opening `macos-app/Package.swift`.
 
+**Quit Media Pipeline** or **Cmd+Q** stops the worker, active uploads, and their child
+processes before the app exits. Unfinished requests stay queued for the next launch.
+Closing the window keeps the app available in the menu bar.
+
 ## Saved media
 
 Open **Saved Media** and choose **Save Media…** to keep images or videos in the app's library.
