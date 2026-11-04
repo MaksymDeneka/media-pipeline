@@ -56,6 +56,7 @@ else
     echo "XCTest is unavailable. Running the saved-media self-test; full Mac tests require Xcode."
     zsh "$repo_root/tools/Test-MacSavedMedia.sh"
 fi
+zsh "$repo_root/tools/Test-MacQuit.sh"
 swift build --package-path "$package_dir" -c "$configuration" --arch arm64 --jobs "$build_jobs" "${swift_sdk_args[@]}"
 
 binary_path=$(swift build --package-path "$package_dir" -c "$configuration" --arch arm64 --jobs "$build_jobs" "${swift_sdk_args[@]}" --show-bin-path)

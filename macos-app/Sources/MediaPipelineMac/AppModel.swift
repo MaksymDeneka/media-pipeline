@@ -22,6 +22,7 @@ final class AppModel: ObservableObject {
     let notifications = NotificationController()
 
     private var monitoringTask: Task<Void, Never>?
+    private var isShuttingDown = false
     private var failureStateActive = false
     private var activePipelineRoot: URL
     private var observations: Set<AnyCancellable> = []
@@ -82,11 +83,12 @@ final class AppModel: ObservableObject {
     }
 
     func startMonitoring() {
-        guard monitoringTask == nil else { return }
+        guard monitoringTask == nil, !isShuttingDown else { return }
         notifications.prepare()
         monitoringTask = Task { [weak self] in
             guard let self else { return }
             await refresh()
+            guard !Task.isCancelled else { return }
             if !workerRunning,
                worker.hasExecutable,
                UserDefaults.standard.object(forKey: "startWorkerOnLaunch") as? Bool != false,
@@ -96,6 +98,7 @@ final class AppModel: ObservableObject {
 
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
                 await refresh()
             }
         }
@@ -104,6 +107,13 @@ final class AppModel: ObservableObject {
     func stopMonitoring() {
         monitoringTask?.cancel()
         monitoringTask = nil
+    }
+
+    func shutdown() async {
+        isShuttingDown = true
+        stopMonitoring()
+        uploads.cancel()
+        await worker.shutdown(existingWorkerPID: status?.pid)
     }
 
     func refresh() async {
@@ -361,6 +371,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startWorkerOperation() async throws {
+        guard !isShuttingDown else { throw CancellationError() }
         let check = try await worker.check()
         guard check.succeeded else {
             throw WorkerClientError.commandFailed(
@@ -378,6 +389,7 @@ final class AppModel: ObservableObject {
         try await worker.requestStop()
         let deadline = Date().addingTimeInterval(120)
         while Date() < deadline {
+            guard !isShuttingDown else { throw CancellationError() }
             try? await Task.sleep(for: .milliseconds(250))
             await refresh()
             if !workerRunning && !worker.managedWorkerIsRunning {
