@@ -24,7 +24,7 @@ for tool in ffmpeg ffprobe exiftool rclone ssh; do
     fi
 done
 
-remote_name=${RCLONE_REMOTE_NAME:-heatup-remote}
+remote_name=${RCLONE_REMOTE_NAME:-jj2}
 if ! rclone listremotes 2>/dev/null | grep -Fxq "$remote_name:"; then
     echo "Processing dependencies are ready, but uploads still need rclone remote '$remote_name'."
     echo "Copy ~/.config/rclone/rclone.conf from the existing machine or run: rclone config"

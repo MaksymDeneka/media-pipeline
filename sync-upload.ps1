@@ -7,7 +7,7 @@ param(
     [string]$RemotePath,
     [string]$LocalPipelineRoot = 'D:\MediaPipeline',
     [string]$RemotePipelineRoot = '/D:/MediaPipeline',
-    [string]$RemoteName = 'heatup-remote',
+    [string]$RemoteName = 'jj2',
 
     [int]$Transfers = 8,
     [int]$Checkers = 8,

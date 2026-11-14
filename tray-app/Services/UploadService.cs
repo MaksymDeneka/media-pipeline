@@ -42,11 +42,11 @@ public sealed class ChunkProgress
 /// <summary>Where a chunked upload is going, and how it should get there.</summary>
 public sealed record UploadTarget
 {
-    public string RemoteName { get; init; } = "heatup-remote";
+    public string RemoteName { get; init; } = "jj2";
     public string RemoteSftpPartsRoot { get; init; } = "/D:/MediaPipeline/.sync-parts";
     public string RemotePartsRoot { get; init; } = @"D:\MediaPipeline\.sync-parts";
     public string RemoteDirectory { get; init; } = @"D:\MediaPipeline\sync";
-    public string SshHost { get; init; } = "heatup-remote";
+    public string SshHost { get; init; } = "jj2";
     public int SshPort { get; init; } = 2222;
     public string SshKeyFile { get; init; } = "";
     public int ChunkSizeMB { get; init; } = 256;
@@ -63,11 +63,11 @@ public sealed record UploadTarget
 
         return new UploadTarget
         {
-            RemoteName = Get("RemoteName", "heatup-remote"),
+            RemoteName = Get("RemoteName", "jj2"),
             RemoteSftpPartsRoot = Get("RemoteSftpPartsRoot", "/D:/MediaPipeline/.sync-parts"),
             RemotePartsRoot = Get("RemotePartsRoot", @"D:\MediaPipeline\.sync-parts"),
             RemoteDirectory = Get("RemoteDirectory", @"D:\MediaPipeline\sync"),
-            SshHost = Get("RemoteSshHost", "heatup-remote"),
+            SshHost = Get("RemoteSshHost", "jj2"),
             SshPort = int.TryParse(Get("RemoteSshPort", "2222"), out var port) ? port : 2222,
             SshKeyFile = Environment.ExpandEnvironmentVariables(Get("RemoteSshKeyFile", fallbackKey)),
             ChunkSizeMB = int.TryParse(Get("ChunkSizeMB", "256"), out var size) ? size : 256,

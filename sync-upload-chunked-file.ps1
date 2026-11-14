@@ -2,11 +2,11 @@
 param(
     [string]$FilePath,
     [string]$LocalPipelineRoot = 'D:\MediaPipeline',
-    [string]$RemoteName = 'heatup-remote',
+    [string]$RemoteName = 'jj2',
     [string]$RemoteSftpPartsRoot = '/D:/MediaPipeline/.sync-parts',
     [string]$RemotePartsRoot = 'D:\MediaPipeline\.sync-parts',
     [string]$RemoteDirectory = 'D:\MediaPipeline\sync',
-    [string]$RemoteSshHost = 'heatup-remote',
+    [string]$RemoteSshHost = 'jj2',
     [int]$RemoteSshPort = 2222,
     [string]$RemoteSshKeyFile = (Join-Path $HOME '.ssh\heatup_remote_debug_ed25519'),
     [int]$ChunkSizeMB = 256,
