@@ -77,11 +77,11 @@ public sealed record ArchiveOptions
 
 public sealed record UploadOptions
 {
-    public string RemoteName { get; init; } = "heatup-remote";
+    public string RemoteName { get; init; } = "jj2";
     public string RemoteSftpPartsRoot { get; init; } = "/D:/MediaPipeline/.sync-parts";
     public string RemotePartsRoot { get; init; } = @"D:\MediaPipeline\.sync-parts";
     public string RemoteDirectory { get; init; } = @"D:\MediaPipeline\sync";
-    public string RemoteSshHost { get; init; } = "heatup-remote";
+    public string RemoteSshHost { get; init; } = "jj2";
     public int RemoteSshPort { get; init; } = 2222;
     public string RemoteSshKeyFile { get; init; } = "";
     public bool DeleteAfterUpload { get; init; }

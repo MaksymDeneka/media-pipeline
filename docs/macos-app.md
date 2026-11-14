@@ -130,10 +130,10 @@ cp /path/from/old-machine/rclone.conf ~/.config/rclone/rclone.conf
 cp /path/from/old-machine/your-private-key ~/.ssh/your-private-key
 chmod 600 ~/.ssh/your-private-key
 rclone listremotes
-ssh -i ~/.ssh/your-private-key -p 2222 heatup-remote exit
+ssh -i ~/.ssh/your-private-key -p 2222 jj2 exit
 ```
 
-The default configuration expects an rclone remote named `heatup-remote`. Change `RemoteName`,
+The default configuration expects an rclone remote named `jj2`. Change `RemoteName`,
 `RemoteSshHost`, `RemoteSshPort`, and `RemoteSshKeyFile` in Settings if your names differ. The SSH
 probe must use the same host and port as those settings. Private keys and rclone credentials are
 never copied into the app bundle.

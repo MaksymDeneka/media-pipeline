@@ -108,13 +108,13 @@ public static class PipelineConfigurationLoader
             "heatup_remote_debug_ed25519");
         var upload = new UploadOptions
         {
-            RemoteName = globals.String("RemoteName", "heatup-remote"),
+            RemoteName = globals.String("RemoteName", "jj2"),
             RemoteSftpPartsRoot = globals.String(
                 "RemoteSftpPartsRoot", "/D:/MediaPipeline/.sync-parts"),
             RemotePartsRoot = globals.String(
                 "RemotePartsRoot", @"D:\MediaPipeline\.sync-parts"),
             RemoteDirectory = globals.String("RemoteDirectory", @"D:\MediaPipeline\sync"),
-            RemoteSshHost = globals.String("RemoteSshHost", "heatup-remote"),
+            RemoteSshHost = globals.String("RemoteSshHost", "jj2"),
             RemoteSshPort = Math.Clamp(globals.Int("RemoteSshPort", 2222), 1, 65535),
             RemoteSshKeyFile = ExpandHomePath(Environment.ExpandEnvironmentVariables(
                 globals.String("RemoteSshKeyFile", fallbackSshKey))),
