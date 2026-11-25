@@ -31,7 +31,10 @@ Select an item, enter a whole number from 1 to 9999, choose a workspace and pres
 **Make Copies**. The worker starts if needed. Activity shows progress and provides the usual
 archive, upload, and retry actions.
 
-Click **Open Output Folder** beside the output path to open the selected workspace and preset's
+Switch between **Tiles** and **List** using the layout picker. Search by filename, filter by media
+type, and sort by the date saved, name, or file size. The app remembers your layout and sort order.
+
+Click **Output Folder** next to **Make Copies** to open the selected workspace and preset's
 `output` folder in Finder, for example `general/video-clean/output`. The app creates the folder
 if it does not exist yet.
 
