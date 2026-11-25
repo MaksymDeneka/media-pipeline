@@ -14,19 +14,39 @@ final class SavedMediaStoreTests: XCTestCase {
         try original.write(to: source)
 
         let store = try SavedMediaStore(directory: library)
-        try await store.save(source)
-        // Saving the same filename twice must preserve both independent entries.
-        try await store.save(source)
+        let first = try await store.save(source)
+        let repeated = try await store.save(source)
+        XCTAssertTrue(first)
+        XCTAssertFalse(repeated)
+        let tab = try store.createCollection(named: "Campaign")
+        let renamed = root.appendingPathComponent("Other.jpg")
+        try original.write(to: renamed)
+        let renamedCopy = try await store.save(renamed, in: tab.id)
+        XCTAssertFalse(renamedCopy)
+        let different = Data([5, 6, 7, 8])
+        try different.write(to: source)
+        let newContent = try await store.save(source, in: tab.id)
+        XCTAssertTrue(newContent)
         try FileManager.default.removeItem(at: source)
 
         let reloaded = try SavedMediaStore(directory: library)
         XCTAssertEqual(reloaded.items.count, 2)
-        XCTAssertEqual(Set(reloaded.items.map(\.id)).count, 2)
-        for item in reloaded.items {
-            XCTAssertEqual(item.name, "My photo.JPG")
-            XCTAssertTrue(item.isImage)
-            XCTAssertEqual(try Data(contentsOf: reloaded.sourceURL(for: item)), original)
-        }
+        let saved = try XCTUnwrap(reloaded.items(in: SavedMediaCollection.library.id).first)
+        XCTAssertEqual(saved.name, "My photo.JPG")
+        XCTAssertTrue(saved.isImage)
+        XCTAssertEqual(try Data(contentsOf: reloaded.sourceURL(for: saved)), original)
+        let other = try XCTUnwrap(reloaded.items(in: tab.id).first)
+        XCTAssertEqual(other.name, saved.name)
+        XCTAssertEqual(try Data(contentsOf: reloaded.sourceURL(for: other)), different)
+        XCTAssertThrowsError(try reloaded.removeCollection(tab.id))
+        try reloaded.move(other, to: SavedMediaCollection.library.id)
+        try reloaded.renameCollection(tab.id, to: "Archive")
+        let moved = try SavedMediaStore(directory: library)
+        XCTAssertEqual(moved.items(in: SavedMediaCollection.library.id).count, 2)
+        XCTAssertTrue(moved.items(in: tab.id).isEmpty)
+        XCTAssertEqual(moved.collections.first(where: { $0.id == tab.id })?.name, "Archive")
+        try moved.removeCollection(tab.id)
+        XCTAssertEqual(try SavedMediaStore(directory: library).collections, [.library])
     }
 
     func testInvalidImportsAndCorruptEntriesDoNotHideGoodMedia() async throws {

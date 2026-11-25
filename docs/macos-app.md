@@ -34,6 +34,9 @@ archive, upload, and retry actions.
 Switch between **Tiles** and **List** using the layout picker. Search by filename, filter by media
 type, and sort by the date saved, name, or file size. The app remembers your layout and sort order.
 
+Click **+** to create a tab. **Save Media…** adds files to the current tab, and **Move to Tab**
+organizes files already in Saved Media. Imports skip files whose contents already exist in any tab.
+
 Click **Output Folder** next to **Make Copies** to open the selected workspace and preset's
 `output` folder in Finder, for example `general/video-clean/output`. The app creates the folder
 if it does not exist yet.
