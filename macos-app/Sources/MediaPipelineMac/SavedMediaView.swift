@@ -54,16 +54,21 @@ struct SavedMediaView: View {
     @State private var copiesText = "20"
     @State private var search = ""
     @State private var mediaFilter = MediaFilter.all
+    @State private var importNotice: String?
+    @State private var editingTab: SavedMediaCollection?
+    @State private var tabName = ""
+    @State private var tabError: String?
+    @State private var showsTabEditor = false
+    @AppStorage("savedMediaTab") private var tabID = SavedMediaCollection.library.id.uuidString
     @AppStorage("savedMediaLayout") private var layout = Layout.tiles
     @AppStorage("savedMediaSortOrder") private var sortOrder = SortOrder.newest
     @AppStorage("savedMediaWorkspace") private var workspace = "LC"
     @AppStorage("savedMediaPreset") private var preset = "bulk"
 
-    private var visibleItems: [SavedMedia] {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        return store.items.filter {
-            mediaFilter.includes($0) && (query.isEmpty || $0.name.localizedStandardContains(query))
-        }.sorted(by: sortOrder.precedes)
+    private var activeTab: SavedMediaCollection {
+        store.collections.first { $0.id.uuidString == tabID }
+            ?? store.collections.first { $0.id == SavedMediaCollection.library.id }
+            ?? .library
     }
 
     private var copies: Int? {
@@ -80,12 +85,17 @@ struct SavedMediaView: View {
     }
 
     var body: some View {
-        let items = visibleItems
+        let tab = activeTab
+        let tabItems = store.items(in: tab.id)
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let items = tabItems.filter {
+            mediaFilter.includes($0) && (query.isEmpty || $0.name.localizedStandardContains(query))
+        }.sorted(by: sortOrder.precedes)
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Keep media for future batches").font(.headline)
-                    Text("Save an original once, then choose how many processed copies to make.")
+                    Text(importNotice ?? "Save an original once, then choose how many processed copies to make.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -97,17 +107,18 @@ struct SavedMediaView: View {
             ForEach(store.loadWarnings, id: \.self) { warning in
                 Text(warning).font(.caption).foregroundStyle(.red).padding(.horizontal, 22)
             }
-            if store.items.isEmpty {
+            libraryToolbar
+            Divider()
+            tabBar
+            Divider()
+            if tabItems.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "photo.on.rectangle.angled").font(.system(size: 36))
-                    Text("No saved media yet").font(.headline)
-                    Text("Add an image or video to reuse it in later batches.").foregroundStyle(.secondary)
+                    Text("No media in \(tab.name)").font(.headline)
                     Button("Save Media…", action: importMedia)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                libraryToolbar
-                Divider()
                 if items.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "magnifyingglass").font(.system(size: 32))
@@ -120,7 +131,7 @@ struct SavedMediaView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    mediaBrowser(items)
+                    mediaBrowser(items).id(tab.id)
                     Divider()
                     if let selected = items.first(where: { $0.id == selectedID }) {
                         generationControls(selected)
@@ -141,6 +152,105 @@ struct SavedMediaView: View {
         }
         .onChange(of: items) { repairSelection(in: $0) }
         .onChange(of: configuration.presetOrder) { _ in repairCopyOptions() }
+        .sheet(isPresented: $showsTabEditor) { tabEditor }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                tabButtons.fixedSize(horizontal: true, vertical: false)
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) { tabButtons }
+                        .onChange(of: tabID) { proxy.scrollTo($0, anchor: .center) }
+                        .onAppear { proxy.scrollTo(activeTab.id.uuidString, anchor: .center) }
+                }
+            }
+            .frame(height: 24)
+            Button { editTab() } label: { Image(systemName: "plus") }
+                .accessibilityLabel("New tab")
+                .help("New tab")
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 7)
+    }
+
+    private var tabButtons: some View {
+        HStack(spacing: 6) {
+            ForEach(store.collections) { tab in
+                let isSelected = tab.id == activeTab.id
+                Button { selectTab(tab.id) } label: {
+                    Text(tab.name)
+                        .lineLimit(1)
+                        .fontWeight(isSelected ? .semibold : .regular)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: 180)
+                        .background(isSelected ? Color.accentColor.opacity(0.20) : Color.primary.opacity(0.06),
+                                    in: RoundedRectangle(cornerRadius: 5))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .help(tab.name)
+                .id(tab.id.uuidString)
+                .contextMenu {
+                    Button("Rename Tab…") { editTab(tab) }
+                    if tab.id != SavedMediaCollection.library.id {
+                        Button("Delete Empty Tab", role: .destructive) {
+                            do {
+                                try store.removeCollection(tab.id)
+                                if tabID == tab.id.uuidString { selectTab(SavedMediaCollection.library.id) }
+                            } catch { model.errorMessage = error.localizedDescription }
+                        }
+                        .disabled(!store.items(in: tab.id).isEmpty)
+                    }
+                }
+            }
+        }
+    }
+
+    private var tabEditor: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(editingTab == nil ? "New Tab" : "Rename Tab").font(.headline)
+            TextField("Tab name", text: $tabName).textFieldStyle(.roundedBorder)
+            if let tabError { Text(tabError).font(.caption).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("Cancel") { showsTabEditor = false }.keyboardShortcut(.cancelAction)
+                Button(editingTab == nil ? "Create" : "Rename") {
+                    do {
+                        if let editingTab {
+                            try store.renameCollection(editingTab.id, to: tabName)
+                        } else {
+                            let tab = try store.createCollection(named: tabName)
+                            selectTab(tab.id)
+                        }
+                        showsTabEditor = false
+                    } catch { tabError = error.localizedDescription }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(tabName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 320)
+    }
+
+    private func editTab(_ tab: SavedMediaCollection? = nil) {
+        editingTab = tab
+        tabName = tab?.name ?? ""
+        tabError = nil
+        showsTabEditor = true
+    }
+
+    private func selectTab(_ id: UUID) {
+        guard id.uuidString != tabID else { return }
+        tabID = id.uuidString
+        selectedID = nil
+        search = ""
+        mediaFilter = .all
+        importNotice = nil
     }
 
     private var libraryToolbar: some View {
@@ -211,6 +321,7 @@ struct SavedMediaView: View {
                             }
                             .padding(.vertical, 6)
                             .tag(item.id)
+                            .contextMenu { moveMenu(for: item) }
                         }
                     }
                 }
@@ -242,6 +353,7 @@ struct SavedMediaView: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .contextMenu { moveMenu(for: item) }
     }
 
     private func mediaCaption(_ item: SavedMedia) -> some View {
@@ -259,6 +371,7 @@ struct SavedMediaView: View {
                 Text(item.name).font(.headline).lineLimit(1).truncationMode(.middle)
                     .help(item.name)
                 Spacer(minLength: 8)
+                moveMenu(for: item).fixedSize()
                 Button("Preview") { NSWorkspace.shared.open(store.sourceURL(for: item)) }
                 Button("Remove") {
                     do { try store.remove(item) }
@@ -347,7 +460,22 @@ struct SavedMediaView: View {
         if !presetNames.contains(preset) { preset = presetNames.first ?? "" }
     }
 
+    @ViewBuilder
+    private func moveMenu(for item: SavedMedia) -> some View {
+        if store.collections.count > 1 {
+            Menu("Move to Tab") {
+                ForEach(store.collections.filter { $0.id != activeTab.id }) { tab in
+                    Button(tab.name) {
+                        do { try store.move(item, to: tab.id) }
+                        catch { model.errorMessage = error.localizedDescription }
+                    }
+                }
+            }
+        }
+    }
+
     private func importMedia() {
+        let targetTab = activeTab.id
         let panel = NSOpenPanel()
         panel.title = "Save media for reuse"
         panel.canChooseDirectories = false
@@ -359,10 +487,16 @@ struct SavedMediaView: View {
             Task { @MainActor in
                 store.isBusy = true
                 defer { store.isBusy = false }
+                var saved = 0
+                var duplicates = 0
                 for url in panel.urls {
-                    do { try await store.save(url) }
-                    catch { model.errorMessage = "Could not save \(url.lastPathComponent): \(error.localizedDescription)" }
+                    do {
+                        if try await store.save(url, in: targetTab) { saved += 1 }
+                        else { duplicates += 1 }
+                    } catch { model.errorMessage = "Could not save \(url.lastPathComponent): \(error.localizedDescription)" }
                 }
+                let skipped = duplicates == 1 ? "Skipped 1 duplicate." : "Skipped \(duplicates) duplicates."
+                importNotice = duplicates == 0 ? nil : "Saved \(saved). \(skipped)"
             }
         }
     }

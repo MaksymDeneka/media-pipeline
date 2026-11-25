@@ -16,16 +16,35 @@ struct SavedMediaSelfTest {
         let original = Data([1, 2, 3, 4])
         try original.write(to: source)
         let store = try SavedMediaStore(directory: library)
-        try await store.save(source)
-        try await store.save(source)
+        let first = try await store.save(source)
+        let duplicate = try await store.save(source)
+        check(first && !duplicate, "repeat import skips an identical file")
+        let tab = try store.createCollection(named: "Campaign")
+        let alternate = root.appendingPathComponent("Renamed.jpg")
+        try original.write(to: alternate)
+        let renamedDuplicate = try await store.save(alternate, in: tab.id)
+        check(!renamedDuplicate, "identical content is skipped across filenames and tabs")
+        try Data([5, 6, 7, 8]).write(to: source)
+        let distinct = try await store.save(source, in: tab.id)
+        check(distinct, "different content with the same name and size is saved")
         try FileManager.default.removeItem(at: source)
         let reloaded = try SavedMediaStore(directory: library)
         check(reloaded.items.count == 2, "library survives reload and source removal")
-        check(Set(reloaded.items.map(\.id)).count == 2, "duplicate names have independent saved copies")
-        for item in reloaded.items {
-            check(item.name == "My photo.JPG" && item.isImage, "preserves source name and media kind")
-            check(try Data(contentsOf: reloaded.sourceURL(for: item)) == original, "preserves original bytes")
-        }
+        check(reloaded.collections.contains(tab) && reloaded.items(in: tab.id).count == 1, "tabs and membership survive reload")
+        let saved = reloaded.items(in: SavedMediaCollection.library.id)[0]
+        check(saved.name == "My photo.JPG" && saved.isImage, "preserves source name and media kind")
+        check(try Data(contentsOf: reloaded.sourceURL(for: saved)) == original, "preserves original bytes")
+        try reloaded.move(saved, to: tab.id)
+        try reloaded.renameCollection(tab.id, to: "Archive")
+        let moved = try SavedMediaStore(directory: library)
+        check(moved.items(in: tab.id).count == 2 && moved.items(in: SavedMediaCollection.library.id).isEmpty,
+              "moving media updates its saved membership")
+        check(moved.collections.first(where: { $0.id == tab.id })?.name == "Archive", "renamed tabs keep their files")
+        let batchLibrary = try SavedMediaStore(directory: root.appendingPathComponent("concurrent"))
+        async let importOne = batchLibrary.save(alternate)
+        async let importTwo = batchLibrary.save(alternate)
+        let results = try await [importOne, importTwo]
+        check(results.filter { $0 }.count == 1 && batchLibrary.items.count == 1, "concurrent imports commit one copy")
 
         let unsupported = root.appendingPathComponent("notes.txt")
         try Data([1]).write(to: unsupported)
@@ -51,7 +70,6 @@ struct SavedMediaSelfTest {
         let worker = WorkerClient(configURL: config, executableURL: mock)
         try testWorkerIdentity()
         try await testThumbnails(root: root)
-        let saved = reloaded.items[0]
         let result = try await worker.queueMedia(
             file: reloaded.sourceURL(for: saved), copies: 3, preset: "bulk", workspace: "LC"
         )
