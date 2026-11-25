@@ -238,7 +238,8 @@ final class AppModel: ObservableObject {
                 file: savedMedia.sourceURL(for: item), copies: copies, preset: preset, workspace: workspace
             )
             guard result.succeeded else { throw WorkerClientError.commandFailed(result.standardError) }
-            notice = "Queued \(copies) copies of \(item.name). Follow progress in Activity."
+            let unit = copies == 1 ? "copy" : "copies"
+            notice = "Queued \(copies) \(unit) of \(item.name). See Activity for progress."
             await refresh()
             if !workerRunning {
                 do { try await startWorkerOperation() }
