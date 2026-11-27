@@ -24,12 +24,21 @@ opened directly in Xcode by opening `macos-app/Package.swift`.
 processes before the app exits. Unfinished requests stay queued for the next launch.
 Closing the window keeps the app available in the menu bar.
 
+HDR videos, including iPhone Dolby Vision clips with an HLG base layer, are converted to
+BT.709 SDR before H.264 encoding. This prevents pale colors when a destination interprets
+HDR pixels as SDR. The worker prefers Homebrew's `ffmpeg-full`, which includes the required
+`zscale` and `tonemap` filters. `Install-MacDependencies.sh` installs it alongside regular FFmpeg.
+
 ## Saved media
 
 Open **Saved Media** and choose **Save Media…** to keep images or videos in the app's library.
 Select an item, enter a whole number from 1 to 9999, choose a workspace and preset, and click
 **Make Copies**. The worker starts if needed. Activity shows progress and provides the usual
 archive, upload, and retry actions.
+
+Press **Space** on the selected item to open Quick Look. **Command-click** an item to make one
+processed copy with the current preset and put it on the clipboard. The item shows progress
+and confirms when the copy is ready. Drag the confirmation badge to attach the file directly.
 
 Switch between **Tiles** and **List** using the layout picker. Search by filename, filter by media
 type, and sort by the date saved, name, or file size. The app remembers your layout and sort order.
@@ -117,6 +126,11 @@ Presets views, or replace its `config.ini` and change `PipelineRoot` to `~/Media
 `Install-MacDependencies.sh` installs FFmpeg, FFprobe, ExifTool, and rclone with Homebrew. SSH is
 provided by macOS. The worker looks in its bundle, `PATH`, `/opt/homebrew/bin`, and
 `/usr/local/bin`, so it also works when Finder launches the app with a minimal shell environment.
+
+HEIC photos are decoded to a temporary lossless PNG with macOS's built-in `sips` before
+processing. This assembles tiled iPhone photos and applies their orientation. Outputs remain
+JPEG, retain the complete image dimensions, and the temporary PNG is removed after the job.
+On other platforms, tiled HEIF photos require libheif's `heif-convert` in `PATH` or bundled tools.
 
 Uploads still target the configured remote Windows host. The SFTP staging path and the Windows
 assembly path are separate settings because the two sides use different path syntax. A path such

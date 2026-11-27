@@ -41,7 +41,8 @@ public sealed class PresetProcessor(
         PresetOptions preset,
         LanePaths lane,
         IReadOnlyList<FileInfo> files,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? requestId = null)
     {
         var jobId = Guid.NewGuid().ToString("n")[..8];
         var outputs = new List<string>();
@@ -53,6 +54,7 @@ public sealed class PresetProcessor(
         {
             Name = "job.start",
             JobId = jobId,
+            RequestId = requestId,
             Preset = preset.Name,
             Workspace = lane.Workspace,
             Files = files.Select(file => file.Name).ToArray(),
@@ -262,9 +264,16 @@ public sealed class PresetProcessor(
             {
                 Name = "job.done",
                 JobId = jobId,
+                RequestId = requestId,
                 Preset = preset.Name,
                 Workspace = lane.Workspace,
                 Outputs = outputs.Count,
+                Output = requestId is not null && outputs.Count == 1
+                    ? Path.GetRelativePath(lane.Output, outputs[0])
+                    : null,
+                Error = requestId is not null && outputs.Count == 0 && failed.Count > 0
+                    ? failed[0].Error
+                    : null,
             }, cancellationToken);
             await logger.InfoAsync(
                 failed.Count == 0
@@ -333,6 +342,7 @@ public sealed class PresetProcessor(
             {
                 Name = "job.cancelled",
                 JobId = jobId,
+                RequestId = requestId,
                 Preset = preset.Name,
                 Workspace = lane.Workspace,
                 Outputs = outputs.Count,
@@ -369,6 +379,7 @@ public sealed class PresetProcessor(
             {
                 Name = "job.failed",
                 JobId = jobId,
+                RequestId = requestId,
                 Preset = preset.Name,
                 Workspace = lane.Workspace,
                 Error = exception.Message,
@@ -429,7 +440,7 @@ public sealed class PresetProcessor(
             control.ThrowIfInterrupted(preset.Name, lane.Workspace);
             var seed = MediaTransformSeed.Derive(source.SourceHash, index);
             var variant = await engine.CreateImageVariantAsync(
-                source, targets[index], preset, seed, index, cancellationToken);
+                source, targets[index], preset, seed, index, cancellationToken, workDirectory: lane.Work);
             outputs.Add(variant.Path);
             await WriteVariantEventAsync(
                 jobId, preset, lane, file, index + 1, targets.Count, variant.Path, cancellationToken);
@@ -459,8 +470,7 @@ public sealed class PresetProcessor(
         string jobId,
         CancellationToken cancellationToken)
     {
-        // Heatup V2: no segmentation – long videos use the bitrate ladder down to
-        // 160px instead of stream-copy splits. Process the full file with V2.
+        // Process the full clip at the configured quality, without segmentation.
         var duration = await engine.DurationAsync(source.ProcessingPath, cancellationToken);
         long sourceByteCount;
         try

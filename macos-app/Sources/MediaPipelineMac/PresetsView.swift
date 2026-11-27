@@ -53,7 +53,7 @@ struct PresetsView: View {
                 Button("Save and Restart") {
                     Task { await model.saveConfigurationAndRestart() }
                 }
-                .disabled(!store.hasUnsavedChanges)
+                .disabled(!store.hasUnsavedChanges || model.workerBusy)
             }
         }
         .onAppear {

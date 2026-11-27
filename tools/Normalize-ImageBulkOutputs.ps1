@@ -9,7 +9,9 @@ param(
     [ValidateRange(1, 32)]
     [int]$ThrottleLimit = 6,
 
-    [string]$FFmpegPath = "ffmpeg"
+    [string]$FFmpegPath = "ffmpeg",
+
+    [string]$ExifToolPath = "exiftool"
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,11 +47,13 @@ $results = $pngFiles | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
         } while (Test-Path -LiteralPath $targetPath)
     }
 
-    $temporaryPath = Join-Path $directory (
-        ".{0}.{1}.converting.jpg" -f $baseName, [guid]::NewGuid().ToString("N")
-    )
+    $conversionId = [guid]::NewGuid().ToString("N")
+    $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "media-pipeline-jpeg-$conversionId"
+    $encodedPath = Join-Path $stagingDirectory "image.jpg"
+    $temporaryPath = Join-Path $directory ".$conversionId.converting"
 
     try {
+        [void][System.IO.Directory]::CreateDirectory($stagingDirectory)
         & $using:FFmpegPath `
             -y `
             -hide_banner `
@@ -58,20 +62,24 @@ $results = $pngFiles | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
             -frames:v 1 `
             -map_metadata -1 `
             -q:v $using:JpegQuality `
-            $temporaryPath
+            $encodedPath
 
         if ($LASTEXITCODE -ne 0) {
             throw "FFmpeg exited with code $LASTEXITCODE"
         }
-        if (-not (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $encodedPath -PathType Leaf)) {
             throw "FFmpeg did not create the replacement"
         }
-        if ((Get-Item -LiteralPath $temporaryPath).Length -le 0) {
-            throw "FFmpeg created an empty replacement"
+        $exifOutput = & $using:ExifToolPath "-all=" "-o" $temporaryPath $encodedPath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "ExifTool failed: $($exifOutput | Out-String)"
+        }
+        if ([System.IO.FileInfo]::new($temporaryPath).Length -le 0) {
+            throw "The cleaned JPEG is empty"
         }
 
-        Move-Item -LiteralPath $temporaryPath -Destination $targetPath
-        Remove-Item -LiteralPath $sourcePath
+        [System.IO.File]::Move($temporaryPath, $targetPath)
+        Remove-Item -LiteralPath $sourcePath -ErrorAction Stop
 
         [pscustomobject]@{
             Status = "Converted"
@@ -83,10 +91,6 @@ $results = $pngFiles | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
         }
     }
     catch {
-        if (Test-Path -LiteralPath $temporaryPath) {
-            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
-        }
-
         [pscustomobject]@{
             Status = "Failed"
             SourceBytes = $_.Length
@@ -94,6 +98,14 @@ $results = $pngFiles | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
             Source = $sourcePath
             Target = $targetPath
             Error = $_.Exception.Message
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $stagingDirectory) {
+            Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }

@@ -10,8 +10,7 @@ public static class VideoEncoderSelector
     {
         // Heatup approach: capability decides – VideoToolbox is probed with a real
         // test encode where allowed, otherwise CPU libx264. NVENC/AMF paths were
-        // removed: V2 uses a precomputed bitrate ladder with two-pass libx264
-        // (slow) or single-pass VideoToolbox, no CRF/CQ/QP tuning.
+        // removed: videos use libx264 CRF or configured VideoToolbox bitrate.
         // PreferVideoToolbox=false is an explicit opt-out (forces libx264).
         var candidates = new List<string>();
         if (options.PreferVideoToolbox)

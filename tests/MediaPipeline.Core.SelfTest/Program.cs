@@ -34,8 +34,11 @@ internal static class Program
             MediaRequestsKeepIndependentSourcesAndExactCounts(root);
             FileClassificationMatchesTheWatcher();
             FileStabilityRequiresAnUnchangedWindow(root);
+            FileStabilityForgetsParallelCompletions(root);
             TrimPlanningProtectsShortVideos();
             SegmentPlanningPreservesDuration();
+            VideoPlanningPreservesResolutionAndQualitySettings();
+            VideoPlanningConvertsHdrToSdr();
             OutputNamesMatchTheContract(root);
             WorkerLockIsExclusive(root);
             LegacyAndNativeUseTheSameWindowsGuard(root);
@@ -385,6 +388,75 @@ internal static class Program
             string.Join(", ", impossibleRemainder));
     }
 
+    private static void VideoPlanningPreservesResolutionAndQualitySettings()
+    {
+        Section("Video resolution and quality");
+        var configuration = PipelineConfigurationLoader.Resolve(IniDocument.Parse(
+        [
+            "X264Preset = fast", "VideoToolboxBitrateKbps = 6000", "AudioBitrate = 96k",
+            "[preset video-clean]", "Crf = 18", "MaxWidth = 1080",
+        ]));
+        var preset = configuration.Presets.Single();
+        var seed = MediaTransformSeed.Derive(new string('a', 64), 0);
+        MediaTransformPlanner.PlannedVideoTransform Plan(
+            bool hardware, long bytes = 687586, double duration = 7.709025,
+            int width = 720, int height = 1280, int? rotation = null, PresetOptions? options = null) =>
+            MediaTransformPlanner.PlanVideo(seed, 0, "source.mp4", "output.mp4",
+                width, height, rotation, duration, bytes, hardware, options ?? preset);
+        var cpu = Plan(false);
+        Check("keeps low-bitrate portrait resolution",
+            (int)cpu.Evidence["outputWidth"]! == 720 && (int)cpu.Evidence["outputHeight"]! == 1280, cpu.Evidence);
+        Check("source size and duration never force a lower resolution",
+            (int)Plan(false, bytes: 1000, duration: 3600).Evidence["outputWidth"]! == 720, "720px");
+        Check("honors CRF, speed, and audio settings",
+            cpu.Args.Contains("18") && cpu.Args.Contains("fast") && cpu.Args.Contains("96k") &&
+            cpu.Args.Contains("-crf"), string.Join(' ', cpu.Args));
+        Check("does not impose a byte fence or bitrate on CPU quality encoding",
+            !cpu.Args.Contains("-fs") && !cpu.Args.Contains("-b:v") && !cpu.Args.Contains("-pass"), string.Join(' ', cpu.Args));
+        var hardware = Plan(true);
+        Check("hardware encoding uses configured bitrate at original resolution",
+            hardware.Args.Contains("6000k") && !hardware.Args.Contains("-crf") &&
+            (int)hardware.Evidence["outputWidth"]! == 720, string.Join(' ', hardware.Args));
+        var capped = Plan(false, options: preset with { MaxWidth = 600 });
+        Check("only the explicit width cap reduces resolution",
+            (int)capped.Evidence["outputWidth"]! == 600 && (int)capped.Evidence["outputHeight"]! == 1066, capped.Evidence);
+        var rotated = Plan(false, width: 1920, height: 1080, rotation: 90);
+        Check("keeps rotation-aware dimensions without enlarging",
+            (int)rotated.Evidence["outputWidth"]! == 1080 && (int)rotated.Evidence["outputHeight"]! == 1920, rotated.Evidence);
+        Check("metadata removal and microtrim remain active",
+            cpu.Args.Contains("-map_metadata") && cpu.TargetDurationSeconds < 7.709025 &&
+            cpu.TargetDurationSeconds > 7.65, cpu.TargetDurationSeconds);
+    }
+
+    private static void VideoPlanningConvertsHdrToSdr()
+    {
+        Section("HDR video color conversion");
+        var preset = new PresetOptions { Name = "video-clean", MaxWidth = 1080, Crf = 18 };
+        var seed = MediaTransformSeed.Derive(new string('b', 64), 0);
+        foreach (var transfer in new[] { "arib-std-b67", "smpte2084" })
+        foreach (var hardware in new[] { false, true })
+        {
+            var color = new MediaInfo { ColorTransfer = transfer, ColorPrimaries = "bt2020", ColorSpace = "bt2020nc" };
+            var plan = MediaTransformPlanner.PlanVideo(seed, 0, "source.mov", "out.mp4",
+                1920, 1080, 90, 4, 100000, hardware, preset, color);
+            var filter = plan.Args[plan.Args.ToList().IndexOf("-vf") + 1];
+            Check($"{transfer} {hardware} tone maps in linear light before variation",
+                filter.IndexOf("transfer=linear", StringComparison.Ordinal) < filter.IndexOf("tonemap=", StringComparison.Ordinal) &&
+                filter.IndexOf("tonemap=", StringComparison.Ordinal) < filter.IndexOf("eq=", StringComparison.Ordinal) &&
+                filter.Contains("sidedata=mode=delete"), filter);
+            Check($"{transfer} {hardware} explicitly marks SDR output",
+                plan.Args.Contains("-color_trc") && plan.Args.Contains("bt709") &&
+                plan.Evidence["hdrToneMapped"] is true, plan.Evidence);
+        }
+        foreach (var color in new MediaInfo?[] { null, new() { ColorTransfer = "bt709" }, new() { ColorPrimaries = "bt2020" } })
+        {
+            var plan = MediaTransformPlanner.PlanVideo(seed, 0, "source.mp4", "out.mp4",
+                720, 1280, null, 4, 100000, false, preset, color);
+            Check("SDR and untagged inputs retain their existing processing",
+                !plan.Args.Any(arg => arg.Contains("tonemap=")) && !plan.Args.Contains("-color_trc"), plan.Args);
+        }
+    }
+
     private static void OutputNamesMatchTheContract(string root)
     {
         Section("Output naming");
@@ -499,6 +571,36 @@ internal static class Program
                 TimeSpan.FromSeconds(3),
                 TimeSpan.FromSeconds(10),
                 firstSeen.AddSeconds(14)) == StabilityState.Waiting, false);
+    }
+
+    private static void FileStabilityForgetsParallelCompletions(string root)
+    {
+        var tracker = new FileStabilityTracker();
+        var observedAt = DateTimeOffset.UtcNow;
+        var paths = Enumerable.Range(0, 128)
+            .Select(index => Path.Combine(root, $"parallel-input-{index}.jpg"))
+            .ToArray();
+        var workers = int.TryParse(Environment.GetEnvironmentVariable("HEATUP_LOCAL_TEST_WORKERS"), out var limit)
+            ? Math.Clamp(limit, 1, 12)
+            : 12;
+
+        foreach (var path in paths)
+        {
+            File.WriteAllBytes(path, [1]);
+        }
+
+        for (var batch = 0; batch < 16; batch++)
+        {
+            foreach (var path in paths)
+            {
+                tracker.IsReady(path, TimeSpan.Zero, observedAt);
+            }
+
+            Parallel.ForEach(paths, new ParallelOptions { MaxDegreeOfParallelism = workers }, tracker.Forget);
+        }
+
+        Check("observes each file afresh after parallel jobs clear their entries",
+            paths.All(path => !tracker.IsReady(path, TimeSpan.Zero, observedAt)), paths.Length);
     }
 
     private static async Task StatusWritesAtomically(string root)

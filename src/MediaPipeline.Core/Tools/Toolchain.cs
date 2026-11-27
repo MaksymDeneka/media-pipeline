@@ -16,7 +16,6 @@ public sealed record Toolchain
         {
             FFmpeg = FindRequired("ffmpeg", applicationDirectory),
             FFprobe = FindRequired("ffprobe", applicationDirectory),
-            // Heatup approach strips metadata with -map_metadata -1; ExifTool is legacy/optional.
             ExifTool = FindOptional("exiftool", applicationDirectory),
         };
     }
@@ -43,6 +42,14 @@ public sealed record Toolchain
             Path.Combine(applicationDirectory, "tools", runtime, executableName),
             Path.Combine(applicationDirectory, "tools", executableName),
         };
+
+        // Homebrew's regular build omits zscale. Prefer the full build for HDR
+        // tone mapping while keeping explicitly bundled tools first.
+        if (OperatingSystem.IsMacOS() && (name is "ffmpeg" or "ffprobe"))
+        {
+            candidates.Add(Path.Combine("/opt/homebrew/opt/ffmpeg-full/bin", executableName));
+            candidates.Add(Path.Combine("/usr/local/opt/ffmpeg-full/bin", executableName));
+        }
 
         var path = Environment.GetEnvironmentVariable("PATH") ?? "";
         candidates.AddRange(

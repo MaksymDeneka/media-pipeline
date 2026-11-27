@@ -49,7 +49,7 @@ final class UploadStore: ObservableObject {
     }
 
     func refresh(pipelineRoot: URL, workspaceNames: [String]) {
-        workspaces = workspaceNames.map { workspace in
+        let refreshed = workspaceNames.map { workspace in
             let directory = pipelineRoot
                 .appendingPathComponent(workspace, isDirectory: true)
                 .appendingPathComponent("sync", isDirectory: true)
@@ -70,6 +70,7 @@ final class UploadStore: ObservableObject {
             }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             return WorkspaceUploads(name: workspace, files: files)
         }
+        if workspaces != refreshed { workspaces = refreshed }
     }
 
     func upload(_ files: [StagedFile]) {

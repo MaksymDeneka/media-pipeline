@@ -13,6 +13,9 @@ public sealed record PipelineEvent
     [JsonPropertyName("jobId")]
     public string? JobId { get; init; }
 
+    [JsonPropertyName("requestId")]
+    public string? RequestId { get; init; }
+
     [JsonPropertyName("preset")]
     public string? Preset { get; init; }
 

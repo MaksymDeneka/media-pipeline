@@ -142,6 +142,7 @@ public sealed class PipelineWorker(
         foreach (var directory in requests)
         {
             if (control.IsPaused(preset.Name, workspace) || control.StopRequested) { return; }
+            var requestId = Path.GetFileName(directory);
             MediaRequest request;
             FileInfo source;
             try
@@ -153,6 +154,15 @@ public sealed class PipelineWorker(
             {
                 // Preserve malformed requests for inspection without blocking normal input.
                 MediaRequestQueue.PreserveFailed(lane, directory);
+                await events.AppendAsync(new PipelineEvent
+                {
+                    Name = "job.failed",
+                    JobId = Guid.NewGuid().ToString("n")[..8],
+                    RequestId = requestId,
+                    Preset = preset.Name,
+                    Workspace = workspace,
+                    Error = exception.Message,
+                }, cancellationToken);
                 await logger.ErrorAsync($"Rejected media request [{workspace}/{preset.Name}]: {exception.Message}", cancellationToken);
                 continue;
             }
@@ -160,7 +170,7 @@ public sealed class PipelineWorker(
             {
                 await processor.ProcessGroupAsync(
                     MediaRequestQueue.WithCopies(preset, request.Copies),
-                    lane with { Failed = Path.Combine(directory, "failed") }, [source], cancellationToken);
+                    lane with { Failed = Path.Combine(directory, "failed") }, [source], cancellationToken, requestId);
             }
             // Keep failed requests with their count so Retry does not use the preset count.
             if (File.Exists(Path.Combine(directory, "failed", request.FileName)))

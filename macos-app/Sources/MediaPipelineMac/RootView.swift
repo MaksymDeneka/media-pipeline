@@ -43,22 +43,26 @@ struct RootView: View {
                     Button(model.status?.pausedAll == true ? "Resume All" : "Pause All") {
                         Task { await model.togglePauseAll() }
                     }
+                    .disabled(model.workerBusy)
                     Button {
                         Task { await model.restartWorker() }
                     } label: {
                         Label("Restart", systemImage: "arrow.clockwise")
                     }
+                    .disabled(model.workerBusy)
                     Button {
                         Task { await model.stopWorker() }
                     } label: {
                         Label("Stop", systemImage: "stop.fill")
                     }
+                    .disabled(model.workerBusy)
                 } else {
                     Button {
                         Task { await model.startWorker() }
                     } label: {
                         Label("Start", systemImage: "play.fill")
                     }
+                    .disabled(model.workerBusy)
                 }
                 Button {
                     model.openLogs()
@@ -67,7 +71,6 @@ struct RootView: View {
                 }
             }
         }
-        .disabled(model.workerBusy)
         .alert("Media Pipeline", isPresented: errorPresented) {
             Button("OK") { model.errorMessage = nil }
         } message: {

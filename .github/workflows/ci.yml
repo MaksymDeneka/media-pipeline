@@ -18,8 +18,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install FFmpeg and ExifTool
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libimage-exiftool-perl
       - name: Build worker
         run: dotnet build src/MediaPipeline.Worker -c Release
       - name: Core self-tests
@@ -39,7 +39,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Install FFmpeg
-        run: command -v ffmpeg || brew install ffmpeg
+        run: brew install ffmpeg-full
       - name: Saved media self-test
         run: zsh tools/Test-MacSavedMedia.sh
       - name: Test and package Mac app

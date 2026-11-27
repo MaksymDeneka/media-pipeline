@@ -66,7 +66,7 @@ internal static class Program
 
         Console.WriteLine($"FFmpeg         {context.Tools.FFmpeg}");
         Console.WriteLine($"FFprobe        {context.Tools.FFprobe}");
-        Console.WriteLine($"ExifTool       {context.Tools.ExifTool ?? "(optional, not used – metadata stripped with -map_metadata -1)"}");
+        Console.WriteLine($"ExifTool       {context.Tools.ExifTool ?? "(missing, required for JPEG outputs)"}");
         Console.WriteLine($"Encoder        {context.Encoder.Name} ({context.Encoder.Description})");
         Console.WriteLine("Check passed.");
         return 0;
@@ -254,10 +254,9 @@ internal static class Program
             }
         }
 
-        // V2 fences every encode at min(10MiB, source size), so there is nothing
-        // post-hoc to enforce; SizeCapMB is legacy. Say so instead of implying a cap.
+        // Preserve quality instead of recompressing existing outputs to a file-size cap.
         Console.WriteLine(changed == 0
-            ? "Recompressed 0 oversized output(s). (V2 outputs are fenced at encode time; recompress is a no-op.)"
+            ? "Recompressed 0 oversized output(s). (Video encoding preserves quality; recompress is a no-op.)"
             : $"Recompressed {changed} oversized output(s).");
         return 0;
     }

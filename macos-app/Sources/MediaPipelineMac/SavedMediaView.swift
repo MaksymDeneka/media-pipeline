@@ -1,10 +1,15 @@
 import AppKit
+import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct SavedMediaView: View {
     private enum Layout: String {
         case tiles, list
+    }
+
+    private enum EditingField: Hashable {
+        case search, copies
     }
 
     private enum MediaFilter: String, CaseIterable {
@@ -51,7 +56,10 @@ struct SavedMediaView: View {
     @ObservedObject var store: SavedMediaStore
     @ObservedObject var configuration: ConfigurationStore
     @State private var selectedID: UUID?
-    @State private var copiesText = "20"
+    @State private var previewURL: URL?
+    @FocusState private var editingField: EditingField?
+    @State private var copiesText = "1"
+    @State private var isQueueing = false
     @State private var search = ""
     @State private var mediaFilter = MediaFilter.all
     @State private var importNotice: String?
@@ -99,8 +107,9 @@ struct SavedMediaView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if store.isBusy { ProgressView().controlSize(.small) }
+                ProgressView().controlSize(.small).opacity(store.isBusy ? 1 : 0)
                 Button("Save Media…", action: importMedia)
+                    .disabled(store.isBusy)
             }
             .padding(22)
             Divider()
@@ -116,6 +125,7 @@ struct SavedMediaView: View {
                     Image(systemName: "photo.on.rectangle.angled").font(.system(size: 36))
                     Text("No media in \(tab.name)").font(.headline)
                     Button("Save Media…", action: importMedia)
+                        .disabled(store.isBusy)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -145,13 +155,13 @@ struct SavedMediaView: View {
             }
         }
         .navigationTitle("Saved Media")
-        .disabled(store.isBusy)
         .onAppear {
             repairSelection(in: items)
             repairCopyOptions()
         }
         .onChange(of: items) { repairSelection(in: $0) }
         .onChange(of: configuration.presetOrder) { _ in repairCopyOptions() }
+        .quickLookPreview($previewURL)
         .sheet(isPresented: $showsTabEditor) { tabEditor }
     }
 
@@ -261,6 +271,7 @@ struct SavedMediaView: View {
                     .accessibilityHidden(true)
                 TextField("Search by filename", text: $search)
                     .textFieldStyle(.plain)
+                    .focused($editingField, equals: .search)
                 if !search.isEmpty {
                     Button {
                         search = ""
@@ -317,9 +328,15 @@ struct SavedMediaView: View {
                             HStack(spacing: 12) {
                                 MediaThumbnail(url: store.sourceURL(for: item), isImage: item.isImage)
                                 mediaCaption(item)
-                                Spacer()
+                                Spacer(minLength: 112)
                             }
                             .padding(.vertical, 6)
+                            .contentShape(Rectangle())
+                            .simultaneousGesture(quickCopyGesture(item))
+                            .help("Command-click to make and copy one")
+                            .overlay(alignment: .trailing) {
+                                quickCopyBadge(for: item).padding(.trailing, 6)
+                            }
                             .tag(item.id)
                             .contextMenu { moveMenu(for: item) }
                         }
@@ -337,6 +354,7 @@ struct SavedMediaView: View {
         let shape = RoundedRectangle(cornerRadius: 10)
         return Button {
             selectedID = item.id
+            editingField = nil
         } label: {
             VStack(alignment: .leading, spacing: 0) {
                 MediaThumbnail(url: store.sourceURL(for: item), isImage: item.isImage, size: .tile)
@@ -352,8 +370,36 @@ struct SavedMediaView: View {
             .contentShape(shape)
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(quickCopyGesture(item))
+        .help("Command-click to make and copy one")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .contextMenu { moveMenu(for: item) }
+        .overlay(alignment: .topTrailing) {
+            quickCopyBadge(for: item)
+                .padding(7)
+                .frame(height: MediaThumbnail.Size.tile.height, alignment: .bottomTrailing)
+        }
+    }
+
+    private func quickCopyGesture(_ item: SavedMedia) -> some Gesture {
+        TapGesture().modifiers(.command).onEnded { makeOneAndCopy(item) }
+    }
+
+    private var canQuickCopy: Bool {
+        configuration.workspaces.contains(workspace) && presetNames.contains(preset)
+            && !store.isBusy && !isQueueing && !model.workerBusy && model.savedMediaCopy?.status.isPreparing != true
+    }
+
+    private func makeOneAndCopy(_ item: SavedMedia) {
+        guard canQuickCopy else { return }
+        selectedID = item.id
+        let requestedPreset = preset
+        let requestedWorkspace = workspace
+        Task {
+            await model.queueSavedMedia(
+                item, copies: 1, preset: requestedPreset, workspace: requestedWorkspace, copyToClipboard: true
+            )
+        }
     }
 
     private func mediaCaption(_ item: SavedMedia) -> some View {
@@ -372,17 +418,25 @@ struct SavedMediaView: View {
                     .help(item.name)
                 Spacer(minLength: 8)
                 moveMenu(for: item).fixedSize()
-                Button("Preview") { NSWorkspace.shared.open(store.sourceURL(for: item)) }
+                Button("Make One & Copy") { makeOneAndCopy(item) }
+                    .keyboardShortcut(.return, modifiers: .option)
+                    .help("Command-click any item, or press Option-Return for the selection")
+                    .disabled(!canQuickCopy)
+                Button("Preview", action: previewSelection)
+                    .keyboardShortcut(editingField == nil && !showsTabEditor ? KeyboardShortcut(.space, modifiers: []) : nil)
+                    .help("Quick Look (Space)")
                 Button("Remove") {
                     do { try store.remove(item) }
                     catch { model.errorMessage = error.localizedDescription }
                 }
+                .disabled(store.isBusy || isQueueing)
             }
             HStack(alignment: .bottom, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Copies").font(.caption)
                     TextField("1 to 9999", text: $copiesText)
                         .textFieldStyle(.roundedBorder)
+                        .focused($editingField, equals: .copies)
                         .accessibilityLabel("Number of copies")
                 }
                 .frame(width: 60)
@@ -418,15 +472,15 @@ struct SavedMediaView: View {
                     guard let copies else { return }
                     let requestedPreset = preset
                     let requestedWorkspace = workspace
-                    store.isBusy = true
+                    isQueueing = true
                     Task {
-                        defer { store.isBusy = false }
+                        defer { isQueueing = false }
                         await model.queueSavedMedia(item, copies: copies, preset: requestedPreset, workspace: requestedWorkspace)
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .fixedSize()
-                .disabled(copies == nil || !presetNames.contains(preset) || model.workerBusy)
+                .disabled(copies == nil || !presetNames.contains(preset) || isQueueing || store.isBusy || model.workerBusy)
                 .help("Apply the preset to each copy. Set and alternating counts don’t apply.")
             }
             if let feedback {
@@ -441,6 +495,62 @@ struct SavedMediaView: View {
         .padding(.vertical, 12)
     }
 
+    @ViewBuilder
+    private func quickCopyBadge(for item: SavedMedia) -> some View {
+        if let copy = model.savedMediaCopy, copy.itemID == item.id {
+            HStack(spacing: 6) {
+                switch copy.status {
+                case .preparing(let preset, let workspace):
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .controlSize(.small)
+                        .frame(width: 24)
+                        .accessibilityHidden(true)
+                    let progress = quickCopyProgress(preset: preset, workspace: workspace)
+                    Text(progress.title)
+                        .accessibilityLabel(progress.detail)
+                        .help(progress.detail)
+                case .ready(let url, let copied):
+                    Label(copied ? "Copied" : "Ready", systemImage: copied ? "checkmark" : "doc")
+                        .accessibilityLabel(copied ? "Copied to clipboard" : "Copy ready")
+                        .onDrag { NSItemProvider(object: url as NSURL) }
+                        .help("Drag the processed file into your composer")
+                    Button {
+                        model.copySavedMediaOutput(for: item.id)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(copied ? "Copy Again" : "Copy")
+                    .help(copied ? "Copy again" : "Copy to clipboard")
+                case .failed(let message):
+                    Label("Copy failed", systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.red)
+                        .accessibilityHint(message)
+                        .help(message)
+                }
+            }
+            .font(.caption)
+            .lineLimit(1)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(.primary.opacity(0.10))
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func quickCopyProgress(preset: String, workspace: String) -> (title: String, detail: String) {
+        if !model.workerRunning && !model.workerBusy { return ("Waiting", "Waiting for worker…") }
+        if model.status?.pausedAll == true || model.status?.lanes.contains(where: {
+            $0.preset == preset && $0.workspace == workspace && $0.paused
+        }) == true { return ("Paused", "Waiting for worker to resume…") }
+        return ("Preparing…", "Preparing copy…")
+    }
+
     private var feedback: String? {
         if copies == nil { return "Enter a whole number from 1 to 9999." }
         if presetNames.isEmpty { return "Enable a preset in Presets to make copies." }
@@ -453,6 +563,11 @@ struct SavedMediaView: View {
 
     private func repairSelection(in items: [SavedMedia]) {
         if !items.contains(where: { $0.id == selectedID }) { selectedID = items.first?.id }
+    }
+
+    private func previewSelection() {
+        guard let item = store.items.first(where: { $0.id == selectedID }) else { return }
+        previewURL = store.sourceURL(for: item)
     }
 
     private func repairCopyOptions() {

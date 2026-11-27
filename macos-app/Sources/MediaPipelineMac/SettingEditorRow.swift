@@ -28,8 +28,11 @@ struct SettingEditorRow: View {
             }
             Spacer(minLength: 20)
             editor.frame(width: 180)
-            if let preset, definition.presetScoped, overridden {
+            if let preset, definition.presetScoped {
                 Button("Reset") { store.resetPreset(definition, preset: preset) }
+                    .opacity(overridden ? 1 : 0)
+                    .disabled(!overridden)
+                    .accessibilityHidden(!overridden)
             }
         }
         .padding(.vertical, 8)

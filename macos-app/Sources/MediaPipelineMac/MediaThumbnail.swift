@@ -63,6 +63,8 @@ final class MediaThumbnailLoader {
 struct MediaThumbnail: View {
     enum Size {
         case list, tile
+
+        var height: CGFloat { self == .list ? 48 : 176 }
     }
 
     let url: URL
@@ -84,7 +86,7 @@ struct MediaThumbnail: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .frame(width: size == .list ? 72 : nil, height: size == .list ? 48 : 176)
+        .frame(width: size == .list ? 72 : nil, height: size.height)
         .clipShape(RoundedRectangle(cornerRadius: size == .list ? 5 : 0))
         .accessibilityLabel(isImage ? "Image preview" : "Video preview")
         .task(id: request) {

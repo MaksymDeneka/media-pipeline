@@ -6,6 +6,7 @@ final class ActivityStore: ObservableObject {
 
     private struct MutableJob {
         let id: String
+        var requestId: String?
         var preset: String
         var workspace: String
         var files: [String]
@@ -49,6 +50,11 @@ final class ActivityStore: ObservableObject {
     var running: [JobSnapshot] { jobs.filter { $0.state == .running } }
     var failures: [JobSnapshot] { jobs.filter { $0.state == .failed } }
     var recent: [JobSnapshot] { jobs.filter { $0.state != .running } }
+
+    func job(forRequest id: String) -> JobSnapshot? {
+        mutableJobs.values.lazy.filter { $0.requestId == id }
+            .max { $0.startedAt < $1.startedAt }?.snapshot
+    }
 
     func refresh(pipelineRoot: URL, now: Date = Date()) {
         let normalizedRoot = pipelineRoot.standardizedFileURL
@@ -161,6 +167,7 @@ final class ActivityStore: ObservableObject {
         case "job.start":
             mutableJobs[id] = MutableJob(
                 id: id,
+                requestId: event.requestId,
                 preset: event.preset ?? "unknown",
                 workspace: event.workspace ?? "general",
                 files: event.files ?? [],
@@ -184,18 +191,23 @@ final class ActivityStore: ObservableObject {
             mutableJobs[id] = job
         case "job.done":
             var job = mutableJobs[id] ?? reconstructedJob(from: event, id: id, timestamp: timestamp)
+            job.requestId = event.requestId ?? job.requestId
             job.state = .done
+            if let output = event.output { job.outputPaths = [output] }
             job.outputCount = event.outputs ?? job.outputPaths.count
             job.endedAt = timestamp
+            job.error = event.error
             mutableJobs[id] = job
         case "job.failed":
             var job = mutableJobs[id] ?? reconstructedJob(from: event, id: id, timestamp: timestamp)
+            job.requestId = event.requestId ?? job.requestId
             job.state = .failed
             job.error = event.error
             job.endedAt = timestamp
             mutableJobs[id] = job
         case "job.cancelled":
             var job = mutableJobs[id] ?? reconstructedJob(from: event, id: id, timestamp: timestamp)
+            job.requestId = event.requestId ?? job.requestId
             job.state = .cancelled
             job.error = event.error
             job.endedAt = timestamp
@@ -226,6 +238,7 @@ final class ActivityStore: ObservableObject {
     private func reconstructedJob(from event: PipelineEvent, id: String, timestamp: Date) -> MutableJob {
         MutableJob(
             id: id,
+            requestId: event.requestId,
             preset: event.preset ?? "unknown",
             workspace: event.workspace ?? "general",
             files: event.files ?? event.file.map { [$0] } ?? [],

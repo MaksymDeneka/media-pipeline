@@ -116,6 +116,8 @@ public sealed record PresetOptions
     public int NvencCq { get; init; }
     public int AmfQp { get; init; }
     public int Crf { get; init; }
+    public string X264Preset { get; init; } = "medium";
+    public int VideoToolboxBitrateKbps { get; init; } = 6000;
     public int MinTrimMs { get; init; }
     public int MaxTrimMs { get; init; }
     public int CropMinPermille { get; init; }

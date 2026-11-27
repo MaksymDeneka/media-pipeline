@@ -5,8 +5,12 @@ enum AppResources {
     static func url(forResource name: String, withExtension extensionName: String) -> URL? {
         // A signed application stores resources in Contents/Resources. SwiftPM tests and
         // development builds continue to use the generated module bundle as a fallback.
-        Bundle.main.url(forResource: name, withExtension: extensionName)
-            ?? Bundle.module.url(forResource: name, withExtension: extensionName)
+        if let url = Bundle.main.url(forResource: name, withExtension: extensionName) { return url }
+        #if SWIFT_PACKAGE
+        return Bundle.module.url(forResource: name, withExtension: extensionName)
+        #else
+        return nil
+        #endif
     }
 }
 
@@ -301,27 +305,32 @@ final class ConfigurationStore: ObservableObject {
     }
 
     func setGlobal(_ definition: SettingDefinition, value: String) {
+        guard self.value(in: globals, key: definition.key) != value else { return }
         document.setGlobal(definition.key, value: value, section: definition.group)
-        removeValue(in: &globals, key: definition.key)
-        globals[definition.key] = value
-        hasUnsavedChanges = true
+        var values = globals
+        removeValue(in: &values, key: definition.key)
+        values[definition.key] = value
+        globals = values
+        if !hasUnsavedChanges { hasUnsavedChanges = true }
     }
 
     func setPreset(_ definition: SettingDefinition, preset: String, value: String) {
+        guard self.value(in: presets[preset] ?? [:], key: definition.key) != value else { return }
         document.setPreset(preset, key: definition.key, value: value)
         var values = presets[preset] ?? [:]
         removeValue(in: &values, key: definition.key)
         values[definition.key] = value
         presets[preset] = values
-        hasUnsavedChanges = true
+        if !hasUnsavedChanges { hasUnsavedChanges = true }
     }
 
     func resetPreset(_ definition: SettingDefinition, preset: String) {
+        guard hasOverride(definition, preset: preset) else { return }
         document.removePresetValue(preset, key: definition.key)
         var values = presets[preset] ?? [:]
         removeValue(in: &values, key: definition.key)
         presets[preset] = values
-        hasUnsavedChanges = true
+        if !hasUnsavedChanges { hasUnsavedChanges = true }
     }
 
     func addPreset(_ name: String) throws {
@@ -385,19 +394,19 @@ final class ConfigurationStore: ObservableObject {
 enum SettingCatalog {
     static let globals: [SettingDefinition] = [
         .init(key: "PipelineRoot", label: "Pipeline folder", help: "Input, output, logs, and status live here.", group: "General", defaultValue: "~/MediaPipeline", kind: .text, presetScoped: false),
-        .init(key: "Crf", label: "CPU video quality", help: "Legacy: V2 uses two-pass libx264 slow CBR from its bitrate ladder. No effect.", group: "Video", defaultValue: "24", kind: .integer, presetScoped: true),
-        .init(key: "X264Preset", label: "CPU encoding speed", help: "Legacy: V2 always uses two-pass slow (CPU) or VideoToolbox. No effect.", group: "Video", defaultValue: "medium", kind: .choice(["ultrafast", "fast", "medium", "slow", "veryslow"]), presetScoped: false),
-        .init(key: "AudioBitrate", label: "Audio bitrate", help: "Legacy: V2 picks 128/96/64/48/32/16/0k from its audio ladder. No effect.", group: "Video", defaultValue: "128k", kind: .text, presetScoped: true),
-        .init(key: "MaxWidth", label: "Maximum width", help: "Caps the V2 width ladder (1080 down to 160). Smaller files are never enlarged.", group: "Video", defaultValue: "1080", kind: .integer, presetScoped: true),
-        .init(key: "SizeCapMB", label: "Video size cap", help: "Legacy: V2 targets min(10MB, source size) with its own ladder. No effect.", group: "Video", defaultValue: "8", kind: .decimal, presetScoped: true),
-        .init(key: "SizeCapFallbackMaxWidth", label: "Fallback width", help: "Legacy: the V2 ladder descends to 160px on its own. No effect.", group: "Video", defaultValue: "720", kind: .integer, presetScoped: true),
+        .init(key: "Crf", label: "CPU video quality", help: "CPU quality from 0 to 51. Lower values retain more detail and produce larger files.", group: "Video", defaultValue: "24", kind: .integer, presetScoped: true),
+        .init(key: "X264Preset", label: "CPU encoding speed", help: "Slower CPU encoding can produce smaller files at similar quality.", group: "Video", defaultValue: "medium", kind: .choice(["ultrafast", "fast", "medium", "slow", "veryslow"]), presetScoped: false),
+        .init(key: "AudioBitrate", label: "Audio bitrate", help: "AAC audio bitrate, for example 128k. Audio is retained when present.", group: "Video", defaultValue: "128k", kind: .text, presetScoped: true),
+        .init(key: "MaxWidth", label: "Maximum width", help: "Retains source resolution up to this width, preserving aspect ratio. Smaller videos are never enlarged.", group: "Video", defaultValue: "1080", kind: .integer, presetScoped: true),
+        .init(key: "SizeCapMB", label: "Video size cap", help: "Legacy setting. Video outputs preserve resolution and quality without an automatic file-size cap.", group: "Video", defaultValue: "8", kind: .decimal, presetScoped: true),
+        .init(key: "SizeCapFallbackMaxWidth", label: "Fallback width", help: "Legacy setting. Videos are not automatically reduced to fit a file-size cap.", group: "Video", defaultValue: "720", kind: .integer, presetScoped: true),
         .init(key: "MinTrimMs", label: "Minimum trim", help: "Legacy: V2 trims a deterministic 10-40ms per copy. No effect.", group: "Video", defaultValue: "15", kind: .integer, presetScoped: true),
         .init(key: "MaxTrimMs", label: "Maximum trim", help: "Legacy: see Minimum trim. No effect.", group: "Video", defaultValue: "95", kind: .integer, presetScoped: true),
         .init(key: "SegmentTargetSeconds", label: "Segment target", help: "Legacy: V2 never segments. No effect.", group: "Video", defaultValue: "15", kind: .integer, presetScoped: true),
         .init(key: "SegmentMinSeconds", label: "Minimum segment", help: "Legacy: V2 never segments. No effect.", group: "Video", defaultValue: "11", kind: .integer, presetScoped: true),
         .init(key: "PreferVideoToolbox", label: "Use Apple hardware encoding", help: "Use VideoToolbox when its real test encode succeeds.", group: "Video", defaultValue: "true", kind: .boolean, presetScoped: false),
-        .init(key: "VideoToolboxBitrateKbps", label: "VideoToolbox bitrate", help: "Legacy: the V2 ladder sets the hardware bitrate from the byte target. No effect.", group: "Video", defaultValue: "6000", kind: .integer, presetScoped: false),
-        .init(key: "MaxrateScale", label: "Size-cap bitrate scale", help: "Legacy: V2 uses maxrate 1.15x and bufsize 2x internally. No effect.", group: "Video", defaultValue: "0.92", kind: .decimal, presetScoped: true),
+        .init(key: "VideoToolboxBitrateKbps", label: "VideoToolbox bitrate", help: "Apple hardware video bitrate in kbps. Higher values retain more detail and produce larger files.", group: "Video", defaultValue: "6000", kind: .integer, presetScoped: false),
+        .init(key: "MaxrateScale", label: "Size-cap bitrate scale", help: "Legacy setting. Quality encoding does not use a size-cap bitrate scale.", group: "Video", defaultValue: "0.92", kind: .decimal, presetScoped: true),
         .init(key: "ImageProcessingConcurrency", label: "Files at once", help: "Auto uses up to six; a whole number up to your CPU count uses more.", group: "Images", defaultValue: "auto", kind: .text, presetScoped: false),
         .init(key: "CropMinPermille", label: "Minimum crop", help: "Legacy: V2 recrops a deterministic 2-5 permille per copy. No effect.", group: "Images", defaultValue: "5", kind: .integer, presetScoped: true),
         .init(key: "CropMaxPermille", label: "Maximum crop", help: "Legacy: see Minimum crop. No effect.", group: "Images", defaultValue: "20", kind: .integer, presetScoped: true),
@@ -431,7 +440,7 @@ enum SettingCatalog {
         .init(key: "Grouping", label: "Output grouping", help: "Flat, one folder per source, or a batch containing set folders.", group: "Output", defaultValue: "Flat", kind: .choice(["Flat", "PerSource", "PerSet"]), presetScoped: true),
         .init(key: "SetCount", label: "Set count", help: "Number of set folders for PerSet output.", group: "Output", defaultValue: "1", kind: .integer, presetScoped: true),
         .init(key: "Batch", label: "Batch mode", help: "Process files independently or as one settled folder.", group: "Output", defaultValue: "PerFile", kind: .choice(["PerFile", "PerGroup"]), presetScoped: true),
-        .init(key: "Segment", label: "Segment videos", help: "Legacy: V2 never segments; the bitrate ladder handles long videos. Ignored.", group: "Output", defaultValue: "false", kind: .boolean, presetScoped: true),
+        .init(key: "Segment", label: "Segment videos", help: "Legacy setting. The native worker processes each full clip without splitting it.", group: "Output", defaultValue: "false", kind: .boolean, presetScoped: true),
         .init(key: "EnhancedVariation", label: "Stronger variation", help: "Use the stronger V2 variation: wider eq ranges, 4-8 permille recrop, alternate x264 parameters.", group: "Output", defaultValue: "false", kind: .boolean, presetScoped: true),
         .init(key: "Manifest", label: "Write manifest", help: "Add one manifest record per generated variant.", group: "Output", defaultValue: "false", kind: .boolean, presetScoped: true),
         .init(key: "ManifestSchema", label: "Manifest schema", help: "Schema identifier written into generated manifests.", group: "Output", defaultValue: "heatup.assetStoreMediaManifest.v1", kind: .text, presetScoped: true),
