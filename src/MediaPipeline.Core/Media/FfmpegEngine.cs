@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Globalization;
 using MediaPipeline.Core.Configuration;
 using MediaPipeline.Core.IO;
@@ -25,13 +24,12 @@ public sealed record CreatedVariant(
     int? SourceHeight = null);
 
 /// <summary>
-/// V2 media engine ported from heatup sidecar/media-transform (profiles.ts + executor.ts).
-/// Deterministic seeded recipes, no random, no ExifTool, no NVENC/AMF, no segmentation.
+/// Media engine with deterministic transforms and quality-preserving video encoding.
+/// Deterministic seeded recipes, no random, no NVENC/AMF, no segmentation.
 /// - Image: rotation-aware recrop 2-5‰ (enhanced 4-8‰) + lanczos + eq(brightness/contrast/gamma/saturation).
-/// - Video: microtrim 10-40ms (enhanced 20-50ms) + eq + width ladder (1080..160, even dims,
-///   capped by preset MaxWidth) + quality floor + two-pass libx264 slow CBR or single-pass
-///   VideoToolbox, -fs fence + verification.
-/// Metadata is stripped with -map_metadata -1 only.
+/// - Video: microtrim 10-40ms (enhanced 20-50ms) + eq, original resolution capped by
+///   MaxWidth, libx264 CRF or configured VideoToolbox bitrate, with decode verification.
+/// FFmpeg drops input metadata. ExifTool strips JPEG metadata after encoding.
 /// Media kind for limits and routing comes from probed content (see MediaProbe.DetectIdentity),
 /// never from the filename.
 /// </summary>
@@ -162,26 +160,71 @@ public sealed class FfmpegEngine(
             }
         }
 
+        string? normalizedPath = null;
         try
         {
+            // FFmpeg exposes tiled HEIC photos as independent video streams.
+            // Decode the complete primary image once, including its orientation,
+            // rather than sending the first tile through the variant recipe.
+            if (info.IsHeif && (OperatingSystem.IsMacOS() || info.HasTileGrid))
+            {
+                normalizedPath = Path.Combine(Path.GetTempPath(), $"media-pipeline-heic-{Guid.NewGuid():N}.png");
+                if (OperatingSystem.IsMacOS())
+                {
+                    var normalizationArgs = new List<string> { "-s", "format", "png" };
+                    // sips preserves orientation metadata in PNG, while FFmpeg
+                    // ignores that PNG tag. Bake the HEIF display rotation into
+                    // pixels explicitly. FFprobe reports counterclockwise angles.
+                    if (info.RotationDegrees is > 0)
+                        normalizationArgs.AddRange(["--rotate", (360 - info.RotationDegrees.Value).ToString(CultureInfo.InvariantCulture)]);
+                    normalizationArgs.AddRange([sourcePath, "--out", normalizedPath]);
+                    await RunRequiredAsync("/usr/bin/sips",
+                        normalizationArgs, cancellationToken);
+                }
+                else
+                {
+                    var converter = Toolchain.FindOptional("heif-convert")
+                        ?? throw new InvalidOperationException("Tiled HEIF images require libheif's heif-convert tool.");
+                    await RunRequiredAsync(converter, [sourcePath, normalizedPath], cancellationToken);
+                }
+
+                var normalized = await _probe.ReadAsync(normalizedPath, cancellationToken);
+                if (normalized.Width is null or <= 0 or > MediaTransformPlanner.MaxSourceDimension ||
+                    normalized.Height is null or <= 0 or > MediaTransformPlanner.MaxSourceDimension ||
+                    (long)normalized.Width.Value * normalized.Height.Value > MediaTransformPlanner.MaxSourcePixels ||
+                    normalized.HasTileGrid)
+                {
+                    throw new InvalidDataException("HEIF normalization did not produce a safe complete image.");
+                }
+                if (info.HasTileGrid &&
+                    !((normalized.Width == info.Width && normalized.Height == info.Height) ||
+                      (normalized.Width == info.Height && normalized.Height == info.Width)))
+                {
+                    throw new InvalidDataException("HEIF normalization dimensions do not match the complete tile grid.");
+                }
+            }
+
             // Validate the video frame only. Automatic stream selection can pick
             // an unsupported auxiliary audio track, such as iPhone APAC, even
             // when the first audio track used by the encoder is valid AAC.
             await RunRequiredAsync(
                 tools.FFmpeg,
-                ["-v", "error", "-i", sourcePath, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
+                ["-v", "error", "-i", normalizedPath ?? sourcePath, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
                 cancellationToken);
+
+            return new PreparedSource(sourcePath, normalizedPath ?? sourcePath, normalizedPath, detectedKind, sourceHash);
         }
         catch (OperationCanceledException exception) when (!outerToken.IsCancellationRequested)
         {
+            TryDelete(normalizedPath);
             throw new InvalidDataException(
                 $"Media preparation validation timed out after 5 minutes: '{sourcePath}'.", exception);
         }
-
-        // No HEIC temp PNG, no MOV remux – ffmpeg handles normalization directly
-        // via the planned output extension + filters, like heatup. The source hash
-        // is captured once here so variants never re-read the input for comparison.
-        return new PreparedSource(sourcePath, sourcePath, null, detectedKind, sourceHash);
+        catch
+        {
+            TryDelete(normalizedPath);
+            throw;
+        }
     }
 
     public static void RemoveTemporarySource(PreparedSource source)
@@ -198,11 +241,14 @@ public sealed class FfmpegEngine(
         PresetOptions preset,
         string seed,
         int ordinal,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? workDirectory = null)
     {
         Directory.CreateDirectory(outputDirectory);
         var info = await WithFileBudgetAsync(
-            token => _probe.ReadAsync(source.ProcessingPath, token),
+            token => source.TemporaryPath is null
+                ? _probe.ReadImageAsync(source.ProcessingPath, token)
+                : _probe.ReadAsync(source.ProcessingPath, token),
             $"Image probe for '{source.SourcePath}'",
             cancellationToken);
         if (info.Width is null or <= 0 || info.Height is null or <= 0)
@@ -211,7 +257,8 @@ public sealed class FfmpegEngine(
         }
 
         var (_, probedExtension) = MediaProbe.DetectIdentity(info);
-        var sourceExtension = probedExtension;
+        // Normalization uses lossless PNG internally; HEIF outputs remain JPEG.
+        var sourceExtension = source.TemporaryPath is not null ? ".jpg" : probedExtension;
         var planned = MediaTransformPlanner.PlanImage(
             seed,
             source.ProcessingPath,
@@ -220,54 +267,106 @@ public sealed class FfmpegEngine(
             info.Width.Value,
             info.Height.Value,
             info.RotationDegrees,
-            preset.EnhancedVariation);
+            preset.EnhancedVariation,
+            autoRotate: source.TemporaryPath is null);
 
-        var outputPath = OutputNameGenerator.NewFilePath(outputDirectory, planned.OutputExtension);
-        AssertOutputExtension(outputPath, planned.OutputExtension);
-        var args = ReplaceExactPath(planned.Args, "__planning__", outputPath);
-        // Heatup -fs fence: output must fit its kind limit.
-        var fenced = InsertFsFence(args, planned.OutputByteLimit, outputPath);
+        string? exifTool = null;
+        string? stagingDirectory = null;
+        if (planned.OutputExtension is ".jpg" or ".jpeg")
+        {
+            exifTool = tools.ExifTool ?? throw new InvalidOperationException("ExifTool is required to create JPEG outputs.");
+            stagingDirectory = workDirectory is null
+                ? Directory.CreateTempSubdirectory("media-pipeline-jpeg-").FullName
+                : Directory.CreateDirectory(Path.Combine(workDirectory, $"jpeg-{Guid.NewGuid():N}")).FullName;
+        }
+
+        var encodedPath = stagingDirectory is null
+            ? OutputNameGenerator.NewFilePath(outputDirectory, planned.OutputExtension)
+            : Path.Combine(stagingDirectory, "image" + planned.OutputExtension);
 
         try
         {
+            AssertOutputExtension(encodedPath, planned.OutputExtension);
+            var args = ReplaceExactPath(planned.Args, "__planning__", encodedPath);
+            var fenced = InsertFsFence(args, planned.OutputByteLimit, encodedPath);
             // Per-invocation budgets like heatup's per-command timeouts.
             await RunBoundedAsync(
                 "Image transform", fenced, TimeSpan.FromMinutes(5),
                 source.ProcessingPath, cancellationToken);
-            var outputStats = new FileInfo(outputPath);
+            if (exifTool is not null)
+            {
+                // MJPEG adds an encoder comment even with -map_metadata -1.
+                await RunBoundedAsync(
+                    "JPEG metadata removal", ["-config", "", "-all=", "-overwrite_original", encodedPath],
+                    TimeSpan.FromMinutes(5), encodedPath, cancellationToken, executable: exifTool);
+            }
+
+            var outputStats = new FileInfo(encodedPath);
             if (!outputStats.Exists || outputStats.Length <= 0 || outputStats.Length > planned.OutputByteLimit)
             {
                 throw new InvalidOperationException("Media transform output is empty, unreadable, or exceeds its size limit.");
             }
 
             var outputProbe = await WithFileBudgetAsync(
-                token => _probe.ReadAsync(outputPath, token),
-                $"Image output probe for '{outputPath}'",
+                token => _probe.ReadAsync(encodedPath, token),
+                $"Image output probe for '{encodedPath}'",
                 cancellationToken);
             if (outputProbe.Width is null or <= 0 || outputProbe.Height is null or <= 0)
             {
                 throw new InvalidOperationException("Media transform output has no readable video frame.");
             }
+            var expected = info.RotationDegrees is 90 or 270
+                ? (Width: info.Height.Value, Height: info.Width.Value)
+                : (Width: info.Width.Value, Height: info.Height.Value);
+            if (outputProbe.Width != expected.Width || outputProbe.Height != expected.Height)
+            {
+                throw new InvalidOperationException(
+                    $"Image output dimensions {outputProbe.Width}x{outputProbe.Height} do not match the complete source {expected.Width}x{expected.Height}.");
+            }
 
             await RunBoundedAsync(
-                "Image decode check", ["-v", "error", "-i", outputPath, "-map", "0:v:0", "-f", "null", "-"],
-                TimeSpan.FromMinutes(5), outputPath, cancellationToken);
+                "Image decode check", ["-v", "error", "-i", encodedPath, "-map", "0:v:0", "-f", "null", "-"],
+                TimeSpan.FromMinutes(5), encodedPath, cancellationToken);
 
             var outputHash = await WithFileBudgetAsync(
-                token => MediaTransformSeed.HashFileAsync(outputPath, token),
-                $"Image output hash for '{outputPath}'",
+                token => MediaTransformSeed.HashFileAsync(encodedPath, token),
+                $"Image output hash for '{encodedPath}'",
                 cancellationToken);
             if (string.Equals(source.SourceHash, outputHash, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException("Media transform output is byte-identical to its immutable source.");
             }
 
+            var outputPath = encodedPath;
+            if (stagingDirectory is not null)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                outputPath = OutputNameGenerator.NewFilePath(outputDirectory, planned.OutputExtension);
+                File.Move(encodedPath, outputPath);
+            }
+
             return new CreatedVariant(outputPath, MediaKind.Image, 0, 0, outputProbe, planned.Profile, seed, info.Width, info.Height);
         }
         catch
         {
-            TryDelete(outputPath);
+            if (stagingDirectory is null)
+            {
+                TryDelete(encodedPath);
+            }
             throw;
+        }
+        finally
+        {
+            if (stagingDirectory is not null)
+            {
+                try
+                {
+                    Directory.Delete(stagingDirectory, recursive: true);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                }
+            }
         }
     }
 
@@ -293,162 +392,16 @@ public sealed class FfmpegEngine(
         }
 
         var outputPath = OutputNameGenerator.NewFilePath(outputDirectory, ".mp4");
-        // Overshoot retries: the recipe's 4% headroom (limit*0.96 target) usually
-        // absorbs CBR overshoot, but small files plus +faststart muxing overhead can
-        // still land over the -fs fence. Retry with the same seed (same trim/eq):
-        // first lower byte targets at the same rung, then lower rungs (each with
-        // its own [0.88, 0.80] targets, since a lower rung at 0.88 can still beat a
-        // same-rung 0.80 on quality per byte). Attempt 1 is heatup-identical when
-        // the preset cap is >= 1080 (preset cap, ratio 0.96). Plans that would
-        // encode byte-identical argv to an attempted plan are skipped without
-        // running ffmpeg. Bounded by maxAttempts.
-        static double[] RatiosForCap(int capIndex) => capIndex == 0 ? [0.96, 0.88, 0.80] : [0.88, 0.80];
-        const int maxAttempts = 24;
-        var attemptCaps = new List<int> { preset.MaxWidth };
-        var attemptedSignatures = new HashSet<string>(StringComparer.Ordinal);
-        OutputOvershootException? overshoot = null;
-        Exception? lastPlanningError = null;
-        var executions = 0;
-        var ratioIndex = 0;
-        var capIndex = 0;
-
-        // A quality-floor failure means this rung can never fit: skip the ratio
-        // phase (a lower target only lowers the bitrate further) and descend rungs.
-        bool AdvanceSchedule(int attemptedWidth, bool includeRatios = true)
-        {
-            if (includeRatios && ratioIndex + 1 < RatiosForCap(capIndex).Length)
-            {
-                ratioIndex++;
-                return true;
-            }
-
-            foreach (var rung in MediaTransformPlanner.VideoWidthLadderDescending(int.MaxValue))
-            {
-                if (rung < attemptedWidth && !attemptCaps.Contains(rung))
-                {
-                    attemptCaps.Add(rung);
-                }
-            }
-
-            if (attemptCaps.Count == capIndex + 1)
-            {
-                var next = attemptedWidth / 2 * 2 - 2;
-                if (next >= 32 && next < attemptedWidth)
-                {
-                    attemptCaps.Add(next);
-                }
-            }
-
-            capIndex++;
-            ratioIndex = 0;
-            return capIndex < attemptCaps.Count;
-        }
-
-        // Hash once up front: retries must never re-read a multi-GB input.
         sourceHash ??= await WithFileBudgetAsync(
             token => MediaTransformSeed.HashFileAsync(inputPath, token),
             $"Video source hash for '{inputPath}'",
             cancellationToken);
-
-        // Cumulative bound for the whole retry schedule: a persistently failing
-        // input (e.g. corrupt output landing at the fence every time) must surface
-        // its last error instead of re-encoding for days.
-        var retryStopwatch = Stopwatch.StartNew();
-        var maxRetryDuration = TimeSpan.FromMinutes(120);
-
-        while (executions < maxAttempts && capIndex < attemptCaps.Count)
-        {
-            var ratios = RatiosForCap(capIndex);
-            var ratio = ratioIndex < ratios.Length ? ratios[ratioIndex] : 0.88;
-            MediaTransformPlanner.PlannedVideoTransform planned;
-            try
-            {
-                planned = MediaTransformPlanner.PlanVideo(
-                    seed,
-                    ordinal,
-                    inputPath,
-                    "__planning__",
-                    probe.Width.Value,
-                    probe.Height.Value,
-                    probe.RotationDegrees,
-                    sourceDurationSeconds,
-                    sourceByteCount,
-                    IsVideoToolbox,
-                    preset.EnhancedVariation,
-                    attemptCaps[capIndex],
-                    ratio);
-            }
-            catch (VideoQualityFloorException exception)
-            {
-                lastPlanningError = exception;
-                if (ratio >= 0.96)
-                {
-                    // Missed at the selection ratio: no rung at/above this cap can
-                    // fit (the planner already tried them all), so jump straight
-                    // below the ladder instead of re-walking rungs that just failed.
-                    var next = Math.Min(attemptCaps[capIndex], 160) / 2 * 2 - 2;
-                    if (next >= 32 && !attemptCaps.Contains(next))
-                    {
-                        attemptCaps.Add(next);
-                        capIndex = attemptCaps.Count - 1;
-                    }
-                    else
-                    {
-                        capIndex++;
-                    }
-                }
-                else if (!AdvanceSchedule(attemptCaps[capIndex], includeRatios: false))
-                {
-                    // Missed only because this retry lowered the byte target: a
-                    // narrower rung may still fit, so descend rungs (skipping
-                    // further ratio cuts, which can only lower the bitrate more).
-                    break;
-                }
-
-                ratioIndex = 0;
-                if (capIndex >= attemptCaps.Count)
-                {
-                    break;
-                }
-
-                continue;
-            }
-
-            if (!attemptedSignatures.Add(PlanSignature(planned)))
-            {
-                if (!AdvanceSchedule(PlannedWidth(planned)))
-                {
-                    break;
-                }
-
-                continue;
-            }
-
-            executions++;
-            try
-            {
-                return await ExecuteVideoPlanAsync(
-                    planned,
-                    inputPath,
-                    outputPath,
-                    seed,
-                    executions,
-                    sourceHash,
-                    cancellationToken);
-            }
-            catch (OutputOvershootException exception)
-            {
-                overshoot = exception;
-                if (retryStopwatch.Elapsed > maxRetryDuration ||
-                    !AdvanceSchedule(exception.AttemptedWidth))
-                {
-                    break;
-                }
-            }
-        }
-
-        throw (Exception?)overshoot ?? lastPlanningError
-            ?? new InvalidOperationException("Media transform output is empty, unreadable, or exceeds its size limit.");
+        var planned = MediaTransformPlanner.PlanVideo(
+            seed, ordinal, inputPath, outputPath,
+            probe.Width.Value, probe.Height.Value, probe.RotationDegrees,
+            sourceDurationSeconds, sourceByteCount, IsVideoToolbox, preset, probe);
+        return await ExecuteVideoPlanAsync(
+            planned, inputPath, outputPath, seed, sourceHash, cancellationToken);
     }
 
     private async Task<CreatedVariant> ExecuteVideoPlanAsync(
@@ -456,112 +409,31 @@ public sealed class FfmpegEngine(
         string inputPath,
         string outputPath,
         string seed,
-        int attemptNumber,
         string sourceHash,
         CancellationToken cancellationToken)
     {
         AssertOutputExtension(outputPath, planned.OutputExtension);
-        // Placeholders are full argv elements, replaced by exact match so an input
-        // path that happens to contain the placeholder text is never rewritten.
-        // Suffix the passlog per attempt so a retry never reads the previous
-        // attempt's two-pass statistics.
-        var passlogPrefix = planned.PasslogPrefix is not null ? $"{outputPath}.passlog.{attemptNumber}" : null;
-        var args = ReplaceExactPath(planned.Args, "__planning__", outputPath);
-        if (planned.PasslogPrefix is not null && passlogPrefix is not null)
-        {
-            args = ReplaceExactPath(args, "__planning__.passlog", passlogPrefix);
-        }
-
-        var fenced = InsertFsFence(args, planned.OutputByteLimit, outputPath);
-        List<string>? firstPass = null;
-        if (planned.FirstPassArgs is not null && passlogPrefix is not null)
-        {
-            firstPass = ReplaceExactPath(planned.FirstPassArgs, "__planning__", outputPath);
-            firstPass = ReplaceExactPath(firstPass, "__planning__.passlog", passlogPrefix);
-        }
-
         var trimMs = planned.Evidence.TryGetValue("trimMicroseconds", out var trimObj) switch
         {
             { } when trimObj is long trimUsLong => (int)(trimUsLong / 1000),
             { } when trimObj is int trimUsInt => trimUsInt / 1000,
             _ => 0,
         };
-        var attemptedWidth = PlannedWidth(planned);
 
         try
         {
-            // Per-invocation budgets like heatup's per-command timeouts (30min per
-            // pass, 5min decode): a hung ffmpeg fails the file, never the lane.
-            if (firstPass is not null)
-            {
-                await RunBoundedAsync(
-                    "Video transform first pass", firstPass, TimeSpan.FromMinutes(30),
-                    inputPath, cancellationToken);
-            }
-
-            // Run the fenced pass directly: when -fs truncates, ffmpeg still exits
-            // 0 with a short file, so detect the fence hit from stderr (StandardError
-            // only: CombinedOutput could false-positive on a file path containing
-            // the phrase). The message text is ffmpeg's ("File size limit exceeded");
-            // if a future build rewords it, the size-near-fence rule below still
-            // catches truncations.
-            var secondPass = await RunBoundedProcessAsync(
-                fenced, TimeSpan.FromMinutes(30), inputPath, cancellationToken);
-            var fenceHit = secondPass.StandardError.Contains(
-                "File size limit exceeded", StringComparison.OrdinalIgnoreCase);
-            if (!secondPass.Succeeded && !fenceHit)
-            {
-                var detail = secondPass.CombinedOutput.Trim();
-                throw new InvalidOperationException(
-                    detail.Length > 0
-                        ? $"'{Path.GetFileName(tools.FFmpeg)}' exited with {secondPass.ExitCode}: {detail}"
-                        : $"'{Path.GetFileName(tools.FFmpeg)}' exited with {secondPass.ExitCode}.");
-            }
-
+            await RunBoundedAsync(
+                "Video transform", planned.Args, TimeSpan.FromMinutes(30), inputPath, cancellationToken);
             var outputStats = new FileInfo(outputPath);
             if (!outputStats.Exists || outputStats.Length <= 0)
             {
                 throw new InvalidOperationException("Media transform output is empty or unreadable.");
             }
-
-            if (outputStats.Length > planned.OutputByteLimit)
-            {
-                throw new OutputOvershootException(
-                    planned.OutputByteLimit, outputStats.Length, attemptedWidth, fenceHit, null);
-            }
-
-            // Near-fence outputs (within 2% under the limit) with a bad duration
-            // window are far more likely truncated than genuinely broken: legit
-            // CBR encodes target at most 96% of the limit, so a file sitting at
-            // the fence with a short duration is a truncation. Decode failures
-            // only retry on an explicit fence hit – a corrupt encode must fail
-            // fast with its real error, not burn retries relabeled "overshoot".
-            var nearFence = outputStats.Length >= (long)(planned.OutputByteLimit * 0.98);
-            MediaInfo outputProbe;
-            try
-            {
-                outputProbe = await VerifyVideoProbeAndDurationAsync(outputPath, planned, cancellationToken);
-            }
-            catch (InvalidOperationException exception) when (fenceHit || nearFence)
-            {
-                throw new OutputOvershootException(
-                    planned.OutputByteLimit, outputStats.Length, attemptedWidth, fenceHit, exception);
-            }
-
-            // A corrupt encode must fail fast with its real error: only an explicit
-            // fence hit justifies relabeling a decode failure as truncation.
-            try
-            {
-                await RunBoundedAsync(
-                    "Video decode check",
-                    ["-v", "error", "-i", outputPath, "-map", "0:v:0", "-f", "null", "-"],
-                    TimeSpan.FromMinutes(5), outputPath, cancellationToken);
-            }
-            catch (InvalidOperationException exception) when (fenceHit)
-            {
-                throw new OutputOvershootException(
-                    planned.OutputByteLimit, outputStats.Length, attemptedWidth, fenceHit, exception);
-            }
+            var outputProbe = await VerifyVideoProbeAndDurationAsync(outputPath, planned, cancellationToken);
+            await RunBoundedAsync(
+                "Video decode check",
+                ["-v", "error", "-i", outputPath, "-map", "0:v:0", "-f", "null", "-"],
+                TimeSpan.FromMinutes(5), outputPath, cancellationToken);
 
             var outputHash = await WithFileBudgetAsync(
                 token => MediaTransformSeed.HashFileAsync(outputPath, token),
@@ -587,17 +459,10 @@ public sealed class FfmpegEngine(
             TryDelete(outputPath);
             throw;
         }
-        finally
-        {
-            if (passlogPrefix is not null)
-            {
-                RemovePasslogs(passlogPrefix);
-            }
-        }
     }
 
     /// <summary>
-    /// Runs one ffmpeg invocation with its own budget. A timeout is a per-file
+    /// Runs one media tool invocation with its own budget. A timeout is a per-file
     /// data failure, never a worker stop: it converts only when the outer token
     /// is not cancelled, so genuine shutdown still flows as cancellation.
     /// </summary>
@@ -606,37 +471,19 @@ public sealed class FfmpegEngine(
         IEnumerable<string> arguments,
         TimeSpan budget,
         string pathForMessage,
-        CancellationToken outerToken)
+        CancellationToken outerToken,
+        string? executable = null)
     {
         using var budgetTimeout = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
         budgetTimeout.CancelAfter(budget);
         try
         {
-            await RunRequiredAsync(tools.FFmpeg, arguments, budgetTimeout.Token);
+            await RunRequiredAsync(executable ?? tools.FFmpeg, arguments, budgetTimeout.Token);
         }
         catch (OperationCanceledException exception) when (!outerToken.IsCancellationRequested)
         {
             throw new InvalidOperationException(
                 $"{description} timed out after {budget.TotalMinutes:g} minute(s): '{pathForMessage}'.", exception);
-        }
-    }
-
-    private async Task<ProcessResult> RunBoundedProcessAsync(
-        IEnumerable<string> arguments,
-        TimeSpan budget,
-        string pathForMessage,
-        CancellationToken outerToken)
-    {
-        using var budgetTimeout = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
-        budgetTimeout.CancelAfter(budget);
-        try
-        {
-            return await ProcessRunner.RunAsync(tools.FFmpeg, arguments, budgetTimeout.Token);
-        }
-        catch (OperationCanceledException exception) when (!outerToken.IsCancellationRequested)
-        {
-            throw new InvalidOperationException(
-                $"Video transform pass timed out after {budget.TotalMinutes:g} minute(s): '{pathForMessage}'.", exception);
         }
     }
 
@@ -676,6 +523,18 @@ public sealed class FfmpegEngine(
         {
             throw new InvalidOperationException("Media transform output has no readable video frame.");
         }
+        if (outputProbe.Width != (int)planned.Evidence["outputWidth"]! ||
+            outputProbe.Height != (int)planned.Evidence["outputHeight"]!)
+        {
+            throw new InvalidOperationException("Media transform video output does not match its planned resolution.");
+        }
+        if (planned.Evidence.TryGetValue("hdrToneMapped", out var toneMapped) && toneMapped is true &&
+            (outputProbe.ColorSpace != "bt709" || outputProbe.ColorPrimaries != "bt709" ||
+             outputProbe.ColorTransfer != "bt709" || outputProbe.ColorRange != "tv" ||
+             outputProbe.PixelFormat != "yuv420p"))
+        {
+            throw new InvalidOperationException("HDR conversion output is not limited-range BT.709 SDR H.264.");
+        }
 
         var targetDuration = planned.TargetDurationSeconds;
         var minimumDuration = targetDuration - Math.Max(0.25, targetDuration * 0.02);
@@ -691,22 +550,6 @@ public sealed class FfmpegEngine(
         return outputProbe;
     }
 
-    private static string PlanSignature(MediaTransformPlanner.PlannedVideoTransform planned)
-    {
-        static string Value(Dictionary<string, object?> evidence, string key) =>
-            evidence.TryGetValue(key, out var value) ? value?.ToString() ?? "" : "";
-        return string.Join("|",
-            Value(planned.Evidence, "outputWidth"),
-            Value(planned.Evidence, "outputHeight"),
-            Value(planned.Evidence, "videoBitrateBps"),
-            Value(planned.Evidence, "audioBitrateBps"),
-            Value(planned.Evidence, "targetOutputBytes"),
-            Value(planned.Evidence, "profile"));
-    }
-
-    private static int PlannedWidth(MediaTransformPlanner.PlannedVideoTransform planned) =>
-        planned.Evidence.TryGetValue("outputWidth", out var widthObj) && widthObj is int width ? width : 0;
-
     public async Task<IReadOnlyList<(SegmentPlan Plan, string Path)>> ExtractSegmentsAsync(
         PreparedSource source,
         LanePaths lane,
@@ -714,8 +557,7 @@ public sealed class FfmpegEngine(
         double durationSeconds,
         CancellationToken cancellationToken = default)
     {
-        // Kept for backward compat but V2 no longer segments – heatup handles long
-        // videos with its bitrate ladder down to 160px instead of stream-copy splits.
+        // Keep the full clip; video encoding does not split or automatically downscale it.
         await Task.CompletedTask;
         return [(new SegmentPlan(1, -1, durationSeconds), source.ProcessingPath)];
     }
@@ -736,28 +578,8 @@ public sealed class FfmpegEngine(
         PresetOptions preset,
         CancellationToken cancellationToken = default)
     {
-        // V2 precomputes its bitrate ladder to fit min(10MiB, sourceBytes); no post-hoc
-        // size-cap recompression passes. Kept as a no-op for CLI compat.
+        // Keep CLI compatibility without applying another lossy compression pass.
         return Task.FromResult(false);
-    }
-
-    private sealed class OutputOvershootException(
-        long limitBytes,
-        long actualBytes,
-        int attemptedWidth,
-        bool fenceHit,
-        Exception? verificationError)
-        : InvalidOperationException(
-            actualBytes > limitBytes
-                ? $"Media transform output ({actualBytes} bytes) exceeds its size limit ({limitBytes} bytes). " +
-                  $"Fence hit: {fenceHit}." +
-                  (verificationError is null ? "" : $" Verification: {verificationError.Message}")
-                : $"Media transform output ({actualBytes} bytes) sits at its size limit ({limitBytes} bytes) " +
-                  $"with failed verification (truncation suspected). Fence hit: {fenceHit}." +
-                  (verificationError is null ? "" : $" Verification: {verificationError.Message}"),
-            verificationError)
-    {
-        public int AttemptedWidth { get; } = attemptedWidth;
     }
 
     private static List<string> ReplaceExactPath(IReadOnlyList<string> args, string oldValue, string newValue)
@@ -799,33 +621,6 @@ public sealed class FfmpegEngine(
         {
             throw new InvalidOperationException(
                 $"Media transform output extension '{Path.GetExtension(outputPath)}' does not match its recipe ('{plannedExtension}').");
-        }
-    }
-
-    private static void RemovePasslogs(string? passlogPrefix)
-    {
-        // Cleanup must never mask the transform error it follows in finally.
-        try
-        {
-            if (string.IsNullOrWhiteSpace(passlogPrefix))
-            {
-                return;
-            }
-
-            var directory = Path.GetDirectoryName(passlogPrefix);
-            var prefix = Path.GetFileName(passlogPrefix);
-            if (directory is null || !Directory.Exists(directory))
-            {
-                return;
-            }
-
-            foreach (var entry in Directory.EnumerateFiles(directory, prefix + "*"))
-            {
-                TryDelete(entry);
-            }
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
-        {
         }
     }
 

@@ -3,6 +3,22 @@ import Combine
 import Darwin
 import Foundation
 
+enum SavedMediaCopyStatus {
+    case preparing(preset: String, workspace: String)
+    case ready(URL, copied: Bool)
+    case failed(String)
+
+    var isPreparing: Bool {
+        if case .preparing = self { return true }
+        return false
+    }
+}
+
+struct SavedMediaCopy {
+    let itemID: UUID
+    var status: SavedMediaCopyStatus
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var selection: AppSection? = .activity
@@ -11,6 +27,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var workerBusy = false
     @Published var errorMessage: String?
     @Published var notice: String?
+    @Published private(set) var savedMediaCopy: SavedMediaCopy?
 
     let paths: AppPaths
     let configuration: ConfigurationStore
@@ -22,23 +39,26 @@ final class AppModel: ObservableObject {
     let notifications = NotificationController()
 
     private var monitoringTask: Task<Void, Never>?
+    private var savedMediaCopyTask: Task<Void, Never>?
+    private let clipboard: NSPasteboard
     private var isShuttingDown = false
     private var failureStateActive = false
     private var activePipelineRoot: URL
     private var observations: Set<AnyCancellable> = []
 
-    init() {
+    init(paths: AppPaths? = nil, workerExecutable: URL? = AppPaths.workerExecutable(), clipboard: NSPasteboard = .general) {
         do {
-            let paths = try AppPaths.current()
+            let paths = try paths ?? AppPaths.current()
             let configuration = ConfigurationStore(configURL: paths.configFile)
             try configuration.load()
             let worker = WorkerClient(
                 configURL: paths.configFile,
-                executableURL: AppPaths.workerExecutable()
+                executableURL: workerExecutable
             )
             self.paths = paths
             self.configuration = configuration
             self.worker = worker
+            self.clipboard = clipboard
             let activity = ActivityStore()
             let uploads = UploadStore(worker: worker)
             self.activity = activity
@@ -112,6 +132,7 @@ final class AppModel: ObservableObject {
     func shutdown() async {
         isShuttingDown = true
         stopMonitoring()
+        savedMediaCopyTask?.cancel()
         uploads.cancel()
         await worker.shutdown(existingWorkerPID: status?.pid)
     }
@@ -229,17 +250,27 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func queueSavedMedia(_ item: SavedMedia, copies: Int, preset: String, workspace: String) async {
-        guard !workerBusy else { return }
+    func queueSavedMedia(
+        _ item: SavedMedia, copies: Int, preset: String, workspace: String, copyToClipboard: Bool = false
+    ) async {
+        guard !workerBusy, !copyToClipboard || savedMediaCopy?.status.isPreparing != true else { return }
+        let clipboardVersion = copyToClipboard ? clipboard.changeCount : nil
+        let pipelineRoot = activePipelineRoot
+        if copyToClipboard {
+            savedMediaCopy = SavedMediaCopy(itemID: item.id, status: .preparing(preset: preset, workspace: workspace))
+        }
         workerBusy = true
         defer { workerBusy = false }
         do {
             let result = try await worker.queueMedia(
-                file: savedMedia.sourceURL(for: item), copies: copies, preset: preset, workspace: workspace
+                file: savedMedia.sourceURL(for: item), copies: copyToClipboard ? 1 : copies,
+                preset: preset, workspace: workspace
             )
             guard result.succeeded else { throw WorkerClientError.commandFailed(result.standardError) }
-            let unit = copies == 1 ? "copy" : "copies"
-            notice = "Queued \(copies) \(unit) of \(item.name). See Activity for progress."
+            if !copyToClipboard {
+                let unit = copies == 1 ? "copy" : "copies"
+                notice = "Queued \(copies) \(unit) of \(item.name). See Activity for progress."
+            }
             await refresh()
             if !workerRunning {
                 do { try await startWorkerOperation() }
@@ -250,17 +281,75 @@ final class AppModel: ObservableObject {
                 }
             }
             await refresh()
+            if let clipboardVersion {
+                struct Receipt: Decodable { let id: String }
+                guard let receipt = try? JSONDecoder().decode(Receipt.self, from: Data(result.standardOutput.utf8)) else {
+                    throw WorkerClientError.commandFailed("The copy was queued, but its request ID could not be read.")
+                }
+                followSavedMediaCopy(receipt.id, pipelineRoot: pipelineRoot, clipboardVersion: clipboardVersion)
+            }
         } catch {
-            errorMessage = error.localizedDescription
+            if copyToClipboard {
+                savedMediaCopy?.status = .failed(error.localizedDescription)
+            } else {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
+    private func followSavedMediaCopy(_ id: String, pipelineRoot: URL, clipboardVersion: Int) {
+        savedMediaCopyTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if self?.finishSavedMediaCopy(id, pipelineRoot: pipelineRoot, clipboardVersion: clipboardVersion) != false {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(350))
+            }
+        }
+    }
+
+    private func finishSavedMediaCopy(_ id: String, pipelineRoot: URL, clipboardVersion: Int) -> Bool {
+        guard pipelineRoot == activePipelineRoot else {
+            savedMediaCopy?.status = .failed("The pipeline folder changed while the copy was queued.")
+            return true
+        }
+        activity.refresh(pipelineRoot: pipelineRoot)
+        guard let job = activity.job(forRequest: id), job.state == .done || job.state == .failed else {
+            // A paused or stopped worker leaves the request in the queue for its next run.
+            return false
+        }
+        let outputRoot = outputFolder(preset: job.preset, workspace: job.workspace)
+        guard job.state == .done, job.outputCount == 1, let output = job.outputPaths.first else {
+            savedMediaCopy?.status = .failed(job.error ?? "Processing did not create a copy.")
+            return true
+        }
+        let url = outputRoot.appendingPathComponent(output).standardizedFileURL
+        guard url.path.hasPrefix(outputRoot.path + "/"), FileManager.default.isReadableFile(atPath: url.path) else {
+            savedMediaCopy?.status = .failed("The finished file could not be found.")
+            return true
+        }
+        // A new copy made elsewhere while processing takes precedence over this request.
+        savedMediaCopy?.status = clipboard.changeCount == clipboardVersion
+            ? writeSavedMediaFile(url)
+            : .ready(url, copied: false)
+        return true
+    }
+
+    func copySavedMediaOutput(for itemID: UUID) {
+        guard let copy = savedMediaCopy, copy.itemID == itemID, case .ready(let url, _) = copy.status else { return }
+        savedMediaCopy?.status = writeSavedMediaFile(url)
+    }
+
+    private func writeSavedMediaFile(_ url: URL) -> SavedMediaCopyStatus {
+        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+            return .failed("The finished file could not be found.")
+        }
+        clipboard.clearContents()
+        return .ready(url, copied: clipboard.writeObjects([url as NSURL]))
+    }
+
     func archive(_ job: JobSnapshot, thenUpload: Bool) async {
-        let outputRoot = activePipelineRoot
-            .appendingPathComponent(job.workspace, isDirectory: true)
-            .appendingPathComponent(job.preset, isDirectory: true)
-            .appendingPathComponent("output", isDirectory: true)
-            .standardizedFileURL
+        let outputRoot = outputFolder(preset: job.preset, workspace: job.workspace)
         let prefix = outputRoot.path.hasSuffix("/") ? outputRoot.path : outputRoot.path + "/"
         let relativeOutputs = job.outputPaths.compactMap { output -> String? in
             let url = output.hasPrefix("/")
@@ -353,10 +442,7 @@ final class AppModel: ObservableObject {
     }
 
     func openOutputFolder(preset: String, workspace: String) {
-        let url = activePipelineRoot
-            .appendingPathComponent(workspace, isDirectory: true)
-            .appendingPathComponent(preset, isDirectory: true)
-            .appendingPathComponent("output", isDirectory: true)
+        let url = outputFolder(preset: preset, workspace: workspace)
         do {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             if !NSWorkspace.shared.open(url) {
@@ -365,6 +451,14 @@ final class AppModel: ObservableObject {
         } catch {
             errorMessage = "Could not open output folder: \(error.localizedDescription)"
         }
+    }
+
+    private func outputFolder(preset: String, workspace: String) -> URL {
+        activePipelineRoot
+            .appendingPathComponent(workspace, isDirectory: true)
+            .appendingPathComponent(preset, isDirectory: true)
+            .appendingPathComponent("output", isDirectory: true)
+            .standardizedFileURL
     }
 
     private func ensureDirectory(_ url: URL) {

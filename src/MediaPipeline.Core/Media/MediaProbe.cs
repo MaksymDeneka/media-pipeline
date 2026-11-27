@@ -12,21 +12,39 @@ public sealed record MediaInfo
     public string FormatName { get; init; } = "";
     public string? CodecName { get; init; }
     public string? MajorBrand { get; init; }
+    public bool HasTileGrid { get; init; }
+    public bool IsHeif => MajorBrand?.Trim().ToLowerInvariant() is
+        "heic" or "heix" or "hevc" or "hevx" or "heim" or "heis" or "mif1" or "msf1";
     public double? FrameCount { get; init; }
     public int? RotationDegrees { get; init; }
+    public string? PixelFormat { get; init; }
+    public string? ColorSpace { get; init; }
+    public string? ColorTransfer { get; init; }
+    public string? ColorPrimaries { get; init; }
+    public string? ColorRange { get; init; }
+    public bool IsHdr => ColorTransfer is "arib-std-b67" or "smpte2084";
 }
 
 public sealed class MediaProbe(Toolchain tools)
 {
-    public async Task<MediaInfo> ReadAsync(string path, CancellationToken cancellationToken = default)
+    public Task<MediaInfo> ReadAsync(string path, CancellationToken cancellationToken = default) =>
+        ReadAsync(path, readFirstFrame: false, cancellationToken);
+
+    public Task<MediaInfo> ReadImageAsync(string path, CancellationToken cancellationToken = default) =>
+        ReadAsync(path, readFirstFrame: true, cancellationToken);
+
+    private async Task<MediaInfo> ReadAsync(string path, bool readFirstFrame, CancellationToken cancellationToken)
     {
+        const string streamEntries = "stream=codec_type,codec_name,width,height,duration,nb_frames,pix_fmt,color_space,color_transfer,color_primaries,color_range:stream_tags=rotate:stream_side_data=rotation:stream_group=type:stream_group_component=width,height:stream_group_side_data=rotation:format=duration,format_name:format_tags=major_brand";
+        string[] frameArgs = readFirstFrame ? ["-select_streams", "v:0", "-read_intervals", "%+#1"] : [];
         var result = await ProcessRunner.RunAsync(
             tools.FFprobe,
             [
                 "-v",
                 "error",
+                .. frameArgs,
                 "-show_entries",
-                "stream=codec_type,codec_name,width,height,duration,nb_frames:stream_tags=rotate:stream_side_data=rotation:format=duration,format_name:format_tags=major_brand",
+                readFirstFrame ? $"{streamEntries}:frame_side_data=rotation" : streamEntries,
                 "-of",
                 "json",
                 path,
@@ -77,6 +95,29 @@ public sealed class MediaProbe(Toolchain tools)
 
             var width = videoStream.HasValue ? ReadInt(videoStream.Value, "width") : null;
             var height = videoStream.HasValue ? ReadInt(videoStream.Value, "height") : null;
+            var hasTileGrid = false;
+            int? gridRotation = null;
+            if (root.TryGetProperty("stream_groups", out var groups))
+            {
+                foreach (var group in groups.EnumerateArray())
+                {
+                    if (ReadString(group, "type") != "Tile Grid") continue;
+                    hasTileGrid = true;
+                    // A HEIF stream is only one tile. Validate the primary grid's
+                    // dimensions before asking a full-image decoder to allocate it.
+                    if (group.TryGetProperty("components", out var components))
+                    {
+                        foreach (var component in components.EnumerateArray())
+                        {
+                            width = ReadInt(component, "width") ?? width;
+                            height = ReadInt(component, "height") ?? height;
+                            gridRotation = ReadRotation(component);
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
             var codecName = videoStream.HasValue ? ReadString(videoStream.Value, "codec_name") : null;
             var duration = ReadDouble(format, "duration")
                 ?? (videoStream.HasValue ? ReadDouble(videoStream.Value, "duration") : null);
@@ -90,7 +131,12 @@ public sealed class MediaProbe(Toolchain tools)
             }
 
             double? frameCount = videoStream.HasValue ? ReadDouble(videoStream.Value, "nb_frames") : null;
-            var rotation = videoStream.HasValue ? ReadRotation(videoStream.Value) : null;
+            // JPEG EXIF orientation is exposed on the decoded frame. FFmpeg
+            // applies it before the crop filter receives the image.
+            var frameRotation = root.TryGetProperty("frames", out var frames) && frames.GetArrayLength() > 0
+                ? ReadRotation(frames[0])
+                : null;
+            var rotation = gridRotation ?? frameRotation ?? (videoStream.HasValue ? ReadRotation(videoStream.Value) : null);
 
             return new MediaInfo
             {
@@ -100,8 +146,14 @@ public sealed class MediaProbe(Toolchain tools)
                 FormatName = formatName,
                 CodecName = codecName,
                 MajorBrand = majorBrand,
+                HasTileGrid = hasTileGrid,
                 FrameCount = frameCount,
                 RotationDegrees = rotation,
+                PixelFormat = videoStream.HasValue ? ReadString(videoStream.Value, "pix_fmt") : null,
+                ColorSpace = videoStream.HasValue ? ReadString(videoStream.Value, "color_space") : null,
+                ColorTransfer = videoStream.HasValue ? ReadString(videoStream.Value, "color_transfer") : null,
+                ColorPrimaries = videoStream.HasValue ? ReadString(videoStream.Value, "color_primaries") : null,
+                ColorRange = videoStream.HasValue ? ReadString(videoStream.Value, "color_range") : null,
             };
         }
     }

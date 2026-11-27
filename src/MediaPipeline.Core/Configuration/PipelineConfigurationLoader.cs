@@ -187,6 +187,8 @@ public static class PipelineConfigurationLoader
             NvencCq = reader.Int("NvencCq", video.NvencCq),
             AmfQp = reader.Int("AmfQp", video.AmfQp),
             Crf = reader.Int("Crf", video.Crf),
+            X264Preset = reader.String("X264Preset", video.X264Preset),
+            VideoToolboxBitrateKbps = Math.Max(200, reader.Int("VideoToolboxBitrateKbps", video.VideoToolboxBitrateKbps)),
             MinTrimMs = Math.Max(0, reader.Int("MinTrimMs", video.MinTrimMs)),
             MaxTrimMs = Math.Max(0, reader.Int("MaxTrimMs", video.MaxTrimMs)),
             CropMinPermille = Math.Max(0, reader.Int("CropMinPermille", images.CropMinPermille)),
@@ -231,9 +233,7 @@ public static class PipelineConfigurationLoader
             ["flat-batch"] = Values(
                 ("VideoCopies", "1"), ("ImageCopies", "1"), ("Grouping", "Flat"),
                 ("Batch", "PerGroup"), ("SizeCapMB", "0")),
-            // V2 ignores Segment (long videos use the bitrate ladder down to 160px
-            // instead of stream-copy splits) and Nvenc/Amf tuning (libx264 slow
-            // two-pass or VideoToolbox single-pass only).
+            // The native worker processes full clips with libx264 or VideoToolbox.
             ["long"] = Values(
                 ("VideoCopies", "3"), ("ImageCopies", "0")),
         };

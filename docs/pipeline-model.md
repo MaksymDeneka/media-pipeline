@@ -67,13 +67,22 @@ Quality settings (`MaxWidth`, `SizeCapMB`, `Crf`, `NvencCq`, `AmfQp`, `AudioBitr
 `JpegQuality`, `PngCompressionLevel`, trim range, crop range) are all overridable per preset
 and otherwise inherit the global value.
 
-> V2 engine note (heatup port): transforms are now deterministic seeded recipes –
-> image recrop 2-5 permille + eq, video microtrim 10-40ms + eq + width ladder
-> 1080..160 + two-pass libx264 slow or single-pass VideoToolbox, fenced at
-> min(10MiB, source size) with metadata stripped via `-map_metadata -1`.
-> `MaxWidth` caps the ladder and `EnhancedVariation` selects the stronger recipe;
-> `Segment`/`Normalize`/CRF/NVENC/AMF/size-cap/trim/crop/quality knobs are parsed
-> for compatibility but no longer drive encoding.
+The native engine uses deterministic image recrop 2-5 permille and color variation,
+plus video microtrim 10-40ms and color variation. Video keeps its source resolution
+within `MaxWidth`, without upscaling. CPU video uses `Crf` and `X264Preset`; Apple
+hardware uses `VideoToolboxBitrateKbps`. Both retain audio at `AudioBitrate` and strip
+metadata with `-map_metadata -1`. `EnhancedVariation` selects the stronger recipe.
+
+HLG and PQ video inputs are tone mapped in linear light and converted from their source
+primaries to BT.709 SDR before color variation and 8-bit H.264 encoding. Output color tags
+are set explicitly and inherited HDR side data is removed. Verification checks the SDR
+tags as well as dimensions and duration. SDR and untagged inputs keep the existing path.
+This requires FFmpeg's `zscale` and `tonemap` filters; macOS uses `ffmpeg-full`.
+
+Video output size is independent of source file size. The former byte fence and
+automatic resolution ladder have been removed because they degraded compressed sources.
+Legacy size-cap, segmentation, trim-range, crop-range, and NVENC/AMF settings remain
+parsed for compatibility and do not drive the native encoder.
 
 ### How today's nine map onto it
 

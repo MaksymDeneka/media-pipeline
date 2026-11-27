@@ -71,6 +71,7 @@ struct PipelineEvent: Decodable {
     let timestamp: String
     let name: String
     let jobId: String?
+    let requestId: String?
     let preset: String?
     let workspace: String?
     let file: String?
@@ -86,6 +87,7 @@ struct PipelineEvent: Decodable {
         case timestamp = "ts"
         case name = "ev"
         case jobId
+        case requestId
         case preset
         case workspace
         case file
@@ -180,7 +182,7 @@ struct StagedFile: Identifiable, Hashable {
     var name: String { url.lastPathComponent }
 }
 
-struct WorkspaceUploads: Identifiable {
+struct WorkspaceUploads: Identifiable, Equatable {
     let name: String
     let files: [StagedFile]
 

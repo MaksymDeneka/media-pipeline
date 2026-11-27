@@ -20,7 +20,7 @@ struct SettingsView: View {
                     Button("Save and Restart") {
                         Task { await model.saveConfigurationAndRestart() }
                     }
-                    .disabled(!store.hasUnsavedChanges)
+                    .disabled(!store.hasUnsavedChanges || model.workerBusy)
                 }
                 .padding(.horizontal, 22)
                 .padding(.vertical, 15)

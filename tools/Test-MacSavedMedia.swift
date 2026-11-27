@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Combine
 import ImageIO
 
 // This executable exercises the production store and worker client on Macs that
@@ -69,6 +70,7 @@ struct SavedMediaSelfTest {
         let config = root.appendingPathComponent("config.ini")
         let worker = WorkerClient(configURL: config, executableURL: mock)
         try testWorkerIdentity()
+        try testSettingsAndRefresh(config: config, root: root, worker: worker)
         try await testThumbnails(root: root)
         let result = try await worker.queueMedia(
             file: reloaded.sourceURL(for: saved), copies: 3, preset: "bulk", workspace: "LC"
@@ -109,6 +111,42 @@ struct SavedMediaSelfTest {
         check(!WorkerProcessIdentity.isRunning(
             pid: process.processIdentifier, startedUtc: currentRun, executableURL: process.executableURL
         ), "rejects an exited worker")
+    }
+
+    @MainActor
+    static func testSettingsAndRefresh(config: URL, root: URL, worker: WorkerClient) throws {
+        try "[Video]\ncrf = 24\n[preset bulk]\nVideoCopies = 1\n".write(to: config, atomically: true, encoding: .utf8)
+        let settings = ConfigurationStore(configURL: config)
+        try settings.load()
+        let quality = SettingCatalog.globals.first { $0.key == "Crf" }!
+        var changes: [[String: String]] = []
+        let subscription = settings.$globals.dropFirst().sink { changes.append($0) }
+        settings.setGlobal(quality, value: "25")
+        settings.setGlobal(quality, value: "25")
+        check(changes.count == 1 && changes[0]["Crf"] == "25" && changes[0]["crf"] == nil,
+              "settings publish one complete value without temporarily clearing the editor")
+        settings.setPreset(quality, preset: "bulk", value: "25")
+        check(settings.hasOverride(quality, preset: "bulk"), "explicit override can equal inherited value")
+        settings.resetPreset(quality, preset: "bulk")
+        check(settings.presetValue(quality, preset: "bulk") == "25", "reset restores inherited setting")
+        try settings.save()
+        let loaded = ConfigurationStore(configURL: config)
+        try loaded.load()
+        check(loaded.globalValue(quality) == "25", "edited settings survive saving and reload")
+        withExtendedLifetime(subscription) {}
+
+        let uploads = UploadStore(worker: worker)
+        var refreshes = 0
+        let refreshSubscription = uploads.$workspaces.dropFirst().sink { _ in refreshes += 1 }
+        uploads.refresh(pipelineRoot: root, workspaceNames: ["LC"])
+        uploads.refresh(pipelineRoot: root, workspaceNames: ["LC"])
+        check(refreshes == 1, "unchanged upload polling does not publish redundant updates")
+        let directory = root.appendingPathComponent("LC/sync")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data([1, 2]).write(to: directory.appendingPathComponent("new.mp4"))
+        uploads.refresh(pipelineRoot: root, workspaceNames: ["LC"])
+        check(refreshes == 2 && uploads.workspaces[0].files.count == 1, "polling still publishes actual media changes")
+        withExtendedLifetime(refreshSubscription) {}
     }
 
     @MainActor

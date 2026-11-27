@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace MediaPipeline.Core.Media;
 
 /// <summary>
@@ -6,7 +8,8 @@ namespace MediaPipeline.Core.Media;
 /// </summary>
 public sealed class FileStabilityTracker
 {
-    private readonly Dictionary<string, Observation> _observations = new(
+    // Polling records observations, and parallel file jobs forget their entries as they finish.
+    private readonly ConcurrentDictionary<string, Observation> _observations = new(
         OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal);
@@ -23,7 +26,7 @@ public sealed class FileStabilityTracker
             file = new FileInfo(path);
             if (!file.Exists)
             {
-                _observations.Remove(path);
+                Forget(path);
                 return StabilityState.Waiting;
             }
         }
@@ -84,7 +87,7 @@ public sealed class FileStabilityTracker
         var existing = existingPaths.ToHashSet(_observations.Comparer);
         foreach (var path in _observations.Keys.Where(path => !existing.Contains(path)).ToArray())
         {
-            _observations.Remove(path);
+            Forget(path);
         }
     }
 
@@ -97,11 +100,11 @@ public sealed class FileStabilityTracker
             _observations.Comparer.Equals(Path.GetDirectoryName(path), directory) &&
             !existing.Contains(path)).ToArray())
         {
-            _observations.Remove(path);
+            Forget(path);
         }
     }
 
-    public void Forget(string path) => _observations.Remove(path);
+    public void Forget(string path) => _observations.TryRemove(path, out _);
 
     private static bool CanOpenExclusively(string path)
     {

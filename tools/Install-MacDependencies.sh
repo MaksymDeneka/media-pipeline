@@ -9,6 +9,10 @@ fi
 missing=()
 command -v ffmpeg >/dev/null 2>&1 || missing+=(ffmpeg)
 command -v ffprobe >/dev/null 2>&1 || missing+=(ffmpeg)
+hdr_ffmpeg="$(brew --prefix)/opt/ffmpeg-full/bin/ffmpeg"
+if [[ ! -x "$hdr_ffmpeg" ]]; then
+    missing+=(ffmpeg-full)
+fi
 command -v exiftool >/dev/null 2>&1 || missing+=(exiftool)
 command -v rclone >/dev/null 2>&1 || missing+=(rclone)
 
@@ -23,6 +27,12 @@ for tool in ffmpeg ffprobe exiftool rclone ssh; do
         exit 1
     fi
 done
+
+filters=$("$hdr_ffmpeg" -hide_banner -filters 2>/dev/null)
+if [[ "$filters" != *zscale* || "$filters" != *tonemap* ]]; then
+    echo "FFmpeg needs zscale and tonemap for HDR-to-SDR video conversion. Reinstall ffmpeg-full."
+    exit 1
+fi
 
 remote_name=${RCLONE_REMOTE_NAME:-jj2}
 if ! rclone listremotes 2>/dev/null | grep -Fxq "$remote_name:"; then

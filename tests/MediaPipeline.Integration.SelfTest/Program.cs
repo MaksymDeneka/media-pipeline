@@ -46,11 +46,15 @@ internal static class Program
                 new ArchiveManager(configuration, paths, logger));
 
             await worker.RunOnceAsync(assumeStable: true);
-            await VerifyAsync(paths);
+            await VerifyAsync(paths, tools);
             await VerifyMediaRequestsAsync(root, tools, encoder, image, video);
             await VerifySizeCapKeepsPresetWidthAsync(root, configuration, engine);
+            await VerifyLowBitrateVideoQualityAsync(root, tools, configuration);
+            await VerifyHdrVideoColorAsync(root, tools, configuration);
             await VerifyAuxiliaryAudioAsync(root, tools, configuration, paths, engine);
             await VerifyTemporaryCleanupAsync(root, configuration, paths, engine);
+            await VerifyExifJpegAsync(root, tools, configuration, paths, engine);
+            await VerifyHeicImageAsync(root, tools, configuration, paths, engine);
             await VerifyReadinessTimeoutAsync(root, tools, encoder);
             await VerifyInitialStatusAsync(root, tools, encoder);
         }
@@ -248,14 +252,18 @@ internal static class Program
         File.Copy(video, Path.Combine(paths.Lane("video-long", "test").Input, "long.mp4"));
     }
 
-    private static async Task VerifyAsync(PipelinePaths paths)
+    private static async Task VerifyAsync(PipelinePaths paths, Toolchain tools)
     {
         Section("Flat image preset");
         var imageLane = paths.Lane("image-clean", "test");
         Check("drains image input", Directory.GetFiles(imageLane.Input).Length == 0,
             Directory.GetFiles(imageLane.Input).Length);
-        Check("creates one image", Directory.GetFiles(imageLane.Output, "*.JPG").Length == 1,
-            Directory.GetFiles(imageLane.Output).Length);
+        var images = Directory.GetFiles(imageLane.Output, "*.JPG");
+        Check("creates one image", images.Length == 1, images.Length);
+        if (images.Length == 1)
+        {
+            await VerifyJpegMetadataAsync(tools, images[0]);
+        }
         Check("moves the image source", Directory.GetFiles(imageLane.Original).Length == 1,
             Directory.GetFiles(imageLane.Original).Length);
 
@@ -291,9 +299,9 @@ internal static class Program
         Check("moves both batch sources", Directory.GetFiles(setsLane.Original).Length == 2,
             Directory.GetFiles(setsLane.Original).Length);
 
-        Section("Long video preset (V2: no segmentation, bitrate ladder instead)");
+        Section("Full-length video preset");
         var longLane = paths.Lane("video-long", "test");
-        Check("creates one ladder variant", Directory.GetFiles(longLane.Output, "*.MP4").Length == 1,
+        Check("creates one video variant", Directory.GetFiles(longLane.Output, "*.MP4").Length == 1,
             Directory.GetFiles(longLane.Output).Length);
         Check("leaves no working files behind", Directory.GetFiles(longLane.Work).Length == 0,
             Directory.GetFiles(longLane.Work).Length);
@@ -485,6 +493,114 @@ internal static class Program
         }
     }
 
+    private static async Task VerifyExifJpegAsync(
+        string root, Toolchain tools, PipelineConfiguration configuration, PipelinePaths paths, FfmpegEngine engine)
+    {
+        Section("JPEG EXIF orientation");
+        var jpeg = Path.Combine(root, "portrait-source.jpg");
+        await CreateExifPortraitJpegAsync(tools, jpeg);
+        var preset = configuration.Presets.Single(item => item.Name == "image-clean");
+        var source = await engine.PrepareAsync(preset, paths.Lane(preset.Name, "test"), jpeg, MediaKind.Image);
+        var variant = await engine.CreateImageVariantAsync(source, Path.Combine(root, "portrait-output"),
+            preset, new string('a', 64), 1);
+        Check("Image Clean keeps JPEG portrait dimensions after autorotation",
+            variant.MediaInfo.Width == 1024 && variant.MediaInfo.Height == 1536,
+            $"{variant.MediaInfo.Width}x{variant.MediaInfo.Height}");
+        await VerifyJpegMetadataAsync(tools, variant.Path);
+
+        // Point ExifTool at a tool that will reject its arguments after FFmpeg encodes the JPEG.
+        var failingEngine = new FfmpegEngine(tools with { ExifTool = tools.FFprobe }, engine.Encoder);
+        var failedOutput = Path.Combine(root, "failed-jpeg-output");
+        var workDirectory = Path.Combine(root, "failed-jpeg-work");
+        try
+        {
+            await failingEngine.CreateImageVariantAsync(source, failedOutput,
+                preset, new string('a', 64), 1, workDirectory: workDirectory);
+            Check("rejects JPEGs when metadata removal fails", false, failedOutput);
+        }
+        catch (InvalidOperationException exception)
+        {
+            Check("rejects JPEGs when metadata removal fails",
+                exception.Message.Contains($"'{Path.GetFileName(tools.FFprobe)}' exited"), exception.Message);
+        }
+        Check("failed metadata removal leaves no output or working files",
+            !Directory.EnumerateFileSystemEntries(failedOutput).Any() &&
+            !Directory.EnumerateFileSystemEntries(workDirectory).Any(), failedOutput);
+    }
+
+    private static async Task VerifyJpegMetadataAsync(Toolchain tools, string jpeg)
+    {
+        var exifTool = tools.ExifTool ?? throw new InvalidOperationException("ExifTool is required for JPEG metadata tests.");
+        var result = await ProcessRunner.RunAsync(exifTool,
+            ["-config", "", "-j", "-G1", "-Comment", "-EXIF:All", "-XMP:All", "-IPTC:All", "-ICC_Profile:All", jpeg]);
+        if (!result.Succeeded)
+        {
+            throw new InvalidOperationException(result.CombinedOutput);
+        }
+
+        using var metadata = JsonDocument.Parse(result.StandardOutput);
+        Check("JPEG contains no encoder comment or embedded photo metadata",
+            metadata.RootElement[0].EnumerateObject().All(tag => tag.Name == "SourceFile"), result.StandardOutput);
+    }
+
+    private static async Task CreateExifPortraitJpegAsync(Toolchain tools, string jpeg)
+    {
+        await RunRequiredAsync(tools.FFmpeg,
+            ["-y", "-v", "error", "-f", "lavfi", "-i",
+             "color=c=red:s=1536x1024,drawbox=x=768:y=0:w=768:h=1024:color=blue:t=fill",
+             "-frames:v", "1", jpeg]);
+        // A minimal EXIF Orientation=6 APP1 segment reproduces iPhone portrait
+        // metadata without a dependency on ExifTool or a private photo fixture.
+        byte[] orientation = [
+            0xff, 0xe1, 0x00, 0x22, 0x45, 0x78, 0x69, 0x66, 0x00, 0x00,
+            0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        var jpegBytes = await File.ReadAllBytesAsync(jpeg);
+        await File.WriteAllBytesAsync(jpeg, [.. jpegBytes[..2], .. orientation, .. jpegBytes[2..]]);
+    }
+
+    private static async Task VerifyHeicImageAsync(
+        string root, Toolchain tools, PipelineConfiguration configuration, PipelinePaths paths, FfmpegEngine engine)
+    {
+        if (!OperatingSystem.IsMacOS()) return;
+        Section("Complete HEIC image decoding");
+        var jpeg = Path.Combine(root, "heic-source.jpg");
+        var heic = Path.Combine(root, "heic-source.heic");
+        await CreateExifPortraitJpegAsync(tools, jpeg);
+        await RunRequiredAsync("/usr/bin/sips", ["-s", "format", "heic", jpeg, "--out", heic]);
+        // Routing must use content even when the extension is misleading.
+        var renamed = Path.Combine(root, "heic-renamed.jpg");
+        File.Move(heic, renamed);
+        var preset = configuration.Presets.Single(item => item.Name == "image-clean");
+        var source = await engine.PrepareAsync(preset, paths.Lane(preset.Name, "test"), renamed, MediaKind.Image);
+        try
+        {
+            var variant = await engine.CreateImageVariantAsync(source, Path.Combine(root, "heic-output"),
+                preset, new string('a', 64), 1);
+            Check("HEIC retains the complete portrait dimensions",
+                variant.MediaInfo.Width == 1024 && variant.MediaInfo.Height == 1536,
+                $"{variant.MediaInfo.Width}x{variant.MediaInfo.Height}");
+            Check("normalized HEIC still produces JPEG", Path.GetExtension(variant.Path) == ".JPG", variant.Path);
+            // The original right half becomes the bottom half after rotation.
+            // Sampling it detects accidentally repeated or enlarged first tiles.
+            var sample = Path.Combine(root, "heic-bottom.rgb");
+            await RunRequiredAsync(tools.FFmpeg,
+                ["-y", "-v", "error", "-i", variant.Path, "-vf", "crop=32:32:500:1400,scale=1:1",
+                 "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", sample]);
+            var rgb = await File.ReadAllBytesAsync(sample);
+            Check("HEIC retains pixels beyond the first tile", rgb.Length == 3 && rgb[2] > rgb[0] + 80,
+                string.Join(",", rgb));
+        }
+        finally
+        {
+            FfmpegEngine.RemoveTemporarySource(source);
+        }
+        Check("HEIC temporary image is removed", source.TemporaryPath is not null && !File.Exists(source.TemporaryPath),
+            source.TemporaryPath ?? "No temporary image was created");
+    }
+
     private static async Task VerifyTemporaryCleanupAsync(
         string root,
         PipelineConfiguration configuration,
@@ -550,7 +666,7 @@ internal static class Program
         PipelineConfiguration configuration,
         FfmpegEngine engine)
     {
-        Section("Preset width cap (V2 ladder)");
+        Section("Explicit preset width cap");
         var preset = configuration.Presets.Single(item => item.Name == "video-clean") with
         {
             MaxWidth = 160,
@@ -569,8 +685,118 @@ internal static class Program
             ordinal: 0,
             sourceHash: sourceHash);
 
-        Check("ladder-capped output never exceeds the preset width",
+        Check("output never exceeds the preset width",
             variant.MediaInfo.Width is > 0 and <= 160, variant.MediaInfo.Width ?? 0);
+    }
+
+    private static async Task VerifyLowBitrateVideoQualityAsync(
+        string root, Toolchain tools, PipelineConfiguration configuration)
+    {
+        Section("Low-bitrate portrait video quality");
+        var source = Path.Combine(root, "low-bitrate-portrait.mp4");
+        await RunRequiredAsync(tools.FFmpeg,
+        [
+            "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=720x1280:rate=30:duration=2",
+            "-c:v", "libx264", "-preset", "veryfast", "-b:v", "550k", "-pix_fmt", "yuv420p", source,
+        ]);
+        var sourceHash = MediaTransformSeed.HashFile(source);
+        var preset = configuration.Presets.Single(item => item.Name == "video-clean") with { Crf = 18 };
+        var encoders = new List<VideoEncoder> { new("libx264", "CPU quality regression") };
+        if (OperatingSystem.IsMacOS())
+        {
+            var selected = await VideoEncoderSelector.SelectAsync(tools, configuration.Video);
+            if (selected.Name == "h264_videotoolbox") { encoders.Add(selected); }
+        }
+        foreach (var encoder in encoders)
+        {
+            var output = Path.Combine(root, "quality-regression", encoder.Name);
+            var engine = new FfmpegEngine(tools, encoder);
+            var variant = await engine.CreateVideoVariantAsync(
+                source, output, preset, 2, new FileInfo(source).Length,
+                MediaTransformSeed.Derive(sourceHash, 0), 0, sourceHash);
+            Check($"{encoder.Name} preserves 720x1280 on a small compressed source",
+                variant.MediaInfo.Width == 720 && variant.MediaInfo.Height == 1280, variant.MediaInfo);
+            Check($"{encoder.Name} allows more bytes to preserve quality",
+                new FileInfo(variant.Path).Length > new FileInfo(source).Length, new FileInfo(variant.Path).Length);
+            Check($"{encoder.Name} preserves the full clip apart from microtrim",
+                variant.MediaInfo.DurationSeconds is > 1.9 and < 2.1, variant.MediaInfo.DurationSeconds ?? 0);
+        }
+        Check("quality processing leaves the source unchanged", MediaTransformSeed.HashFile(source) == sourceHash, source);
+    }
+
+    private static async Task VerifyHdrVideoColorAsync(
+        string root, Toolchain tools, PipelineConfiguration configuration)
+    {
+        Section("HDR to SDR video color");
+        var probe = new MediaProbe(tools);
+        var preset = configuration.Presets.Single(item => item.Name == "video-clean");
+        var encoders = new List<VideoEncoder> { new("libx264", "HDR CPU regression") };
+        if (OperatingSystem.IsMacOS())
+        {
+            var selected = await VideoEncoderSelector.SelectAsync(tools, configuration.Video);
+            if (selected.Name == "h264_videotoolbox") { encoders.Add(selected); }
+        }
+        foreach (var transfer in new[] { "arib-std-b67", "smpte2084" })
+        {
+            var source = Path.Combine(root, $"hdr-{transfer}.mp4");
+            // Use 10-bit HDR frames so an accidental early conversion to 8-bit or
+            // a metadata-only fix cannot satisfy the pixel comparison below.
+            await RunRequiredAsync(tools.FFmpeg,
+            [
+                "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=12:duration=0.5",
+                "-vf", $"setparams=color_primaries=bt2020:color_trc={transfer}:colorspace=bt2020nc:range=limited",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
+                "-colorspace", "bt2020nc", "-color_primaries", "bt2020",
+                "-color_trc", transfer, "-color_range", "tv", source,
+            ]);
+            var info = await probe.ReadAsync(source);
+            Check($"probe reads {transfer} HDR color metadata",
+                info.IsHdr && info.ColorPrimaries == "bt2020" && info.PixelFormat == "yuv420p10le", info);
+            var sourceHash = MediaTransformSeed.HashFile(source);
+            foreach (var encoder in encoders)
+            {
+                var engine = new FfmpegEngine(tools, encoder);
+                var variant = await engine.CreateVideoVariantAsync(
+                    source, Path.Combine(root, "hdr-output", transfer, encoder.Name), preset,
+                    info.DurationSeconds!.Value, new FileInfo(source).Length,
+                    MediaTransformSeed.Derive(sourceHash, 0), 0, sourceHash);
+                var output = variant.MediaInfo;
+                Check($"{transfer} {encoder.Name} produces limited-range BT.709 SDR",
+                    !output.IsHdr && output.ColorTransfer == "bt709" && output.ColorSpace == "bt709" &&
+                    output.ColorPrimaries == "bt709" && output.ColorRange == "tv" &&
+                    output.PixelFormat == "yuv420p", output);
+                // Compare against the same HDR signal reduced to 8 bits without
+                // tone mapping. A tag-only fix leaves these pixels almost equal.
+                var difference = await ProcessRunner.RunAsync(tools.FFmpeg,
+                [
+                    "-v", "error", "-i", source, "-i", variant.Path,
+                    "-filter_complex",
+                    "[0:v]setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709,format=yuv420p[raw];" +
+                    "[raw][1:v]blend=all_mode=difference,signalstats,metadata=mode=print:file=-",
+                    "-frames:v", "1", "-f", "null", "-",
+                ]);
+                var average = difference.StandardOutput.Split('\n')
+                    .FirstOrDefault(line => line.StartsWith("lavfi.signalstats.YAVG="))?.Split('=')[1];
+                Check($"{transfer} {encoder.Name} converts pixels rather than only relabeling them",
+                    difference.Succeeded && double.TryParse(average, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var delta) && delta > 5,
+                    difference.CombinedOutput);
+                var colors = await ProcessRunner.RunAsync(tools.FFmpeg,
+                [
+                    "-v", "error", "-i", variant.Path,
+                    "-vf", "signalstats,metadata=mode=print:file=-",
+                    "-frames:v", "1", "-f", "null", "-",
+                ]);
+                var saturation = colors.StandardOutput.Split('\n')
+                    .FirstOrDefault(line => line.StartsWith("lavfi.signalstats.SATAVG="))?.Split('=')[1];
+                Check($"{transfer} {encoder.Name} preserves saturated HDR chart colors",
+                    colors.Succeeded && double.TryParse(saturation, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var chroma) && chroma > 40,
+                    colors.CombinedOutput);
+            }
+        }
     }
 
     private static async Task RunRequiredAsync(string executable, IReadOnlyList<string> arguments)

@@ -205,13 +205,15 @@ step and no convert folder. Drop them anywhere.
 2. A file must stop changing for `StableSeconds` before it is touched, which lets browser downloads
    finish. A `PerGroup` preset waits for the whole folder to settle instead.
 3. `.mov` and `.heic` sources are normalized first.
-4. Video is re-encoded to H.264 MP4 with AAC audio from the V2 width ladder
-   (1080 down to 160, capped by `MaxWidth`), with a deterministic 10-40 ms microtrim
+4. Video is re-encoded to H.264 MP4 with AAC audio, retaining source resolution up to
+   `MaxWidth`, with a deterministic 10-40 ms microtrim
    per copy (seeded from the source hash, so reruns plan identically). Images get a
    deterministic 2-5 permille recrop scaled back to the original dimensions with
-   lanczos, plus subtle eq variation. Both have all metadata stripped
-   (`-map_metadata -1`). Video that overshoots its `min(10MiB, source size)` fence
-   retries automatically at a lower byte target, then a lower rung.
+   lanczos, plus subtle eq variation. FFmpeg drops source metadata, and ExifTool
+   strips JPEG metadata, including the encoder comment, before publication. CPU encoding
+   uses `Crf` and `X264Preset`. Apple hardware encoding uses `VideoToolboxBitrateKbps`.
+   Videos are never automatically reduced
+   to fit the original file size. Outputs can be larger than their sources.
 5. Outputs land in `output`, arranged according to `Grouping`.
 6. The source moves to `original`, or to `failed` if anything went wrong.
 

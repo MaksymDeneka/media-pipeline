@@ -4,6 +4,34 @@ import XCTest
 
 @MainActor
 final class ActivityStoreTests: XCTestCase {
+    func testSavedMediaRequestFindsItsConfirmedOutputAmongOtherJobs() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("activity-saved-media-\(UUID().uuidString)")
+        let logs = root.appendingPathComponent("logs", isDirectory: true)
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let now = Date()
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd"
+        let log = logs.appendingPathComponent("events-\(formatter.string(from: now)).jsonl")
+        try """
+        {"ts":"2026-08-29T10:00:00Z","ev":"job.variant","jobId":"quick","file":"photo.jpg","output":"intermediate.jpg"}
+        {"ts":"2026-08-29T10:00:01Z","ev":"job.done","jobId":"quick","requestId":"quick-request","outputs":1,"output":"set/photo.jpg"}
+        {"ts":"2026-08-29T10:00:02Z","ev":"job.start","jobId":"batch","requestId":"batch-request","files":["photo.jpg"]}
+        {"ts":"2026-08-29T10:00:03Z","ev":"job.done","jobId":"batch","requestId":"batch-request","outputs":2}
+
+        """.write(to: log, atomically: true, encoding: .utf8)
+
+        let store = ActivityStore()
+        store.refresh(pipelineRoot: root, now: now)
+
+        let quick = try XCTUnwrap(store.job(forRequest: "quick-request"))
+        XCTAssertEqual(quick.state, .done)
+        XCTAssertEqual(quick.outputPaths, ["set/photo.jpg"])
+        XCTAssertEqual(store.job(forRequest: "batch-request")?.outputCount, 2)
+    }
+
     func testJobSurvivesDailyEventRollover() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("activity-rollover-\(UUID().uuidString)")

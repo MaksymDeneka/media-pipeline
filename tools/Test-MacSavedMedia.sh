@@ -15,6 +15,9 @@ swiftc -parse-as-library -swift-version 5 -j "${HEATUP_LOCAL_TEST_WORKERS:-2}" -
     "$repo_root/macos-app/Sources/MediaPipelineMac/WorkerClient.swift" \
     "$repo_root/macos-app/Sources/MediaPipelineMac/SavedMediaStore.swift" \
     "$repo_root/macos-app/Sources/MediaPipelineMac/MediaThumbnail.swift" \
+    "$repo_root/macos-app/Sources/MediaPipelineMac/ConfigurationStore.swift" \
+    "$repo_root/macos-app/Sources/MediaPipelineMac/AppPaths.swift" \
+    "$repo_root/macos-app/Sources/MediaPipelineMac/UploadStore.swift" \
     "$script_dir/Test-MacSavedMedia.swift" \
     -o "$scratch/saved-media-self-test"
 "$scratch/saved-media-self-test"
