@@ -27,6 +27,8 @@ public sealed record MediaInfo
 
 public sealed class MediaProbe(Toolchain tools)
 {
+    private volatile string? _streamEntries;
+
     public Task<MediaInfo> ReadAsync(string path, CancellationToken cancellationToken = default) =>
         ReadAsync(path, readFirstFrame: false, cancellationToken);
 
@@ -35,7 +37,7 @@ public sealed class MediaProbe(Toolchain tools)
 
     private async Task<MediaInfo> ReadAsync(string path, bool readFirstFrame, CancellationToken cancellationToken)
     {
-        const string streamEntries = "stream=codec_type,codec_name,width,height,duration,nb_frames,pix_fmt,color_space,color_transfer,color_primaries,color_range:stream_tags=rotate:stream_side_data=rotation:stream_group=type:stream_group_component=width,height:stream_group_side_data=rotation:format=duration,format_name:format_tags=major_brand";
+        var streamEntries = _streamEntries ?? await DiscoverStreamEntriesAsync(cancellationToken);
         string[] frameArgs = readFirstFrame ? ["-select_streams", "v:0", "-read_intervals", "%+#1"] : [];
         var result = await ProcessRunner.RunAsync(
             tools.FFprobe,
@@ -156,6 +158,30 @@ public sealed class MediaProbe(Toolchain tools)
                 ColorRange = videoStream.HasValue ? ReadString(videoStream.Value, "color_range") : null,
             };
         }
+    }
+
+    private async Task<string> DiscoverStreamEntriesAsync(CancellationToken cancellationToken)
+    {
+        var result = await ProcessRunner.RunAsync(tools.FFprobe, ["-v", "error", "-sections"], cancellationToken);
+        var entries = "stream=codec_type,codec_name,width,height,duration,nb_frames,pix_fmt,color_space,color_transfer,color_primaries,color_range:stream_tags=rotate:stream_side_data=rotation:format=duration,format_name:format_tags=major_brand";
+        if (!result.Succeeded)
+        {
+            return entries;
+        }
+
+        // FFprobe rejects the entire query if it names a section the installed version lacks.
+        var sections = result.StandardOutput.Split('\n', StringSplitOptions.TrimEntries);
+        if (sections.Any(section => section.EndsWith("/stream_group_component", StringComparison.Ordinal)))
+        {
+            entries += ":stream_group=type:stream_group_component=width,height";
+            if (sections.Any(section => section.EndsWith("/stream_group_side_data", StringComparison.Ordinal)))
+            {
+                entries += ":stream_group_side_data=rotation";
+            }
+        }
+
+        _streamEntries = entries;
+        return entries;
     }
 
     /// <summary>
